@@ -2,12 +2,15 @@
 """
 trader-gold-btc: autotrader_pipeline.py
 Method 1: The Deterministic Hard-Asset Pipeline Engine for Gold (XAU) & Bitcoin (BTC).
+Now integrated with the SelfLearningEngine for adaptive weight optimization.
 
 Stages:
   1. Structural Location Scan (Golden Pocket 0.618 Fib, 50/200 SMA)
   2. Microstructure Anti-Trap Filter (Bull/Bear Trap Wick Analysis)
   3. Macro & Momentum Context (DXY, 10Y Yield, RSI, Mayer Multiple, Fear & Greed)
-  4. Confluence Scoring (10-Point Veto Matrix) & Exact Order Ticket Generator (Entry, Stop, TP)
+  4. Dual Confluence Scoring:
+     - 10-Point Deterministic Baseline Veto Matrix
+     - Adaptive Learned Confluence Score (via self_learning.py)
 """
 
 import warnings
@@ -16,6 +19,10 @@ import os
 os.environ["PYTHONWARNINGS"] = "ignore"
 import logging
 logging.captureWarnings(True)
+
+import sys
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 import argparse
 import json
@@ -27,8 +34,17 @@ import numpy as np
 try:
     import yfinance as yf
 except ImportError:
-    print("❌ yfinance required. Run: pip install yfinance")
-    exit(1)
+    print("❌ yfinance required. Run: py -3.11 -m pip install yfinance")
+    sys.exit(1)
+
+# Import Self-Learning Engine
+try:
+    from self_learning import SelfLearningEngine
+    LEARNING_AVAILABLE = True
+    learning_engine = SelfLearningEngine()
+except Exception:
+    LEARNING_AVAILABLE = False
+    learning_engine = None
 
 
 def compute_rsi(series, period: int = 14) -> float:
@@ -68,123 +84,151 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
     recent_60 = hist.tail(60)
     sw_high = recent_60["High"].max()
     sw_low = recent_60["Low"].min()
-    sw_range = sw_high - sw_low
+    fib_500 = sw_high - 0.500 * (sw_high - sw_low)
+    fib_618 = sw_high - 0.618 * (sw_high - sw_low)
+    fib_650 = sw_high - 0.650 * (sw_high - sw_low)
 
-    fib_500 = sw_high - 0.500 * sw_range
-    fib_618 = sw_high - 0.618 * sw_range
-    fib_650 = sw_high - 0.650 * sw_range
-
-    # In Golden Pocket? (within 2% of 0.618-0.650 zone)
     in_golden_pocket = (curr >= fib_650 * 0.985) and (curr <= fib_618 * 1.02)
 
-    # STAGE 2: MICROSTRUCTURE & TRAP FILTER
-    last_bar = hist.iloc[-1]
-    o, h, l, c = last_bar["Open"], last_bar["High"], last_bar["Low"], last_bar["Close"]
-    tot_rng = h - l if (h - l) > 0 else 1
-    upper_wick = h - max(o, c)
-    lower_wick = min(o, c) - l
+    # STAGE 2: ANTI-TRAP VERIFICATION
+    curr_bar = hist.iloc[-1]
+    c_open, c_high, c_low, c_close = curr_bar["Open"], curr_bar["High"], curr_bar["Low"], curr_bar["Close"]
+    c_range = c_high - c_low
+    upper_wick = c_high - max(c_open, c_close)
+    lower_wick = min(c_open, c_close) - c_low
 
     trap_state = "CLEAN"
-    if h >= sw_high * 0.998 and c < sw_high and (upper_wick / tot_rng) >= 0.40:
-        trap_state = "BULL_TRAP"
-    elif l <= sw_low * 1.002 and c > sw_low and (lower_wick / tot_rng) >= 0.40:
-        trap_state = "BEAR_TRAP_SPRING"
+    if c_range > 0:
+        if (upper_wick / c_range >= 0.40) and (curr >= fib_500):
+            trap_state = "BULL_TRAP"
+        elif (lower_wick / c_range >= 0.40) and (curr <= fib_650):
+            trap_state = "BEAR_TRAP"
 
-    # STAGE 3: MACRO & MOMENTUM
+    # STAGE 3: ASSET SPECIFIC METRICS
     rsi = compute_rsi(hist["Close"], 14)
-    returns = hist["Close"].pct_change().dropna()
-    ann_factor = 365 if asset_type == "BTC" else 252
-    vol30 = float(returns.tail(30).std() * np.sqrt(ann_factor) * 100)
-    mayer = float(curr / ma200) if not np.isnan(ma200) and ma200 > 0 else 1.0
+    mayer = (curr / ma200) if not np.isnan(ma200) and ma200 > 0 else 1.0
+    daily_rets = hist["Close"].pct_change().dropna()
+    vol30 = float(daily_rets.tail(30).std() * np.sqrt(365) * 100) if len(daily_rets) >= 30 else 30.0
 
-    # STAGE 4: CONFLUENCE SCORING
+    # STAGE 4: CONFLUENCE SCORING & ACTIVE FEATURES
     score = 0
     factors = []
 
     if asset_type == "BTC":
-        if dxy_chg < 0.2:
-            score += 1
-            factors.append("Macro: DXY favorable (USD weakness/neutral)")
-        if tnx_chg < 1.0:
-            score += 1
-            factors.append("Macro: 10Y Yields controlled")
-        if curr > ma200:
-            score += 1
-            factors.append(f"Trend: Above 200 SMA (${ma200:,.0f})")
-        if 0.85 <= mayer <= 1.50:
-            score += 1
-            factors.append(f"Valuation: Mayer Multiple healthy ({mayer:.2f})")
-        if 40 <= rsi <= 65:
-            score += 1
-            factors.append(f"Momentum: RSI in healthy expansion zone ({rsi:.1f})")
-        if in_golden_pocket:
-            score += 1
-            factors.append("Level: Resting in Golden Pocket (0.618 Fib)")
-        if 25 <= fg_val <= 70:
-            score += 1
-            factors.append(f"Sentiment: Fear & Greed balanced ({fg_val})")
-        if trap_state != "BULL_TRAP":
-            score += 1
-            factors.append("Microstructure: Zero Bull Trap rejection")
-        if curr > ma50:
-            score += 1
-            factors.append("Momentum: Above 50 SMA")
-        if vol30 < 75:
-            score += 1
-            factors.append(f"Risk: Volatility normalized ({vol30:.1f}%)")
+        feat_dxy = dxy_chg < 0.2
+        feat_yield = tnx_chg < 1.0
+        feat_ma200 = curr > ma200
+        feat_mayer = 0.85 <= mayer <= 1.50
+        feat_rsi = 40 <= rsi <= 65
+        feat_fg = 25 <= fg_val <= 70
+        feat_no_trap = trap_state != "BULL_TRAP"
+        feat_ma50 = curr > ma50
+        feat_vol = vol30 < 75
+        feat_near_support = (curr - sw_low) / curr <= 0.05
+
+        if feat_dxy: score += 1; factors.append("Macro: DXY favorable (USD weakness/neutral)")
+        if feat_yield: score += 1; factors.append("Macro: 10Y Yields controlled")
+        if feat_ma200: score += 1; factors.append(f"Trend: Above 200 SMA (${ma200:,.0f})")
+        if feat_mayer: score += 1; factors.append(f"Valuation: Mayer Multiple healthy ({mayer:.2f})")
+        if feat_rsi: score += 1; factors.append(f"Momentum: RSI in healthy expansion zone ({rsi:.1f})")
+        if in_golden_pocket: score += 1; factors.append("Level: Resting in Golden Pocket (0.618 Fib)")
+        if feat_fg: score += 1; factors.append(f"Sentiment: Fear & Greed balanced ({fg_val})")
+        if feat_no_trap: score += 1; factors.append("Microstructure: Zero Bull Trap rejection")
+        if feat_ma50: score += 1; factors.append("Momentum: Above 50 SMA")
+        if feat_vol: score += 1; factors.append(f"Risk: Volatility normalized ({vol30:.1f}%)")
+
+        active_features = {
+            "in_golden_pocket": bool(in_golden_pocket),
+            "no_trap": bool(feat_no_trap),
+            "macro_dxy_tailwind": bool(feat_dxy),
+            "macro_yield_tailwind": bool(feat_yield),
+            "trend_ma200": bool(feat_ma200),
+            "trend_ma50": bool(feat_ma50),
+            "rsi_sweet_spot": bool(feat_rsi),
+            "mayer_sweet_spot": bool(feat_mayer),
+            "gsr_undervalued": False,
+            "volatility_orderly": bool(feat_vol),
+            "near_swing_support": bool(feat_near_support)
+        }
 
     else:  # GOLD
-        if dxy_chg <= 0.05:
-            score += 1
-            factors.append("Macro: DXY weakness (Gold tailwind)")
-        if tnx_chg <= 0.2:
-            score += 1
-            factors.append("Macro: 10Y Yields easing (Real yield tailwind)")
-        if curr > ma200:
-            score += 1
-            factors.append(f"Trend: Above 200 SMA (${ma200:,.0f})")
-        if curr > ma50:
-            score += 1
-            factors.append("Trend: Above 50 SMA")
-        if 40 <= rsi <= 60:
-            score += 1
-            factors.append(f"Momentum: RSI pullback sweet spot ({rsi:.1f})")
-        if in_golden_pocket:
-            score += 1
-            factors.append("Level: Resting in Golden Pocket (0.618 Fib)")
-        if gsr >= 75:
-            score += 1
-            factors.append(f"Metals Value: GSR elevated ({gsr:.1f}x)")
-        if vol30 < 22:
-            score += 1
-            factors.append(f"Risk: Orderly volatility ({vol30:.1f}%)")
-        if trap_state != "BULL_TRAP":
-            score += 1
-            factors.append("Microstructure: Clean auction; no Bull Trap")
-        if (curr - sw_low) / curr <= 0.05:
-            score += 1
-            factors.append("Structure: Near major swing support floor")
+        feat_dxy = dxy_chg <= 0.05
+        feat_yield = tnx_chg <= 0.2
+        feat_ma200 = curr > ma200
+        feat_ma50 = curr > ma50
+        feat_rsi = 40 <= rsi <= 60
+        feat_gsr = gsr >= 75
+        feat_vol = vol30 < 22
+        feat_no_trap = trap_state != "BULL_TRAP"
+        feat_near_support = (curr - sw_low) / curr <= 0.05
 
-    # Generate Verdict & Order Ticket
-    if score >= 9:
+        if feat_dxy: score += 1; factors.append("Macro: DXY weakness (Gold tailwind)")
+        if feat_yield: score += 1; factors.append("Macro: 10Y Yields easing (Real yield tailwind)")
+        if feat_ma200: score += 1; factors.append(f"Trend: Above 200 SMA (${ma200:,.0f})")
+        if feat_ma50: score += 1; factors.append("Trend: Above 50 SMA")
+        if feat_rsi: score += 1; factors.append(f"Momentum: RSI pullback sweet spot ({rsi:.1f})")
+        if in_golden_pocket: score += 1; factors.append("Level: Resting in Golden Pocket (0.618 Fib)")
+        if feat_gsr: score += 1; factors.append(f"Metals Value: GSR elevated ({gsr:.1f}x)")
+        if feat_vol: score += 1; factors.append(f"Risk: Orderly volatility ({vol30:.1f}%)")
+        if feat_no_trap: score += 1; factors.append("Microstructure: Clean auction; no Bull Trap")
+        if feat_near_support: score += 1; factors.append("Structure: Near major swing support floor")
+
+        active_features = {
+            "in_golden_pocket": bool(in_golden_pocket),
+            "no_trap": bool(feat_no_trap),
+            "macro_dxy_tailwind": bool(feat_dxy),
+            "macro_yield_tailwind": bool(feat_yield),
+            "trend_ma200": bool(feat_ma200),
+            "trend_ma50": bool(feat_ma50),
+            "rsi_sweet_spot": bool(feat_rsi),
+            "mayer_sweet_spot": False,
+            "gsr_undervalued": bool(feat_gsr),
+            "volatility_orderly": bool(feat_vol),
+            "near_swing_support": bool(feat_near_support)
+        }
+
+    # Adaptive Self-Learned Confluence Score
+    if LEARNING_AVAILABLE and learning_engine:
+        adaptive_score, breakdown = learning_engine.calculate_score(asset_type, active_features)
+    else:
+        adaptive_score = float(score)
+        breakdown = []
+
+    # Final Execution Verdict (Considers both base score & learned adaptive weights)
+    final_score = max(score, int(round(adaptive_score)))
+    if final_score >= 9:
         verdict = "A+ SETUP (EXECUTE ORDER)"
         action = "BUY"
-    elif score >= 7:
+    elif final_score >= 7:
         verdict = "B SETUP (HALF SIZE)"
         action = "BUY_HALF"
     else:
         verdict = "VETOED (WAIT FOR CONFLUENCE)"
         action = "STAND_ASIDE"
 
-    # Calculate exact Order Parameters with tight Golden Pocket Invalidation
+    # Invalidation & Target Calculation
     if in_golden_pocket:
-        stop_loss = fib_650 * 0.985  # Tucked tightly just beneath the 0.65 Golden Pocket boundary
+        stop_loss = fib_650 * 0.985
         tp1 = fib_500 if curr < fib_500 * 0.98 else sw_high * 0.98
         tp2 = sw_high
     else:
         stop_loss = sw_low * 0.985
         tp1 = fib_500
         tp2 = sw_high
+
+    # Log signal to self-learning journal if actionable
+    trade_id = None
+    if action in ("BUY", "BUY_HALF") and LEARNING_AVAILABLE and learning_engine:
+        trade_id = learning_engine.log_signal(
+            asset=asset_type,
+            symbol=symbol,
+            entry=curr,
+            sl=stop_loss,
+            tp1=tp1,
+            tp2=tp2,
+            score=adaptive_score,
+            active_features=active_features
+        )
 
     return {
         "asset": asset_type,
@@ -199,9 +243,13 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
         "in_golden_pocket": in_golden_pocket,
         "trap_state": trap_state,
         "score": score,
+        "adaptive_score": adaptive_score,
+        "active_features": active_features,
+        "breakdown": breakdown,
         "factors": factors,
         "verdict": verdict,
         "action": action,
+        "trade_id": trade_id,
         "order_ticket": {
             "entry": curr,
             "stop_loss": stop_loss,
@@ -217,6 +265,8 @@ def run_pipeline():
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n" + "═" * 78)
     print(f"  ⚡ HARD-ASSET AUTOTRADER PIPELINE (METHOD 1) | {timestamp}")
+    if LEARNING_AVAILABLE:
+        print(f"  🧠 Self-Learning Adaptive Engine: ACTIVE (Memory: learning_memory.json)")
     print("═" * 78)
 
     # Global Macro Inputs
@@ -247,11 +297,13 @@ def run_pipeline():
         icon = "₿" if asset_type == "BTC" else "🥇"
         status_color = "🟢" if "EXECUTE" in res['verdict'] else "🟡" if "HALF" in res['verdict'] else "🔴"
 
+        gp_low, gp_high = res['golden_pocket']
+        loc_str = f"✅ INSIDE Golden Pocket (${gp_low:,.0f} - ${gp_high:,.0f})" if res['in_golden_pocket'] else "Outside Golden Pocket"
         print(f"\n{icon} {asset_type} ({sym}) ──► Price: ${res['price']:,.2f}")
-        print(f"   • Structural Location : {'✅ INSIDE Golden Pocket ($' + f'{res['golden_pocket'][0]:,.0f} - ${res['golden_pocket'][1]:,.0f})' if res['in_golden_pocket'] else 'Outside Golden Pocket'}")
+        print(f"   • Structural Location : {loc_str}")
         print(f"   • Microstructure Trap : {res['trap_state']}")
         print(f"   • Trend & Momentum    : 200 SMA: ${res['ma200']:,.0f} | RSI: {res['rsi']:.1f}" + (f" | Mayer: {res['mayer']:.2f}x" if asset_type == 'BTC' else ""))
-        print(f"   • Confluence Score    : {res['score']}/10 ──► {status_color} {res['verdict']}")
+        print(f"   • Confluence Score    : {res['score']}/10 (Base) | {res['adaptive_score']:.1f}/10 (Learned) ──► {status_color} {res['verdict']}")
 
         if res['action'] in ("BUY", "BUY_HALF"):
             ot = res['order_ticket']
