@@ -18,6 +18,7 @@ config_telegram.local.json
 # Logs & temp files
 *.log
 *.tmp
+*.exe
 .DS_Store
 Thumbs.db
 learning_memory.json
