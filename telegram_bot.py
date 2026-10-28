@@ -650,6 +650,15 @@ def auto_scanner_worker(token: str, chat_id_getter):
                 print(f"🚨 [{datetime.now().strftime('%H:%M:%S')}] A+ Setup Detected! Broadcasting Telegram alert...")
                 alert_text = "🚨 *INSTITUTIONAL TRADE ALERT (SCORE >= 8/10)*\n\n" + format_scan_summary(data)
                 send_message(token, target_chat_id, alert_text)
+                if CHARTS_AVAILABLE:
+                    if b['is_a_plus']:
+                        b_buf = generate_mt5_chart("BTC-USD", "BITCOIN (BTC-USD)")
+                        if b_buf:
+                            send_telegram_chart(token, target_chat_id, b_buf, f"📊 MT5 Chart Alert: Bitcoin (${b['price']:,.2f}) | {b['verdict']}")
+                    if g['is_a_plus']:
+                        g_buf = generate_mt5_chart("GC=F", "GOLD (XAU/USD)")
+                        if g_buf:
+                            send_telegram_chart(token, target_chat_id, g_buf, f"📊 MT5 Chart Alert: Gold (${g['price']:,.2f}) | {g['verdict']}")
         except Exception:
             time.sleep(10)
 
@@ -720,47 +729,32 @@ def start_bot():
                             f"🚀 *All-Skills Quantitative Hard-Asset Bot*\n\n"
                             f"Welcome {sender_name}! All 12 trading skills are actively combined and monitoring Gold & Bitcoin.\n\n"
                             f"Commands:\n"
-                            f"• `/scan` - Full multi-skill audit for Gold & BTC\n"
-                            f"• `/chart` - Visual MT5 Candlestick Chart for Bitcoin\n"
-                            f"• `/chart_gold` - Visual MT5 Candlestick Chart for Gold\n"
-                            f"• `/btc` - Deep Bitcoin audit (Levels, Mayer, FVG, Risk)\n"
-                            f"• `/gold` - Deep Gold audit (GSR, Yields, Levels, Risk)\n"
+                            f"• `/scan` - Full multi-skill audit for Gold & BTC (with default MT5 Charts)\n"
+                            f"• `/btc` - Deep Bitcoin audit with MT5 Chart & Trade Ticket\n"
+                            f"• `/gold` - Deep Gold audit with MT5 Chart & Trade Ticket\n"
                             f"• `/levels` - Institutional S/R, Pivots & Golden Pocket\n"
                             f"• `/traps` - Wyckoff trap inspection (Springs & Upthrusts)\n"
                             f"• `/debate` - Adversarial Bull vs. Bear debate\n"
                             f"• `/macro` - Global macro radar (DXY, 10Y Yield, GSR, VIX)\n"
                             f"• `/learn` - View adaptive weights & win rates\n"
                             f"• `/train` - Run walk-forward self-calibration\n\n"
-                            f"🔔 *Automated Alerts:* Active! You will receive instant notifications whenever an A+ setup (≥8/10) appears."
+                            f"🔔 *Automated Alerts:* Active! You will receive instant notifications and MT5 charts whenever an A+ setup (≥8/10) appears."
                         )
                         send_message(token, sender_id, welcome)
 
                     elif msg_text.startswith("/scan"):
-                        send_message(token, sender_id, "⏳ Running multi-skill quantitative scan...")
+                        send_message(token, sender_id, "⏳ Running multi-skill quantitative scan & generating MT5 charts...")
                         data = run_full_pipeline()
                         send_message(token, sender_id, format_scan_summary(data))
 
-                    elif msg_text.startswith("/chart_btc") or msg_text.strip() == "/chart":
+                        # Default MT5 chart scan attached automatically
                         if CHARTS_AVAILABLE:
-                            send_message(token, sender_id, "📈 Rendering MT5-style Candlestick Chart for Bitcoin...")
-                            buf = generate_mt5_chart("BTC-USD", "BITCOIN (BTC-USD)")
-                            if buf:
-                                send_telegram_chart(token, sender_id, buf, "📊 MT5 Chart Scan: Bitcoin (BTC-USD) | 50/200 SMA | Golden Pocket (0.618-0.65)")
-                            else:
-                                send_message(token, sender_id, "⚠️ Failed to render Bitcoin chart.")
-                        else:
-                            send_message(token, sender_id, "⚠️ Matplotlib not installed for chart rendering. Run: pip install matplotlib")
-
-                    elif msg_text.startswith("/chart_gold"):
-                        if CHARTS_AVAILABLE:
-                            send_message(token, sender_id, "📈 Rendering MT5-style Candlestick Chart for Gold...")
-                            buf = generate_mt5_chart("GC=F", "GOLD (XAU/USD)")
-                            if buf:
-                                send_telegram_chart(token, sender_id, buf, "📊 MT5 Chart Scan: Gold (XAU/USD) | 50/200 SMA | Golden Pocket (0.618-0.65)")
-                            else:
-                                send_message(token, sender_id, "⚠️ Failed to render Gold chart.")
-                        else:
-                            send_message(token, sender_id, "⚠️ Matplotlib not installed for chart rendering. Run: pip install matplotlib")
+                            b_buf = generate_mt5_chart("BTC-USD", "BITCOIN (BTC-USD)")
+                            if b_buf:
+                                send_telegram_chart(token, sender_id, b_buf, f"📊 MT5 Chart Scan: Bitcoin (${data['btc']['price']:,.2f}) | {data['btc']['verdict']}")
+                            g_buf = generate_mt5_chart("GC=F", "GOLD (XAU/USD)")
+                            if g_buf:
+                                send_telegram_chart(token, sender_id, g_buf, f"📊 MT5 Chart Scan: Gold (${data['gold']['price']:,.2f}) | {data['gold']['verdict']}")
 
                     elif msg_text.startswith("/btc"):
                         data = run_full_pipeline()
@@ -786,6 +780,10 @@ def start_bot():
                             f"• Risk/Reward: 1:{b['rr']:.2f}"
                         )
                         send_message(token, sender_id, ticket)
+                        if CHARTS_AVAILABLE:
+                            b_buf = generate_mt5_chart("BTC-USD", "BITCOIN (BTC-USD)")
+                            if b_buf:
+                                send_telegram_chart(token, sender_id, b_buf, f"📊 MT5 Chart: Bitcoin (${b['price']:,.2f})")
 
                     elif msg_text.startswith("/gold"):
                         data = run_full_pipeline()
@@ -812,6 +810,10 @@ def start_bot():
                             f"• Risk/Reward: 1:{g['rr']:.2f}"
                         )
                         send_message(token, sender_id, ticket)
+                        if CHARTS_AVAILABLE:
+                            g_buf = generate_mt5_chart("GC=F", "GOLD (XAU/USD)")
+                            if g_buf:
+                                send_telegram_chart(token, sender_id, g_buf, f"📊 MT5 Chart: Gold (${g['price']:,.2f})")
 
                     elif msg_text.startswith("/levels"):
                         data = run_full_pipeline()
