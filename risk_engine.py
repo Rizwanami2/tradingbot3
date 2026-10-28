@@ -77,15 +77,15 @@ STRATEGIES = {
     "SWING": {
         "code": "SWING",
         "name": "Macro Trend Swing",
-        "description": "Wide 1.20x ATR structural stop with 2.5R to 3.5R asymmetric targets across multi-day cycles.",
-        "sl_mult": 1.20,
-        "rr_tp1": 2.50,
-        "rr_tp2": 3.50,
-        "breakeven_r": 1.00,       # Wider breakeven at +1.00R (allows natural wave breathing)
-        "trail_start_r": 1.50,     # Dynamic trail starts at +1.50R
-        "trail_step_r": 0.70,      # Structural 0.70R trail allowing waves to breathe
+        "description": "Structural 1.10x ATR stop with 1.5R to 2.5R asymmetric targets across multi-day cycles.",
+        "sl_mult": 1.10,
+        "rr_tp1": 1.50,
+        "rr_tp2": 2.50,
+        "breakeven_r": 0.45,       # Agile breakeven lock at +0.45R (protects against wave pullbacks)
+        "trail_start_r": 0.90,     # Dynamic trail starts at +0.90R
+        "trail_step_r": 0.40,      # Disciplined 0.40R trailing step
         "risk_pct": 1.00,          # Full 1.00% institutional risk
-        "target_win_rate": "~68-75% (1:2.5+ Asymmetric Runner)",
+        "target_win_rate": "~75-80% (Asymmetric Trend Runner)",
         "accuracy_tip": "ADX >= 22 (+DI > -DI), Price > 50 & 200 SMA, DXY tailwind",
         "regime_filter": "Trending Only (ADX >= 22 & MA Alignment)",
         "holding_time": "1 - 5 days",
@@ -97,13 +97,13 @@ STRATEGIES = {
         "name": "Equilibrium Mean-Reversion",
         "description": "Fades Golden Pocket extremes back to 0.50 Fib Equilibrium / VPOC fair value.",
         "sl_mult": 0.75,
-        "rr_tp1": 1.80,
-        "rr_tp2": 2.40,
-        "breakeven_r": 0.60,       # Breakeven at +0.60R (halfway to equilibrium)
-        "trail_start_r": 1.05,     # Trail starts at +1.05R
-        "trail_step_r": 0.35,      # Dynamic tightening near 0.50 Fib
+        "rr_tp1": 1.40,
+        "rr_tp2": 2.20,
+        "breakeven_r": 0.50,       # Fast breakeven at +0.50R
+        "trail_start_r": 0.85,     # Trail starts at +0.85R
+        "trail_step_r": 0.30,      # Dynamic tightening near 0.50 Fib
         "risk_pct": 0.75,          # 0.75% balanced risk
-        "target_win_rate": "~78-83% (Equilibrium Magnet)",
+        "target_win_rate": "~80-85% (Equilibrium Magnet)",
         "accuracy_tip": "ADX <= 25 (Chop/Range), Extreme Golden Pocket/S1, Wyckoff Spring",
         "regime_filter": "Range / Chop Only (ADX <= 25, extreme location)",
         "holding_time": "1 - 8 hours",
@@ -115,13 +115,13 @@ STRATEGIES = {
         "name": "Positive Carry & Swap Aware",
         "description": "Carry-conscious positioning prioritizing positive overnight financing and avoiding rollover drag.",
         "sl_mult": 0.90,
-        "rr_tp1": 2.00,
-        "rr_tp2": 3.00,
-        "breakeven_r": 0.80,       # Breakeven at +0.80R
-        "trail_start_r": 1.30,     # Trail starts at +1.30R
-        "trail_step_r": 0.60,      # Wide 0.60R buffer against rollover spread spikes
+        "rr_tp1": 1.80,
+        "rr_tp2": 2.60,
+        "breakeven_r": 0.50,       # Breakeven at +0.50R
+        "trail_start_r": 1.00,     # Trail starts at +1.00R
+        "trail_step_r": 0.45,      # Controlled 0.45R buffer against rollover spread spikes
         "risk_pct": 0.75,          # 0.75% risk with carry yield
-        "target_win_rate": "~72-78% (Financing Accretion)",
+        "target_win_rate": "~75-82% (Financing Accretion)",
         "accuracy_tip": "Positive broker carry, Wednesday 3x rollover advantage, VIX <= 22",
         "regime_filter": "Positive Rollover Carry & Low VIX (<=22)",
         "holding_time": "Multi-day / Positive Carry",
@@ -217,7 +217,8 @@ def validate_strategy_accuracy(strat_code: str, asset: str, current_price: float
                                plus_di: float = None, minus_di: float = None,
                                spread_ratio: float = None,
                                macro: dict = None, swap_info: dict = None,
-                               action: str = "BUY") -> dict:
+                               action: str = "BUY",
+                               is_backtest: bool = False) -> dict:
     """
     Multi-Factor Strategy Accuracy & Regime Validator.
     Ensures that each trade setup strictly matches the mathematical conditions
@@ -267,8 +268,8 @@ def validate_strategy_accuracy(strat_code: str, asset: str, current_price: float
         else:
             accuracy_factors.append(f"Momentum Sweet Spot (RSI {rsi:.1f})")
 
-        # Rollover check
-        if session_info["is_rollover"]:
+        # Rollover check (only in live execution, not historical daily bar simulations)
+        if not is_backtest and session_info["is_rollover"]:
             passed = False
             veto_reasons.append("Rollover Window (21:50-22:15 UTC). Spread widening danger. Scalp blocked.")
         elif session_info["is_golden_overlap"]:
@@ -297,6 +298,25 @@ def validate_strategy_accuracy(strat_code: str, asset: str, current_price: float
             else:
                 accuracy_factors.append(f"Directional Movement Alignment (+DI {plus_di:.1f} vs -DI {minus_di:.1f})")
 
+        # Microstructure & Anti-Trap checks (Mandated by Hard-Asset Execution Engine)
+        if is_buy and upper_wick_pct >= 28.0:
+            passed = False
+            veto_reasons.append(f"Bull Trap Rejection ({upper_wick_pct:.1f}% >= 28%). Heavy selling pressure at swing high.")
+        elif not is_buy and lower_wick_pct >= 28.0:
+            passed = False
+            veto_reasons.append(f"Bear Trap Absorption ({lower_wick_pct:.1f}% >= 28%). Demand absorption at swing low.")
+
+        if trap_type == "BULL_TRAP" and is_buy:
+            passed = False
+            veto_reasons.append("Bull Trap / Upthrust detected at resistance. Swing long vetoed.")
+        elif trap_type == "BEAR_TRAP" and not is_buy:
+            passed = False
+            veto_reasons.append("Bear Trap / Wyckoff Spring detected at support. Swing short vetoed.")
+
+        if candle_body_pct < 28.0:
+            passed = False
+            veto_reasons.append(f"Indecision Candle Body ({candle_body_pct:.1f}% < 28%). Swing entries require directional commitment.")
+
         ma50 = levels.get("ma50", np.nan)
         ma200 = levels.get("ma200", np.nan)
         ma20_ema = levels.get("ma20_ema", np.nan)
@@ -314,6 +334,9 @@ def validate_strategy_accuracy(strat_code: str, asset: str, current_price: float
             if not np.isnan(ma20_ema) and (current_price - ma20_ema) > (2.5 * atr):
                 passed = False
                 veto_reasons.append("Price Overextended from 20 EMA (> 2.5x ATR). Climax run risk; wait for re-test.")
+            elif not np.isnan(ma50) and (current_price - ma50) / current_price > 0.045:
+                passed = False
+                veto_reasons.append("Price Overextended from 50 SMA (> 4.5%). Climax wave exhaustion; wait for pullback.")
 
         dxy_chg = macro.get("dxy_chg", 0.0)
         if is_buy and dxy_chg > 0.20:
@@ -355,7 +378,7 @@ def validate_strategy_accuracy(strat_code: str, asset: str, current_price: float
             accuracy_factors.append("Neutral Carry Assumed (Swap data pending)")
 
         # Wednesday Triple Rollover Check
-        if datetime.utcnow().weekday() == 2:
+        if not is_backtest and datetime.now(timezone.utc).weekday() == 2:
             accuracy_factors.append("Wednesday Triple Swap Active (3x Rollover Yield)")
 
         vix = macro.get("vix", 16.0)

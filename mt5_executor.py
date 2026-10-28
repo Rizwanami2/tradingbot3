@@ -400,21 +400,21 @@ class MT5LiveBroker:
         },
         "SWING": {
             "name": "SWING",
-            "breakeven_r": 1.00,
-            "trail_start_r": 1.50,
-            "trail_step_r": 0.70,
+            "breakeven_r": 0.45,
+            "trail_start_r": 0.90,
+            "trail_step_r": 0.40,
         },
         "BALANCE": {
             "name": "BALANCE",
-            "breakeven_r": 0.60,
-            "trail_start_r": 1.05,
-            "trail_step_r": 0.35,
+            "breakeven_r": 0.50,
+            "trail_start_r": 0.85,
+            "trail_step_r": 0.30,
         },
         "SWAP": {
             "name": "SWAP",
-            "breakeven_r": 0.80,
-            "trail_start_r": 1.30,
-            "trail_step_r": 0.60,
+            "breakeven_r": 0.50,
+            "trail_start_r": 1.00,
+            "trail_step_r": 0.45,
         }
     }
 

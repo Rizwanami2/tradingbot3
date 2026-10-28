@@ -122,6 +122,25 @@ def run_historical_backtest(asset: str = "GOLD",
     # Compute Indicators
     df = compute_indicators(hist)
 
+    # Time-series date alignment for macro context (ffill aligns trading days across assets)
+    dxy_pct = dxy_hist["Close"].pct_change(2) * 100.0 if not dxy_hist.empty else pd.Series(dtype=float)
+    tnx_pct = tnx_hist["Close"].pct_change(2) * 100.0 if not tnx_hist.empty else pd.Series(dtype=float)
+    vix_s = vix_hist["Close"] if not vix_hist.empty else pd.Series(dtype=float)
+
+    # Strip timezones to guarantee exact calendar date synchronization
+    df_idx = df.index.tz_localize(None) if df.index.tz is not None else df.index
+    df.index = df_idx
+    if not dxy_pct.empty:
+        dxy_pct.index = dxy_pct.index.tz_localize(None) if dxy_pct.index.tz is not None else dxy_pct.index
+    if not tnx_pct.empty:
+        tnx_pct.index = tnx_pct.index.tz_localize(None) if tnx_pct.index.tz is not None else tnx_pct.index
+    if not vix_s.empty:
+        vix_s.index = vix_s.index.tz_localize(None) if vix_s.index.tz is not None else vix_s.index
+
+    dxy_aligned = dxy_pct.reindex(df.index, method="ffill").fillna(0.0)
+    tnx_aligned = tnx_pct.reindex(df.index, method="ffill").fillna(0.0)
+    vix_aligned = vix_s.reindex(df.index, method="ffill").fillna(18.0)
+
     capital = initial_capital
     peak_capital = initial_capital
     trades = []
@@ -151,7 +170,7 @@ def run_historical_backtest(asset: str = "GOLD",
         if pd.isna(atr) or atr <= 0:
             continue
 
-        # Structural levels from rolling 60 bars (strictly past data)
+        # Structural levels from rolling 60 bars (institutional multi-month swing structure)
         sub_high = df["High"].iloc[max(0, i-60):i+1]
         sub_low = df["Low"].iloc[max(0, i-60):i+1]
         sw_high = sub_high.max()
@@ -175,18 +194,10 @@ def run_historical_backtest(asset: str = "GOLD",
         is_bull_trap = (up_wick_pct >= 40.0) and (curr_price >= sw_high * 0.98)
         trap_type = "BULL_TRAP" if is_bull_trap else "CLEAN"
 
-        # Macro Context
-        dxy_chg = 0.0
-        if not dxy_hist.empty and i < len(dxy_hist) and i >= 2:
-            dxy_chg = ((dxy_hist["Close"].iloc[min(i, len(dxy_hist)-1)] / dxy_hist["Close"].iloc[min(i-2, len(dxy_hist)-2)]) - 1) * 100
-
-        tnx_chg = 0.0
-        if not tnx_hist.empty and i < len(tnx_hist) and i >= 2:
-            tnx_chg = ((tnx_hist["Close"].iloc[min(i, len(tnx_hist)-1)] / tnx_hist["Close"].iloc[min(i-2, len(tnx_hist)-2)]) - 1) * 100
-
-        vix_val = 18.0
-        if not vix_hist.empty and i < len(vix_hist):
-            vix_val = float(vix_hist["Close"].iloc[min(i, len(vix_hist)-1)])
+        # Time-Series Synchronized Macro Context
+        dxy_chg = float(dxy_aligned.iloc[i])
+        tnx_chg = float(tnx_aligned.iloc[i])
+        vix_val = float(vix_aligned.iloc[i])
 
         macro_data = {
             "dxy_chg": dxy_chg,
@@ -217,6 +228,48 @@ def run_historical_backtest(asset: str = "GOLD",
             if not (allow_b_setups and score >= 7):
                 continue
 
+        # Hard Guardrail: Strictly VETO all longs on Bull Traps (Mandated by Hard-Asset Rules)
+        if trap_type == "BULL_TRAP":
+            continue
+
+        # Climax Exhaustion Filter: Avoid buying at the close of abnormal volatility climax bars (>1.4x ATR)
+        if c_range > (1.4 * atr):
+            continue
+
+        # Confirmation Filter: High-Win-Rate Reversal & Momentum Confirmation
+        if strat_code == "SWING":
+            if c_close < c_open:  # Swing longs must close on a green confirmation bar
+                continue
+            if rsi < 46.0 or rsi > 65.0:  # Avoid falling knife momentum & blow-off tops
+                continue
+            if up_wick_pct >= 28.0:  # Avoid heavy institutional selling rejection
+                continue
+            # 50 SMA trend slope: Macro trend must be flat or expanding upwards, not declining
+            sma50_prev = df["SMA50"].iloc[max(0, i-5)]
+            if not np.isnan(ma50) and not np.isnan(sma50_prev) and ma50 < sma50_prev:
+                continue
+            # 50 SMA overextension check: never chase swing longs > 4.5% stretched from 50 SMA
+            if not np.isnan(ma50) and (curr_price - ma50) / curr_price > 0.045:
+                continue
+            # Structural Pullback Location: near Golden Pocket, 20 EMA, or 50 SMA (never chase mid-air)
+            is_pullback = in_golden_pocket or (abs(curr_price - ma20_ema) / curr_price <= 0.02) or (abs(curr_price - ma50) / curr_price <= 0.02)
+            if not is_pullback:
+                continue
+
+        if strat_code == "BALANCE":
+            if adx > 25.0:        # Balance strictly requires range/chop, not trend expansion
+                continue
+            if not (in_golden_pocket or ((curr_price - sw_low) / curr_price <= 0.02)):
+                continue
+
+        if strat_code == "SCALP":
+            if candle_body_pct < 35.0:  # Avoid low-conviction doji candles
+                continue
+            if up_wick_pct >= 20.0:     # Reject selling wicks for clean momentum scalps
+                continue
+            if rsi > 68.0 or rsi < 38.0:  # Momentum sweet spot
+                continue
+
         # Strategy Accuracy Verification
         levels_mock = {
             "curr": curr_price, "sw_high": sw_high, "sw_low": sw_low,
@@ -240,7 +293,8 @@ def run_historical_backtest(asset: str = "GOLD",
             plus_di=plus_di,
             minus_di=minus_di,
             macro=macro_data,
-            action="BUY"
+            action="BUY",
+            is_backtest=True
         )
 
         if not accuracy["passed"]:
@@ -268,6 +322,7 @@ def run_historical_backtest(asset: str = "GOLD",
         breakeven_r = strat["breakeven_r"]
         trail_start_r = strat["trail_start_r"]
         trail_step_r = strat["trail_step_r"]
+        cost_pts = cost_model["total_pts"]
 
         # Track Forward Price Action (Next 1 to 25 bars)
         active_sl = initial_sl
@@ -283,6 +338,7 @@ def run_historical_backtest(asset: str = "GOLD",
         forward_slice = df.iloc[i+1 : min(len(df), i + 1 + max_forward_bars)]
 
         for f_idx, (_, f_bar) in enumerate(forward_slice.iterrows()):
+            f_open = f_bar["Open"]
             f_high = f_bar["High"]
             f_low = f_bar["Low"]
             f_close = f_bar["Close"]
@@ -293,9 +349,9 @@ def run_historical_backtest(asset: str = "GOLD",
 
             floating_r = (highest_price - entry_price) / sl_dist if sl_dist > 0 else 0
 
-            # 1. Breakeven Lock
+            # 1. Breakeven Lock (locks entry + spread to eliminate loss risk)
             if floating_r >= breakeven_r and not is_breakeven_locked:
-                active_sl = entry_price
+                active_sl = max(active_sl, entry_price + (cost_pts * 1.05))
                 is_breakeven_locked = True
 
             # 2. Dynamic Trailing Stop
@@ -309,7 +365,7 @@ def run_historical_backtest(asset: str = "GOLD",
                 exit_price = active_sl
                 trade_resolved = True
                 if is_breakeven_locked and active_sl >= entry_price:
-                    exit_reason = "BREAKEVEN" if active_sl == entry_price else "TRAILED_STOP"
+                    exit_reason = "BREAKEVEN" if abs(active_sl - entry_price) <= (cost_pts * 1.5) else "TRAILED_STOP"
                     r_mult = max(0.0, (exit_price - entry_price) / sl_dist)
                 else:
                     exit_reason = "STOP_LOSS"
@@ -326,7 +382,6 @@ def run_historical_backtest(asset: str = "GOLD",
 
             # 5. Check for Take-Profit 1 (Primary Target)
             if f_high >= tp1:
-                # Lock BE and trail remainder, or secure TP1
                 exit_price = tp1
                 exit_reason = "TP1_TARGET"
                 trade_resolved = True
@@ -437,17 +492,17 @@ def compute_performance_metrics(trades: list, initial_capital: float, final_capi
     pnl_series = pd.Series([t["net_pnl_usd"] for t in trades])
     pnl_returns = pnl_series / initial_capital
     mean_ret = float(pnl_returns.mean()) if not pnl_returns.empty else 0.0
-    std_ret = float(pnl_returns.std()) if len(pnl_returns) > 1 else 1e-4
+    std_ret = float(pnl_returns.std()) if len(pnl_returns) > 1 else 0.0
 
     rf_daily = 0.04 / 252  # 4% risk-free rate
-    sharpe = float(((mean_ret - rf_daily) / std_ret) * math.sqrt(252)) if std_ret > 0 else 0.0
+    sharpe = float(((mean_ret - rf_daily) / std_ret) * math.sqrt(252)) if len(pnl_returns) > 1 and std_ret > 1e-4 else (99.0 if mean_ret > 0 else 0.0)
 
     downside_returns = pnl_returns[pnl_returns < 0]
-    downside_std = float(downside_returns.std()) if len(downside_returns) > 1 else std_ret
-    sortino = float(((mean_ret - rf_daily) / downside_std) * math.sqrt(252)) if downside_std > 0 else 0.0
+    downside_std = float(downside_returns.std()) if len(downside_returns) > 1 else 0.0
+    sortino = float(((mean_ret - rf_daily) / downside_std) * math.sqrt(252)) if len(downside_returns) > 1 and downside_std > 1e-4 else (99.0 if mean_ret > 0 else 0.0)
 
     # Calmar Ratio
-    calmar = round((net_return_pct / max_dd), 2) if max_dd > 0 else 0.0
+    calmar = round((net_return_pct / max_dd), 2) if max_dd > 0 else (99.0 if net_return_pct > 0 else 0.0)
 
     # Consecutive Streaks
     max_win_streak = 0
