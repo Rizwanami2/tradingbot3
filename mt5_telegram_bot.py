@@ -5,10 +5,12 @@ Unified Institutional Telegram Remote Control & MetaTrader 5 (MT5) Execution Eng
 with Autonomous Self-Learning & Built-in Paper Trading Fallback.
 Compatible with Python 3.11+.
 
-Modes:
-  1. LIVE MT5 MODE: When MetaTrader 5 terminal is installed, open, and logged in.
-  2. PAPER TRADING MODE: Automatic fallback if MT5 is not yet installed or closed.
-     Simulates full account execution, 1% risk calculations, and bracket orders.
+Features:
+  1. Instant Token & Bot Verification: Tests token via /getMe and prints @BotUsername.
+  2. Auto Chat ID Authorization: Automatically captures and binds your Chat ID on /start.
+  3. Robust Markdown Fallback: Guaranteed message delivery even if formatting fails.
+  4. Real-time Console Event Log: Logs every message received and order executed.
+  5. Live MT5 + Paper Trading Dual Mode.
 """
 
 import warnings
@@ -22,6 +24,7 @@ if hasattr(sys.stdout, "reconfigure"):
 import time
 import urllib.request
 import urllib.parse
+import urllib.error
 from datetime import datetime
 import numpy as np
 
@@ -70,8 +73,8 @@ def load_config():
         print("\n" + "=" * 70)
         print("  ❌ SYNTAX ERROR IN 'config_telegram.json'")
         print("=" * 70)
-        print(f"  Error: {e}")
-        print("\n  Common fix: Did you forget a comma (,) after your bot_token?")
+        print(f"  Error details: {e}")
+        print("\n  Common cause: Did you forget a comma (,) after your bot_token?")
         print("  Make sure your file looks exactly like this:")
         print('  {')
         print('    "telegram": {')
@@ -101,10 +104,30 @@ def save_paper_state():
         pass
 
 
+def verify_telegram_token(token: str):
+    """Checks token against Telegram getMe API."""
+    url = f"https://api.telegram.org/bot{token}/getMe"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "MT5TelegramBot/1.0"})
+        with urllib.request.urlopen(req, timeout=12) as r:
+            res = json.loads(r.read())
+            if res.get("ok"):
+                bot_user = res["result"].get("username", "UnknownBot")
+                bot_name = res["result"].get("first_name", "Bot")
+                return True, bot_user, bot_name
+            return False, "API_ERROR", str(res)
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            return False, "401_UNAUTHORIZED", "Token is invalid"
+        return False, f"HTTP_{e.code}", str(e)
+    except Exception as e:
+        return False, "NETWORK_ERROR", str(e)
+
+
 def send_telegram(token: str, chat_id: str, text: str, reply_markup: dict = None):
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {
-        "chat_id": chat_id,
+        "chat_id": str(chat_id),
         "text": text,
         "parse_mode": "Markdown"
     }
@@ -114,8 +137,19 @@ def send_telegram(token: str, chat_id: str, text: str, reply_markup: dict = None
     try:
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with urllib.request.urlopen(req, timeout=12) as r:
             return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        # Fallback to plain text if Markdown parsing fails (prevents dropped messages)
+        try:
+            payload.pop("parse_mode", None)
+            data = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=12) as r:
+                return json.loads(r.read())
+        except Exception as retry_err:
+            print(f"⚠️ Telegram send error: {retry_err}")
+            return None
     except Exception as e:
         print(f"⚠️ Telegram send error: {e}")
         return None
@@ -131,7 +165,6 @@ def init_mt5(config=None):
     if config and "mt5" in config and "path" in config["mt5"]:
         custom_path = config["mt5"]["path"]
 
-    # Try initializing MT5
     init_ok = False
     if custom_path and os.path.exists(custom_path):
         init_ok = mt5.initialize(path=custom_path)
@@ -179,7 +212,6 @@ def get_account_summary():
                     text += f"\n• `{p.symbol}` {p_type} `{p.volume}` lots @ `${p.price_open:,.2f}` | PnL: `${p.profit:+,.2f}`"
             return text
 
-    # Paper Trading Summary
     load_paper_state()
     pos_count = len(PAPER_ACCOUNT.get("positions", []))
     text = (
@@ -199,7 +231,6 @@ def get_account_summary():
 def execute_order(symbol: str, action: str, entry: float, sl: float, tp: float, risk_pct: float = 1.0):
     global IS_LIVE_MT5, PAPER_ACCOUNT
 
-    # 1. LIVE MT5 EXECUTION
     if IS_LIVE_MT5 and MT5_PACKAGE_INSTALLED:
         sym_info = mt5.symbol_info(symbol)
         if not sym_info:
@@ -248,7 +279,7 @@ def execute_order(symbol: str, action: str, entry: float, sl: float, tp: float, 
 
         return True, f"🟢 *LIVE MT5 ORDER EXECUTED!*\n• {action} `{lots}` lots `{symbol}` @ `${price:,.2f}`\n• Ticket: `#{res.order}`"
 
-    # 2. PAPER TRADING SIMULATION
+    # Paper Trading Simulation
     load_paper_state()
     balance = PAPER_ACCOUNT["balance"]
     risk_amount = balance * (risk_pct / 100.0)
@@ -397,25 +428,38 @@ def run_pipeline_scan():
 
 
 def handle_telegram_updates(config):
-    token = config["telegram"].get("bot_token", "")
-    chat_id = config["telegram"].get("chat_id", "")
+    token = config["telegram"].get("bot_token", "").strip()
+    chat_id = str(config["telegram"].get("chat_id", "")).strip()
 
     if not token or token == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
         print("\n" + "=" * 70)
         print("  ⚠️ TELEGRAM BOT TOKEN REQUIRED")
         print("=" * 70)
-        print("  To connect your Telegram bot, follow these 2 quick steps:")
         print("  1. Open Telegram, search '@BotFather' and send: /newbot")
-        print("  2. Copy the token and paste it into:")
-        print(f"     {CONFIG_PATH}")
-        print("  3. Send any message to your bot, then put your numeric chat ID in.")
-        print("=" * 70)
-        print("\n  💡 NOTE: You can run the deterministic pipeline directly in your console")
-        print("  without Telegram by running:")
-        print("     py -3.11 autotrader_pipeline.py\n")
+        print("  2. Copy the token and paste it into 'config_telegram.json'")
+        print("=" * 70 + "\n")
         return
 
-    print("🤖 Telegram Bot Polling Active... Waiting for commands.")
+    # Verify Token against Telegram API
+    is_valid, bot_user, bot_name = verify_telegram_token(token)
+    if not is_valid:
+        print("\n" + "=" * 70)
+        if bot_user == "401_UNAUTHORIZED":
+            print("  ❌ INVALID TELEGRAM BOT TOKEN (401 Unauthorized)")
+            print("=" * 70)
+            print("  The bot_token in 'config_telegram.json' is incorrect.")
+            print("  1. Open Telegram, search '@BotFather'")
+            print("  2. Run /mybots, select your bot, and click 'API Token'")
+            print("  3. Copy the token and paste it into 'config_telegram.json'")
+        else:
+            print(f"  ❌ Telegram Connection Error: {bot_name}")
+        print("=" * 70 + "\n")
+        return
+
+    print(f"🟢 Telegram Connected: @{bot_user} ({bot_name})")
+    print(f"🤖 Bot is listening for Telegram messages...")
+    print(f"💡 Open Telegram, search for @{bot_user}, and send: /start\n")
+
     offset = None
     last_sync_time = time.time()
 
@@ -439,10 +483,23 @@ def handle_telegram_updates(config):
                 if "message" in u and "text" in u["message"]:
                     msg_text = u["message"]["text"].strip()
                     sender_id = str(u["message"]["chat"]["id"])
+                    sender_name = u["message"]["from"].get("first_name", "User")
 
-                    # Security verification
-                    if chat_id != "YOUR_TELEGRAM_CHAT_ID_HERE" and sender_id != str(chat_id):
+                    # Auto-capture Chat ID on first use if not yet configured
+                    if not chat_id or chat_id in ("YOUR_TELEGRAM_CHAT_ID_HERE", "0", ""):
+                        print(f"🔑 Auto-authorized Chat ID: {sender_id} ({sender_name}). Saving to config_telegram.json...")
+                        chat_id = sender_id
+                        config["telegram"]["chat_id"] = sender_id
+                        try:
+                            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                                json.dump(config, f, indent=2)
+                        except Exception:
+                            pass
+                    elif sender_id != chat_id:
+                        print(f"⚠️ Ignored message from unauthorized Chat ID: {sender_id} (Expected: {chat_id})")
                         continue
+
+                    print(f"📩 [{datetime.now().strftime('%H:%M:%S')}] Received from {sender_name}: '{msg_text}'")
 
                     if msg_text.startswith("/start") or msg_text.startswith("/help"):
                         acc_text = get_account_summary()
@@ -542,6 +599,8 @@ def handle_telegram_updates(config):
                     cb = u["callback_query"]
                     cb_data = cb.get("data")
                     sender_id = str(cb["from"]["id"])
+                    sender_name = cb["from"].get("first_name", "User")
+                    print(f"🔘 [{datetime.now().strftime('%H:%M:%S')}] Button tapped by {sender_name}: '{cb_data}'")
                     data = run_pipeline_scan()
 
                     if cb_data == "BUY_BTC":
@@ -555,14 +614,21 @@ def handle_telegram_updates(config):
                         ok, res = execute_order(sym, "BUY", g["price"], g["sl"], g["tp"], config["mt5"]["risk_pct_per_trade"])
                         send_telegram(token, sender_id, res)
 
-        except Exception:
-            time.sleep(2)
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                print("❌ Telegram Error: 401 Unauthorized! Invalid bot token.")
+                time.sleep(10)
+            else:
+                print(f"⚠️ Telegram HTTP Error: {e}")
+                time.sleep(3)
+        except Exception as e:
+            print(f"⚠️ Polling loop error: {e}")
+            time.sleep(3)
 
 
 if __name__ == "__main__":
     cfg = load_config()
     if not cfg:
-        print("[!] Could not load config_telegram.json")
         sys.exit(1)
 
     print("==================================================================")
