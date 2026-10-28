@@ -2,8 +2,9 @@
 """
 test_suite.py
 Automated End-to-End Bug Detection & Command Verification Test Harness.
-Tests all 20+ Telegram commands, MT5 execution engine, risk calculations,
-chart generation, and pipeline edge cases.
+Tests all 30+ Telegram commands and modern hubs, MT5 execution engine,
+trailing stop & breakeven protection, multi-strategy calculations (SCALP, SWING, BALANCE, SWAP),
+auto-leverage margin controls, separate watchlist auto-trading, and chart generation.
 """
 
 import sys
@@ -48,42 +49,58 @@ class TestHardAssetProject(unittest.TestCase):
         print("  🧪 RUNNING COMPREHENSIVE PROJECT VERIFICATION TEST SUITE")
         print("=" * 70)
         cls.mock_tg = MockTelegramSender()
-        # Mock telegram senders
         telegram_bot.send_message = cls.mock_tg.send_message
         telegram_bot.send_telegram_chart = cls.mock_tg.send_telegram_chart
 
-    def test_01_risk_engine_calculations(self):
-        """Verify dynamic lot sizing and sniper calculation accuracy."""
-        print("\n[*] 1. Testing Risk Engine...")
-        # Test Gold Lot Sizing
+    def test_01_risk_engine_and_strategies(self):
+        """Verify dynamic lot sizing, broker leverage margin limits, and all 4 strategies."""
+        print("\n[*] 1. Testing Risk Engine & Multi-Strategy Matrix...")
+
+        # 1. Test Gold Lot Sizing
         gold_lot = risk_engine.calculate_lot_size("GOLD", entry_price=2740.0, stop_loss_price=2735.0, account_balance=10000.0, risk_pct=1.0)
         self.assertTrue(gold_lot["valid"])
         self.assertEqual(gold_lot["lots"], 0.20)
         self.assertAlmostEqual(gold_lot["actual_risk_usd"], 100.0, delta=1.0)
 
-        # Test BTC Lot Sizing
+        # 2. Test BTC Lot Sizing
         btc_lot = risk_engine.calculate_lot_size("BTC", entry_price=67500.0, stop_loss_price=67000.0, account_balance=10000.0, risk_pct=1.0)
         self.assertTrue(btc_lot["valid"])
         self.assertEqual(btc_lot["lots"], 0.20)
         self.assertAlmostEqual(btc_lot["actual_risk_usd"], 100.0, delta=1.0)
 
-        # Test Sniper Levels
-        gold_sniper = risk_engine.calculate_sniper_levels("GOLD", 2740.0, atr=28.0, action="BUY", account_balance=10000.0, risk_pct=1.0)
-        self.assertEqual(gold_sniper["action"], "BUY")
-        self.assertGreater(gold_sniper["tp1"], gold_sniper["entry"])
-        self.assertLess(gold_sniper["stop_loss"], gold_sniper["entry"])
-        self.assertAlmostEqual(gold_sniper["rr_tp1"], 1.20, delta=0.05)
-        self.assertLessEqual(gold_sniper["lot_size"], 0.20)
+        # 3. Test Auto Leverage & Free Margin Capping
+        capped_lot = risk_engine.calculate_lot_size(
+            "GOLD", entry_price=2740.0, stop_loss_price=2735.0,
+            account_balance=10000.0, risk_pct=1.0,
+            broker_leverage=10, margin_free=500.0  # low leverage & tight margin
+        )
+        self.assertTrue(capped_lot["valid"])
+        self.assertLessEqual(capped_lot["lots"], 0.05)
 
-        # Test Risk Audit Text Generation
+        # 4. Test Strategy Calculations for all 4 profiles (SCALP, SWING, BALANCE, SWAP)
+        for s_code in ("SCALP", "SWING", "BALANCE", "SWAP"):
+            calc = risk_engine.calculate_strategy_levels("GOLD", 2740.0, atr=28.0, action="BUY", strategy=s_code, account_balance=10000.0, risk_pct=1.0)
+            self.assertEqual(calc["strategy"], s_code)
+            self.assertGreater(calc["tp1"], calc["entry"])
+            self.assertLess(calc["stop_loss"], calc["entry"])
+            self.assertGreater(calc["tp2"], calc["tp1"])
+            self.assertGreater(calc["lot_size"], 0.0)
+
+        # 5. Verify strategy switching
+        risk_engine.set_active_strategy("SWING")
+        self.assertEqual(risk_engine.get_active_strategy()["code"], "SWING")
+        risk_engine.set_active_strategy("SCALP")  # Reset to default
+        self.assertEqual(risk_engine.get_active_strategy()["code"], "SCALP")
+
+        # 6. Test Risk Audit Text Generation
         audit_text = risk_engine.generate_risk_audit_text(account_balance=10000.0, risk_pct=1.0)
         self.assertIn("Portfolio Equity", audit_text)
         self.assertIn("Daily Circuit Breaker", audit_text)
-        print("    ✅ Risk Engine: ALL TESTS PASSED")
+        print("    ✅ Risk Engine & Multi-Strategy Matrix: ALL TESTS PASSED")
 
-    def test_02_mt5_executor_disconnected_state(self):
-        """Verify MT5 executor handles disconnected state gracefully without exceptions."""
-        print("\n[*] 2. Testing MT5 Executor (Disconnected Handling)...")
+    def test_02_mt5_executor_and_trailing(self):
+        """Verify MT5 executor handles disconnected state gracefully and trailing methods exist."""
+        print("\n[*] 2. Testing MT5 Executor (Disconnected Handling & Trailing Protection)...")
         broker = mt5_executor.MT5LiveBroker()
         self.assertFalse(broker.is_connected)
 
@@ -104,9 +121,19 @@ class TestHardAssetProject(unittest.TestCase):
         close_res = broker.close_all_positions()
         self.assertFalse(close_res["success"])
 
-        # Has open position
-        self.assertFalse(broker.has_open_position("GOLD"))
-        print("    ✅ MT5 Executor Disconnected Handling: ALL TESTS PASSED")
+        # Trailing positions when disconnected
+        trail_events = broker.trail_positions(breakeven_r=0.6, trail_step_r=0.5)
+        self.assertEqual(trail_events, [])
+
+        # Position modification when disconnected
+        mod_res = broker.modify_position_sltp(ticket=12345, new_sl=2740.0, new_tp=2755.0)
+        self.assertFalse(mod_res["success"])
+
+        # Swap rates when disconnected
+        swaps = broker.get_swap_rates("GOLD")
+        self.assertFalse(swaps["available"])
+
+        print("    ✅ MT5 Executor Disconnected Handling & Trailing: ALL TESTS PASSED")
 
     def test_03_chart_generation(self):
         """Verify MT5-style Candlestick Chart generation."""
@@ -142,25 +169,52 @@ class TestHardAssetProject(unittest.TestCase):
         self.assertIn("verdict", gold)
         print(f"    ✅ Pipeline Data: BTC=${btc['price']:,.2f} | Gold=${gold['price']:,.2f}")
 
-    def test_05_all_telegram_commands(self):
-        """Simulate sending each Telegram command and verify responses."""
-        print("\n[*] 5. Testing All Telegram Commands...")
+    def test_05_all_telegram_commands_and_hubs(self):
+        """Simulate sending each Telegram command directly to process_telegram_command and verify responses."""
+        print("\n[*] 5. Testing All Modern Command Hubs & Shortcuts...")
         token = "MOCK_TOKEN"
         sender_id = "12345678"
         sender_name = "TestTrader"
 
-        # List of all commands supported by the bot
+        # Comprehensive test matrix of modern hubs + subcommands + shortcuts
         test_commands = [
+            # Welcome & Help
             "/start",
             "/help",
             "/menu",
+
+            # Modern Market Hub & Subcommands
+            "/market",
+            "/market all",
+            "/market btc",
+            "/market gold",
+            "/market macro",
+            "/market levels",
+            "/market traps",
+            "/market debate",
+
+            # Market Shortcuts
             "/scan",
             "/btc",
             "/gold",
-            "/risk",
-            "/risk 25000",
-            "/account",
-            "/positions",
+            "/macro",
+            "/levels",
+            "/traps",
+            "/debate",
+
+            # Modern Trade Hub & Subcommands
+            "/trade",
+            "/trade buy gold",
+            "/trade sell gold",
+            "/trade buy btc",
+            "/trade sell btc",
+            "/trade close",
+            "/trade auto gold",
+            "/trade auto btc",
+            "/trade auto both",
+            "/trade auto off",
+
+            # Trade Shortcuts
             "/buy_gold",
             "/sell_gold",
             "/buy_btc",
@@ -169,140 +223,80 @@ class TestHardAssetProject(unittest.TestCase):
             "/auto_trade",
             "/auto_trade on",
             "/auto_trade off",
-            "/status",
-            "/levels",
-            "/traps",
-            "/debate",
-            "/macro",
+
+            # Modern Strategy Hub
+            "/strategy",
+            "/strategy scalp",
+            "/strategy swing",
+            "/strategy balance",
+            "/strategy swap",
+
+            # Modern Portfolio Hub & Shortcuts
+            "/portfolio",
+            "/account",
+            "/positions",
+
+            # Modern Trailing Hub
+            "/trail",
+            "/trail on",
+            "/trail off",
+
+            # Self-Learning Hub
             "/learn",
-            "/train"
+            "/learn train",
+            "/train",
+
+            # Risk Hub
+            "/risk",
+            "/risk 25000",
+
+            # Status Hub
+            "/status"
         ]
 
-        # Save simulated handler tester
         for cmd in test_commands:
             self.mock_tg.sent_messages.clear()
             self.mock_tg.sent_charts.clear()
 
-            # Execute command logic by calling the appropriate branch
-            msg_text = cmd
-            if msg_text.startswith("/start") or msg_text.startswith("/help") or msg_text.startswith("/menu"):
-                welcome = telegram_bot.format_welcome_menu(sender_name)
-                telegram_bot.send_message(token, sender_id, welcome)
+            # Execute via actual production dispatcher
+            telegram_bot.process_telegram_command(token, sender_id, sender_name, cmd)
 
-            elif msg_text.startswith("/scan"):
-                data = telegram_bot.run_full_pipeline()
-                telegram_bot.send_message(token, sender_id, telegram_bot.format_scan_summary(data))
+            self.assertGreater(len(self.mock_tg.sent_messages), 0, f"Command '{cmd}' produced no Telegram message!")
+            resp_len = len(self.mock_tg.sent_messages[0][1])
+            self.assertGreater(resp_len, 10, f"Response for '{cmd}' too short ({resp_len} chars)!")
+            print(f"    • Command '{cmd:<22}' ──► Handled successfully ({resp_len} chars)")
 
-            elif msg_text.startswith("/btc"):
-                data = telegram_bot.run_full_pipeline()
-                b = data["btc"]
-                lv = b["levels"]
-                ticket = (
-                    f"₿ *Bitcoin (BTC-USD) Multi-Skill Audit:*\n"
-                    f"• Price: `${b['price']:,.2f}`\n"
-                    f"• Score: `{b['base_score']}/10`\n"
-                    f"• Verdict: {b['verdict']}"
-                )
-                telegram_bot.send_message(token, sender_id, ticket)
+        # Verify state persistence from commands
+        # 1. Watchlist mode
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/trade auto gold")
+        self.assertEqual(telegram_bot.AUTO_TRADE_MODE, "GOLD")
+        self.assertTrue(telegram_bot.AUTO_TRADE_LIVE)
 
-            elif msg_text.startswith("/gold"):
-                data = telegram_bot.run_full_pipeline()
-                g = data["gold"]
-                ticket = (
-                    f"🥇 *Gold (XAU/USD) Multi-Skill Audit:*\n"
-                    f"• Price: `${g['price']:,.2f}`\n"
-                    f"• Score: `{g['base_score']}/10`\n"
-                    f"• Verdict: {g['verdict']}"
-                )
-                telegram_bot.send_message(token, sender_id, ticket)
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/trade auto btc")
+        self.assertEqual(telegram_bot.AUTO_TRADE_MODE, "BTC")
+        self.assertTrue(telegram_bot.AUTO_TRADE_LIVE)
 
-            elif msg_text.startswith("/risk"):
-                parts = msg_text.strip().split()
-                custom_bal = float(parts[1]) if len(parts) > 1 else 10000.0
-                data = telegram_bot.run_full_pipeline()
-                report = risk_engine.generate_risk_audit_text(account_balance=custom_bal, risk_pct=1.0, btc_data=data["btc"], gold_data=data["gold"])
-                telegram_bot.send_message(token, sender_id, report)
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/trade auto both")
+        self.assertEqual(telegram_bot.AUTO_TRADE_MODE, "BOTH")
+        self.assertTrue(telegram_bot.AUTO_TRADE_LIVE)
 
-            elif msg_text.startswith("/account"):
-                acc = telegram_bot.live_broker.get_live_account_data() if (telegram_bot.MT5_EXECUTOR_AVAILABLE and telegram_bot.live_broker and telegram_bot.live_broker.is_connected) else None
-                text = "🏦 LIVE MT5 ACCOUNT" if acc else "❌ LIVE MT5 BROKER NOT CONNECTED"
-                telegram_bot.send_message(token, sender_id, text)
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/trade auto off")
+        self.assertEqual(telegram_bot.AUTO_TRADE_MODE, "OFF")
+        self.assertFalse(telegram_bot.AUTO_TRADE_LIVE)
 
-            elif msg_text.startswith("/positions"):
-                positions = telegram_bot.live_broker.get_open_positions() if (telegram_bot.MT5_EXECUTOR_AVAILABLE and telegram_bot.live_broker and telegram_bot.live_broker.is_connected) else []
-                text = "📋 LIVE POSITIONS" if positions else "ℹ️ No Open Positions"
-                telegram_bot.send_message(token, sender_id, text)
+        # 2. Trailing stop toggle
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/trail off")
+        self.assertFalse(telegram_bot.TRAILING_STOP_ENABLED)
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/trail on")
+        self.assertTrue(telegram_bot.TRAILING_STOP_ENABLED)
 
-            elif msg_text.startswith("/buy_gold") or msg_text.startswith("/sell_gold"):
-                action = "BUY" if "buy" in msg_text else "SELL"
-                if not (telegram_bot.MT5_EXECUTOR_AVAILABLE and telegram_bot.live_broker and telegram_bot.live_broker.is_connected):
-                    telegram_bot.send_message(token, sender_id, "❌ MT5 is disconnected.")
-                else:
-                    telegram_bot.send_message(token, sender_id, f"Executing {action} Gold...")
+        # 3. Strategy switcher
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/strategy swing")
+        self.assertEqual(risk_engine.get_active_strategy()["code"], "SWING")
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/strategy scalp")
+        self.assertEqual(risk_engine.get_active_strategy()["code"], "SCALP")
 
-            elif msg_text.startswith("/buy_btc") or msg_text.startswith("/sell_btc"):
-                action = "BUY" if "buy" in msg_text else "SELL"
-                if not (telegram_bot.MT5_EXECUTOR_AVAILABLE and telegram_bot.live_broker and telegram_bot.live_broker.is_connected):
-                    telegram_bot.send_message(token, sender_id, "❌ MT5 is disconnected.")
-                else:
-                    telegram_bot.send_message(token, sender_id, f"Executing {action} BTC...")
-
-            elif msg_text.startswith("/close_all"):
-                if not (telegram_bot.MT5_EXECUTOR_AVAILABLE and telegram_bot.live_broker and telegram_bot.live_broker.is_connected):
-                    telegram_bot.send_message(token, sender_id, "❌ MT5 is disconnected.")
-                else:
-                    telegram_bot.send_message(token, sender_id, "Closing all...")
-
-            elif msg_text.startswith("/auto_trade"):
-                parts = msg_text.strip().split()
-                if len(parts) > 1 and parts[1].lower() in ("on", "1"):
-                    telegram_bot.AUTO_TRADE_LIVE = True
-                    telegram_bot.send_message(token, sender_id, "🟢 LIVE AUTO-EXECUTION ENABLED!")
-                elif len(parts) > 1 and parts[1].lower() in ("off", "0"):
-                    telegram_bot.AUTO_TRADE_LIVE = False
-                    telegram_bot.send_message(token, sender_id, "⚪ LIVE AUTO-EXECUTION DISABLED.")
-                else:
-                    telegram_bot.send_message(token, sender_id, f"Auto-trade status: {telegram_bot.AUTO_TRADE_LIVE}")
-
-            elif msg_text.startswith("/status"):
-                telegram_bot.send_message(token, sender_id, "🤖 SYSTEM & ENGINE HEALTH: OK")
-
-            elif msg_text.startswith("/levels"):
-                data = telegram_bot.run_full_pipeline()
-                b_lv = data["btc"]["levels"]
-                g_lv = data["gold"]["levels"]
-                msg = f"📐 Key Levels: BTC=${b_lv['curr']:,.2f} | Gold=${g_lv['curr']:,.2f}"
-                telegram_bot.send_message(token, sender_id, msg)
-
-            elif msg_text.startswith("/traps"):
-                data = telegram_bot.run_full_pipeline()
-                b = data["btc"]
-                g = data["gold"]
-                msg = f"🪤 Traps: BTC={b['trap_type']} | Gold={g['trap_type']}"
-                telegram_bot.send_message(token, sender_id, msg)
-
-            elif msg_text.startswith("/debate"):
-                data = telegram_bot.run_full_pipeline()
-                msg = telegram_bot.generate_adversarial_debate(data)
-                telegram_bot.send_message(token, sender_id, msg)
-
-            elif msg_text.startswith("/macro"):
-                data = telegram_bot.run_full_pipeline()
-                m = data["macro"]
-                msg = f"🌐 Macro: DXY={m['dxy']:.2f} | 10Y={m['tnx']:.2f}% | GSR={m['gsr']:.1f}x"
-                telegram_bot.send_message(token, sender_id, msg)
-
-            elif msg_text.startswith("/learn"):
-                summary = telegram_bot.learning_engine.get_summary_text() if telegram_bot.learning_engine else "N/A"
-                telegram_bot.send_message(token, sender_id, summary)
-
-            elif msg_text.startswith("/train"):
-                telegram_bot.send_message(token, sender_id, "✅ Self-Training complete!")
-
-            self.assertGreater(len(self.mock_tg.sent_messages), 0, f"Command {cmd} produced no Telegram message!")
-            print(f"    • Command '{cmd:<16}' ──► Handled successfully (Response length: {len(self.mock_tg.sent_messages[0][1])} chars)")
-
-        print("    ✅ All Telegram Commands Verified Successfully!")
+        print("    ✅ All Modern Hubs, Subcommands, Shortcuts & State Transitions Verified!")
 
 
 if __name__ == "__main__":

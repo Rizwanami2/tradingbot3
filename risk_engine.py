@@ -53,10 +53,77 @@ DEFAULT_MAX_RISK_PCT = 1.0          # Max 1.0% risk per trade
 DAILY_DRAWDOWN_HALT_PCT = 2.0       # Halt new trades if daily loss reaches 2.0%
 MAX_TOTAL_DRAWDOWN_PCT = 6.0        # Portfolio halt at 6.0% drawdown
 
+# ── Institutional Strategy Framework ──────────────────────────────────────────
+STRATEGIES = {
+    "SCALP": {
+        "code": "SCALP",
+        "name": "High Win-Rate Sniper Scalp",
+        "description": "Ultra-tight 0.45x ATR SL with quick 1.2R target. Focus: ~75% high hit-rate scalp.",
+        "sl_mult": 0.45,
+        "rr_tp1": 1.20,
+        "rr_tp2": 2.00,
+        "holding_time": "5 - 30 minutes",
+        "lot_cap_gold": 0.20,
+        "lot_cap_btc": 0.10
+    },
+    "SWING": {
+        "code": "SWING",
+        "name": "Macro Trend Swing",
+        "description": "Wide 1.20x ATR structural stop with 2.5R to 3.5R asymmetric targets across multi-day cycles.",
+        "sl_mult": 1.20,
+        "rr_tp1": 2.50,
+        "rr_tp2": 3.50,
+        "holding_time": "1 - 5 days",
+        "lot_cap_gold": 0.10,
+        "lot_cap_btc": 0.05
+    },
+    "BALANCE": {
+        "code": "BALANCE",
+        "name": "Equilibrium Mean-Reversion",
+        "description": "Fades Golden Pocket extremes back to 0.50 Fib Equilibrium / VPOC fair value.",
+        "sl_mult": 0.75,
+        "rr_tp1": 1.80,
+        "rr_tp2": 2.40,
+        "holding_time": "1 - 8 hours",
+        "lot_cap_gold": 0.15,
+        "lot_cap_btc": 0.08
+    },
+    "SWAP": {
+        "code": "SWAP",
+        "name": "Positive Carry & Swap Aware",
+        "description": "Carry-conscious positioning prioritizing positive overnight financing and avoiding swap drag.",
+        "sl_mult": 0.90,
+        "rr_tp1": 2.00,
+        "rr_tp2": 3.00,
+        "holding_time": "Multi-day / Positive Carry",
+        "lot_cap_gold": 0.15,
+        "lot_cap_btc": 0.08
+    }
+}
+
+ACTIVE_STRATEGY = "SCALP"
+
+
+def set_active_strategy(strat_name: str) -> tuple:
+    """Sets active trading strategy."""
+    global ACTIVE_STRATEGY
+    code = strat_name.strip().upper()
+    if code in STRATEGIES:
+        ACTIVE_STRATEGY = code
+        return True, STRATEGIES[code]
+    return False, None
+
+
+def get_active_strategy() -> dict:
+    """Returns the current active trading strategy metadata."""
+    return STRATEGIES.get(ACTIVE_STRATEGY, STRATEGIES["SCALP"])
+
 
 def calculate_lot_size(asset: str, entry_price: float, stop_loss_price: float,
                        account_balance: float = DEFAULT_ACCOUNT_BALANCE,
-                       risk_pct: float = DEFAULT_MAX_RISK_PCT) -> dict:
+                       risk_pct: float = DEFAULT_MAX_RISK_PCT,
+                       broker_leverage: float = None,
+                       margin_free: float = None) -> dict:
     """
     Computes exact institutional lot size so that dollar loss at SL equals risk_pct.
     Formula:
@@ -65,6 +132,7 @@ def calculate_lot_size(asset: str, entry_price: float, stop_loss_price: float,
       Gold: 1.0 Lot = 100 oz  -> Dollar Risk Per Lot = Price Distance * 100
       BTC:  1.0 Lot = 1 BTC   -> Dollar Risk Per Lot = Price Distance * 1
       Recommended Lots = Risk USD / Dollar Risk Per Lot (clamped to min/max lot step)
+      Auto-adjusts for broker leverage and margin availability.
     """
     asset_key = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
     spec = CONTRACT_SPECS[asset_key]
@@ -93,6 +161,16 @@ def calculate_lot_size(asset: str, entry_price: float, stop_loss_price: float,
     clamped_lots = max(spec["min_lot"], min(stepped_lots, spec["max_lot"]))
     clamped_lots = round(clamped_lots, 2)
 
+    # Automatically check broker leverage and free margin
+    if broker_leverage and broker_leverage > 0 and margin_free and margin_free > 0:
+        nominal_per_lot = entry_price * spec["contract_size"]
+        margin_per_lot = nominal_per_lot / broker_leverage
+        if margin_per_lot > 0:
+            max_lots_by_margin = (margin_free * 0.85) / margin_per_lot
+            stepped_margin_lots = math.floor(max_lots_by_margin / step) * step
+            if stepped_margin_lots < clamped_lots:
+                clamped_lots = max(spec["min_lot"], round(stepped_margin_lots, 2))
+
     actual_risk_usd = clamped_lots * dollar_risk_per_lot
     actual_risk_pct = (actual_risk_usd / account_balance) * 100.0
 
@@ -111,32 +189,45 @@ def calculate_lot_size(asset: str, entry_price: float, stop_loss_price: float,
     }
 
 
-def calculate_sniper_levels(asset: str, current_price: float, atr: float = 0.0,
-                            action: str = "BUY", account_balance: float = DEFAULT_ACCOUNT_BALANCE,
-                            risk_pct: float = DEFAULT_MAX_RISK_PCT) -> dict:
+def calculate_strategy_levels(asset: str, current_price: float, atr: float = 0.0,
+                              action: str = "BUY", strategy: str = None,
+                              account_balance: float = DEFAULT_ACCOUNT_BALANCE,
+                              risk_pct: float = DEFAULT_MAX_RISK_PCT,
+                              broker_leverage: float = None,
+                              margin_free: float = None,
+                              swap_info: dict = None) -> dict:
     """
-    High Win-Rate Sniper Architecture:
-      - Small Stop-Loss: Snug structural invalidation (0.4x - 0.6x ATR).
-      - Small Take-Profit (TP1): Quick scalp target at 1.2R (75%+ hit probability).
-      - Secondary TP (TP2): Extended target at 2.0R.
-      - Small Lot Size: Strict risk cap guaranteeing capital preservation.
+    Multi-Strategy Parameter Engine:
+      - SCALP: Small SL (0.45x ATR), quick 1.2R TP1, high win rate (~75%).
+      - SWING: Structural SL (1.20x ATR), 2.5R to 3.5R extended targets.
+      - BALANCE: Mean-reversion SL (0.75x ATR), 1.8R target to 0.50 Fib Equilibrium.
+      - SWAP: Carry-optimized SL (0.90x ATR), 2.0R target with rollover analysis.
     """
     asset_key = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
     is_buy = action.upper() in ("BUY", "LONG")
+    strat_key = (strategy or ACTIVE_STRATEGY).upper()
+    strat = STRATEGIES.get(strat_key, STRATEGIES["SCALP"])
 
-    # 1. Calculate Small Stop-Loss Distance
+    base_atr = atr if atr > 0 else (28.0 if asset_key == "GOLD" else 2200.0)
+    sl_mult = strat["sl_mult"]
+
+    # 1. Strategy-Specific Stop-Loss Distance
     if asset_key == "GOLD":
-        # Gold ATR fallback ~ $28. Small SL distance: $3.00 to $5.50
-        sl_dist = max(2.50, min(0.45 * (atr if atr > 0 else 28.0), 5.50))
+        raw_sl_dist = base_atr * sl_mult
+        min_bound = 2.50 if strat_key == "SCALP" else 6.00 if strat_key == "SWING" else 3.50
+        max_bound = 5.50 if strat_key == "SCALP" else 35.00 if strat_key == "SWING" else 15.00
+        sl_dist = max(min_bound, min(raw_sl_dist, max_bound))
     else:
-        # BTC ATR fallback ~ $2,200. Small SL distance: $280 to $580
-        sl_dist = max(250.0, min(0.45 * (atr if atr > 0 else 2200.0), 580.0))
+        raw_sl_dist = base_atr * sl_mult
+        min_bound = 250.0 if strat_key == "SCALP" else 800.0 if strat_key == "SWING" else 400.0
+        max_bound = 580.0 if strat_key == "SCALP" else 3500.0 if strat_key == "SWING" else 1800.0
+        sl_dist = max(min_bound, min(raw_sl_dist, max_bound))
 
     sl_dist = round(sl_dist, 2)
 
-    # 2. Calculate Small Take-Profit Distances (1.2R quick high win-rate scalp)
-    tp1_dist = round(sl_dist * 1.20, 2)
-    tp2_dist = round(sl_dist * 2.00, 2)
+    # 2. Strategy-Specific Take-Profit Distances
+    tp1_dist = round(sl_dist * strat["rr_tp1"], 2)
+    tp2_dist = round(sl_dist * strat["rr_tp2"], 2)
 
     if is_buy:
         stop_loss = round(current_price - sl_dist, 2)
@@ -147,16 +238,26 @@ def calculate_sniper_levels(asset: str, current_price: float, atr: float = 0.0,
         tp1 = round(current_price - tp1_dist, 2)
         tp2 = round(current_price - tp2_dist, 2)
 
-    # 3. Calculate Small Lot Size
-    lot_info = calculate_lot_size(asset_key, current_price, stop_loss, account_balance, risk_pct)
+    # 3. Dynamic Position Sizing with Leverage & Margin Limits
+    lot_info = calculate_lot_size(asset_key, current_price, stop_loss, account_balance, risk_pct, broker_leverage, margin_free)
+    cap_key = "lot_cap_gold" if asset_key == "GOLD" else "lot_cap_btc"
+    max_cap = strat.get(cap_key, 0.20)
+    clamped_lot = max(0.01, min(lot_info["lots"], max_cap))
+    lot_info["lots"] = round(clamped_lot, 2)
 
-    # Small conservative lot cap (max 0.20 for Gold, max 0.10 for BTC)
-    max_sniper_cap = 0.20 if asset_key == "GOLD" else 0.10
-    clamped_sniper_lot = max(0.01, min(lot_info["lots"], max_sniper_cap))
-    lot_info["lots"] = round(clamped_sniper_lot, 2)
+    # 4. Swap Note if available
+    swap_note = ""
+    if swap_info and swap_info.get("available"):
+        fav = swap_info.get("favorable_side")
+        if fav == action.upper():
+            swap_note = "✅ Positive Carry: Earns overnight rollover financing on this side."
+        else:
+            swap_note = "⚠️ Carry Cost: Overnight holding incurs financing cost on this side."
 
     return {
         "asset": asset_key,
+        "strategy": strat["code"],
+        "strategy_name": strat["name"],
         "action": "BUY" if is_buy else "SELL",
         "entry": round(current_price, 2),
         "stop_loss": stop_loss,
@@ -165,13 +266,22 @@ def calculate_sniper_levels(asset: str, current_price: float, atr: float = 0.0,
         "sl_dist": sl_dist,
         "tp1_dist": tp1_dist,
         "tp2_dist": tp2_dist,
-        "rr_tp1": 1.20,
-        "rr_tp2": 2.00,
+        "rr_tp1": strat["rr_tp1"],
+        "rr_tp2": strat["rr_tp2"],
         "lot_size": lot_info["lots"],
         "risk_usd": lot_info["actual_risk_usd"],
         "risk_pct": lot_info["actual_risk_pct"],
-        "win_rate_focus": "HIGH WIN RATE (~70-80% Target Hit Rate)"
+        "holding_time": strat["holding_time"],
+        "win_rate_focus": strat["description"],
+        "swap_note": swap_note
     }
+
+
+def calculate_sniper_levels(asset: str, current_price: float, atr: float = 0.0,
+                            action: str = "BUY", account_balance: float = DEFAULT_ACCOUNT_BALANCE,
+                            risk_pct: float = DEFAULT_MAX_RISK_PCT) -> dict:
+    """Seamless backward-compatible alias to calculate_strategy_levels in SCALP mode."""
+    return calculate_strategy_levels(asset, current_price, atr, action, "SCALP", account_balance, risk_pct)
 
 
 def compute_var_and_cvar(ticker: str = "BTC-USD", lookback_days: int = 180,

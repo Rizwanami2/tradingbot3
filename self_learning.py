@@ -100,6 +100,15 @@ class SelfLearningEngine:
             "trade_journal": []
         }
 
+    @property
+    def total_signals(self) -> int:
+        return self.memory.get("performance", {}).get("total_trades", 0)
+
+    @property
+    def overall_win_rate(self) -> float:
+        pct = self.memory.get("performance", {}).get("win_rate_pct", 55.0)
+        return (pct / 100.0) if pct > 0 else 0.55
+
     def save_memory(self):
         self.memory["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         tmp_path = self.memory_path + ".tmp"

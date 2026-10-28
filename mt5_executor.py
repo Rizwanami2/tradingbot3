@@ -7,11 +7,13 @@ Calibrated exclusively for Gold (XAU/USD) and Bitcoin (BTC/USD).
 Core Features:
   1. 100% LIVE BROKER CONNECTION: Real-time integration with MT5 terminal.
   2. ZERO PAPER TRADING: Only real live broker account data and execution.
-  3. REAL-TIME LIVE BALANCE: Queries balance, equity, and free margin directly from MT5.
+  3. REAL-TIME LIVE BALANCE & AUTO LEVERAGE: Queries balance, equity, free margin, and broker leverage.
   4. SMART BROKER SYMBOL RESOLVER: Automatically resolves XAUUSD, XAUUSDm, GOLD, BTCUSD, etc.
   5. HIGH WIN-RATE SNIPER ORDERS: Precision execution with small SL, small TP, and micro lots.
-  6. EMERGENCY KILL-SWITCH: Close all positions in one command via /close_all.
-  7. AUTO-RECONNECT: Automatically detects and reconnects if MT5 terminal is opened/restarted.
+  6. DYNAMIC TRAILING STOP & BREAKEVEN: Automatically locks profits and eliminates risk (+0.6R Breakeven, +1.0R Trail).
+  7. BROKER SWAP RADAR: Analyzes long vs short rollover financing costs.
+  8. EMERGENCY KILL-SWITCH: Close all positions in one command via /close_all.
+  9. AUTO-RECONNECT: Automatically detects and reconnects if MT5 terminal is opened/restarted.
 """
 
 import sys
@@ -101,6 +103,7 @@ class MT5LiveBroker:
             f"• Account: #{acc.login} ({acc.server})\n"
             f"• Balance: ${acc.balance:,.2f} {acc.currency}\n"
             f"• Equity:  ${acc.equity:,.2f} {acc.currency}\n"
+            f"• Leverage: 1:{acc.leverage} (Auto-Managed)\n"
             f"• Algo Trading: {trade_status}"
         )
 
@@ -122,7 +125,7 @@ class MT5LiveBroker:
 
     def get_live_account_data(self) -> dict:
         """
-        Fetches current live equity, balance, and margin directly from MT5.
+        Fetches current live equity, balance, margin, and broker leverage directly from MT5.
         Auto-reconnects if connection was temporarily lost.
         Returns None if not connected.
         """
@@ -195,6 +198,27 @@ class MT5LiveBroker:
         self.resolved_symbols[asset_key] = default_sym
         return default_sym
 
+    def get_swap_rates(self, asset: str) -> dict:
+        """Fetches overnight rollover financing rates (swaps) directly from broker."""
+        if not self.ensure_connected():
+            return {"available": False, "swap_long": 0.0, "swap_short": 0.0, "favorable_side": "NONE"}
+        symbol = self.resolve_symbol(asset)
+        info = mt5.symbol_info(symbol)
+        if not info:
+            return {"available": False, "swap_long": 0.0, "swap_short": 0.0, "favorable_side": "NONE"}
+
+        sl = getattr(info, "swap_long", 0.0)
+        ss = getattr(info, "swap_short", 0.0)
+        fav = "BUY" if sl > ss else "SELL" if ss > sl else "NEUTRAL"
+        return {
+            "available": True,
+            "symbol": symbol,
+            "swap_long": sl,
+            "swap_short": ss,
+            "favorable_side": fav,
+            "positive_carry": sl > 0 or ss > 0
+        }
+
     def execute_live_sniper_order(self, asset: str, action: str,
                                   entry_price: float, stop_loss: float,
                                   take_profit: float, lot_size: float,
@@ -202,6 +226,7 @@ class MT5LiveBroker:
         """
         Executes an instant market order directly on the live MT5 broker.
         Enforces small lot sizes, small SL, and small TP anchored to live fill price.
+        Automatically verifies margin requirement against broker leverage.
         """
         if not self.ensure_connected():
             return {"success": False, "error": "MT5 is disconnected. Please ensure MT5 terminal is running on your VPS."}
@@ -244,6 +269,21 @@ class MT5LiveBroker:
         fill_price = tick.ask if is_buy else tick.bid
         digits = sym_info.digits
         point = sym_info.point or (10 ** -digits)
+
+        # Auto-calculate margin with broker leverage
+        acc = self.account_info
+        if acc and hasattr(mt5, "order_calc_margin"):
+            try:
+                req_margin = mt5.order_calc_margin(order_type, symbol, valid_lot, fill_price)
+                if req_margin and req_margin > 0:
+                    free_margin = acc.margin_free or (acc.balance * 0.90)
+                    if req_margin > (free_margin * 0.90):  # Cap margin at 90% of free margin
+                        max_lots_by_margin = (free_margin * 0.90) / (req_margin / valid_lot)
+                        steps_margin = math.floor(max_lots_by_margin / step_lot)
+                        valid_lot = max(min_lot, min(steps_margin * step_lot, valid_lot))
+                        valid_lot = round(valid_lot, step_decimals)
+            except Exception:
+                pass
 
         # Calculate exact SL and TP distances from entry and anchor to live fill_price
         sl_dist = abs(entry_price - stop_loss) if (entry_price > 0 and stop_loss > 0) else (5.0 if "XAU" in symbol or "GOLD" in symbol else 400.0)
@@ -308,6 +348,140 @@ class MT5LiveBroker:
             "tp": final_tp,
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
+
+    def modify_position_sltp(self, ticket: int, new_sl: float, new_tp: float = None) -> dict:
+        """Modifies Stop-Loss and Take-Profit of an active open position."""
+        if not self.ensure_connected():
+            return {"success": False, "error": "MT5 disconnected"}
+
+        positions = mt5.positions_get(ticket=ticket)
+        if not positions:
+            return {"success": False, "error": f"Position #{ticket} not found"}
+
+        p = positions[0]
+        symbol = p.symbol
+        sym_info = mt5.symbol_info(symbol)
+        digits = sym_info.digits if sym_info else 2
+
+        target_sl = round(new_sl, digits)
+        target_tp = round(new_tp, digits) if new_tp is not None else p.tp
+
+        request = {
+            "action": mt5.TRADE_ACTION_SLTP,
+            "position": ticket,
+            "symbol": symbol,
+            "sl": target_sl,
+            "tp": target_tp
+        }
+        res = mt5.order_send(request)
+        if res is None:
+            err = mt5.last_error()
+            return {"success": False, "error": f"Order modify returned None: {err}"}
+        if res.retcode != mt5.TRADE_RETCODE_DONE:
+            return {"success": False, "retcode": res.retcode, "error": f"Broker rejected modify ({res.retcode}): {res.comment}"}
+
+        return {"success": True, "ticket": ticket, "symbol": symbol, "sl": target_sl, "tp": target_tp}
+
+    def trail_positions(self, breakeven_r: float = 0.6, trail_step_r: float = 0.5) -> list:
+        """
+        Automated Trailing Stop & Breakeven Protection.
+        Scans all open MT5 positions:
+          1. If profit >= +0.6R and SL is unbuffered:
+             Moves Stop-Loss to Breakeven (+ spread buffer) to make trade 100% risk-free.
+          2. As profit extends beyond +1.0R, trails SL behind price at 0.5x risk distance.
+        Returns list of modification events for alerts.
+        """
+        if not self.ensure_connected():
+            return []
+
+        positions = mt5.positions_get()
+        if not positions:
+            return []
+
+        events = []
+        for p in positions:
+            symbol = p.symbol
+            sym_info = mt5.symbol_info(symbol)
+            if not sym_info:
+                continue
+            tick = mt5.symbol_info_tick(symbol)
+            if not tick:
+                continue
+
+            digits = sym_info.digits
+            point = sym_info.point or (10 ** -digits)
+            spread_buffer = max(sym_info.spread * point, 2 * point)
+
+            is_buy = p.type == mt5.ORDER_TYPE_BUY
+            curr_price = tick.bid if is_buy else tick.ask
+            entry = p.price_open
+            curr_sl = p.sl
+            curr_tp = p.tp
+
+            # Estimate initial risk distance D
+            if curr_sl > 0:
+                risk_dist = abs(entry - curr_sl)
+            else:
+                risk_dist = 4.0 if ("XAU" in symbol.upper() or "GOLD" in symbol.upper()) else 350.0
+
+            if risk_dist <= 0:
+                continue
+
+            # Profit distance and current R-multiple
+            profit_dist = (curr_price - entry) if is_buy else (entry - curr_price)
+            current_r = profit_dist / risk_dist
+
+            # ── 1. Breakeven Trigger (At >= +0.6R) ──
+            breakeven_sl = round(entry + spread_buffer if is_buy else entry - spread_buffer, digits)
+            needs_breakeven = False
+            if is_buy and current_r >= breakeven_r and curr_sl < entry:
+                needs_breakeven = True
+            elif not is_buy and current_r >= breakeven_r and (curr_sl > entry or curr_sl == 0):
+                needs_breakeven = True
+
+            if needs_breakeven:
+                res = self.modify_position_sltp(p.ticket, breakeven_sl, curr_tp)
+                if res.get("success"):
+                    events.append({
+                        "ticket": p.ticket,
+                        "symbol": symbol,
+                        "type": "BUY" if is_buy else "SELL",
+                        "action": "BREAKEVEN",
+                        "old_sl": curr_sl,
+                        "new_sl": breakeven_sl,
+                        "current_price": curr_price,
+                        "profit_r": current_r,
+                        "msg": f"🛡️ *BREAKEVEN LOCKED:* #{p.ticket} `{symbol}` SL moved to `${breakeven_sl:,.2f}` (Capital is 100% Risk-Free!)"
+                    })
+                    continue
+
+            # ── 2. Trailing Stop Step (At >= +1.0R) ──
+            if current_r >= 1.0:
+                trailing_sl = round(curr_price - (risk_dist * trail_step_r) if is_buy else curr_price + (risk_dist * trail_step_r), digits)
+                should_trail = False
+                if is_buy and trailing_sl > curr_sl and trailing_sl > entry:
+                    should_trail = True
+                elif not is_buy and (trailing_sl < curr_sl or curr_sl == 0) and trailing_sl < entry:
+                    should_trail = True
+
+                if should_trail:
+                    # Enforce minimum trail movement of 15 points
+                    if abs(trailing_sl - curr_sl) >= (15 * point):
+                        res = self.modify_position_sltp(p.ticket, trailing_sl, curr_tp)
+                        if res.get("success"):
+                            events.append({
+                                "ticket": p.ticket,
+                                "symbol": symbol,
+                                "type": "BUY" if is_buy else "SELL",
+                                "action": "TRAILED",
+                                "old_sl": curr_sl,
+                                "new_sl": trailing_sl,
+                                "current_price": curr_price,
+                                "profit_r": current_r,
+                                "msg": f"📈 *PROFIT LOCKED:* #{p.ticket} `{symbol}` SL trailed to `${trailing_sl:,.2f}` (+{current_r:.1f}R Secured)"
+                            })
+
+        return events
 
     def get_open_positions(self) -> list:
         """Fetches all currently open live positions."""
