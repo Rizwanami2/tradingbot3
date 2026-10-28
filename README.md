@@ -13,7 +13,7 @@ An institutional-grade algorithmic trading and risk management platform designed
 - **High Win-Rate Sniper Mode:** Small Stop-Loss (0.4–0.6x ATR), Small Take-Profit (1.2R quick scalp with ~75% target hit rate), and conservative micro-lot position sizing.
 - **Auto Real-Time Balance Risk:** Position sizing is dynamically calculated from your live MT5 equity. Zero hardcoded balances.
 - **Default Visual MT5 Candlestick Charts:** Institutional dark-themed charts with 50/200 SMA, S/R, and Golden Pocket (0.618-0.650) automatically generated and sent with `/scan`, `/btc`, `/gold`, and alerts.
-- **Automated 1-Minute Live Candle Scanner:** Continuously audits the markets in the background on every 1-minute candle close (every 60s) and sends push notifications to your phone whenever an A+ setup ($\ge 8/10$) appears with attached MT5 charts (with optional auto-execution via `/auto_trade on`).
+- **Continuous 1-Minute Candle Scanner (Zero Spam):** Audits Gold and Bitcoin in the background on every 1-minute candle close (:00s). Uses an institutional Signal State Machine: only fires for high-quality A+ setups ($\ge 8/10$), broadcasts **exactly 1 alert per setup** (no repeated spam while active), and sends a single 1-line update when Take-Profit is reached.
 - **Autonomous Self-Learning (`self_learning.py`):** Automatically evaluates trade setups and tunes confluence factor weights based on historical win rates.
 - **Emergency Circuit Breaker:** Instant `/close_all` command to liquidate all open live positions immediately.
 
