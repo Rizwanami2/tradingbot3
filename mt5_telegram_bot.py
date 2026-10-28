@@ -61,9 +61,26 @@ PAPER_ACCOUNT = {
 
 def load_config():
     if not os.path.exists(CONFIG_PATH):
+        print(f"[!] Config file not found: {CONFIG_PATH}")
         return None
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError as e:
+        print("\n" + "=" * 70)
+        print("  ❌ SYNTAX ERROR IN 'config_telegram.json'")
+        print("=" * 70)
+        print(f"  Error: {e}")
+        print("\n  Common fix: Did you forget a comma (,) after your bot_token?")
+        print("  Make sure your file looks exactly like this:")
+        print('  {')
+        print('    "telegram": {')
+        print('      "bot_token": "YOUR_TOKEN_HERE",  <-- Note the comma here!')
+        print('      "chat_id": "YOUR_CHAT_ID_HERE"')
+        print('    },')
+        print('    ...')
+        print("=" * 70 + "\n")
+        return None
 
 
 def load_paper_state():
