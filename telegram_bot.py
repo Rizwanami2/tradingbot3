@@ -69,10 +69,21 @@ except Exception:
 
 # Import Institutional Risk Management & Sizing Engine
 try:
-    from risk_engine import calculate_lot_size, generate_risk_audit_text, validate_trade_risk
+    from risk_engine import calculate_lot_size, generate_risk_audit_text, validate_trade_risk, calculate_sniper_levels
     RISK_ENGINE_AVAILABLE = True
 except Exception:
     RISK_ENGINE_AVAILABLE = False
+
+# Import Live MT5 Broker Execution Engine
+try:
+    from mt5_executor import live_broker
+    MT5_EXECUTOR_AVAILABLE = True
+except Exception:
+    live_broker = None
+    MT5_EXECUTOR_AVAILABLE = False
+
+# Live auto-trade state (disabled by default for safety; toggleable via /auto_trade on|off)
+AUTO_TRADE_LIVE = False
 
 
 ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
@@ -97,12 +108,23 @@ def load_env():
 
 
 def get_risk_config():
-    """Loads account balance and risk % from environment or defaults."""
+    """Loads account balance (auto-fetched from live MT5 if connected) and risk %."""
     load_env()
-    try:
-        balance = float(os.environ.get("ACCOUNT_BALANCE", "10000.0").strip())
-    except Exception:
-        balance = 10000.0
+    # 1. Automatically fetch live equity from connected MT5 live account
+    if MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected:
+        acc_data = live_broker.get_live_account_data()
+        if acc_data and acc_data.get("equity", 0) > 0:
+            balance = acc_data["equity"]
+        else:
+            try:
+                balance = float(os.environ.get("ACCOUNT_BALANCE", "10000.0").strip())
+            except Exception:
+                balance = 10000.0
+    else:
+        try:
+            balance = float(os.environ.get("ACCOUNT_BALANCE", "10000.0").strip())
+        except Exception:
+            balance = 10000.0
 
     try:
         risk_pct = float(os.environ.get("RISK_PCT_PER_TRADE", "1.0").strip())
@@ -524,24 +546,37 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
     else:
         verdict = f"🔴 VETOED (Score: {final_score}/10) - Insufficient Confluence"
 
-    # Order parameters (tight Invalidation below 0.650 Golden Pocket or local sweep)
-    stop_loss = levels["fib_650"] * 0.985 if levels["in_golden_pocket"] else levels["sw_low"] * 0.985
-    tp1 = levels["fib_500"] if curr < levels["fib_500"] * 0.98 else levels["sw_high"] * 0.98
-    tp2 = levels["sw_high"]
-    risk_pct = abs(curr - stop_loss) / curr * 100 if curr > 0 else 1.0
-    reward_pct = abs(tp1 - curr) / curr * 100 if curr > 0 else 2.0
-    rr = reward_pct / risk_pct if risk_pct > 0 else 2.0
-
     account_balance, base_risk = get_risk_config()
     target_risk = base_risk if is_a_plus else (base_risk * 0.5)
+
+    # High Win-Rate Sniper Calibration: Small SL, Small TP (1.2R scalp), Small Micro-Lots
     if RISK_ENGINE_AVAILABLE:
-        lot_info = calculate_lot_size(asset_type, curr, stop_loss, account_balance, target_risk)
+        sniper = calculate_sniper_levels(asset_type, curr, atr=atr, action="BUY", account_balance=account_balance, risk_pct=target_risk)
+        stop_loss = sniper["stop_loss"]
+        tp1 = sniper["tp1"]
+        tp2 = sniper["tp2"]
+        risk_pct = sniper["risk_pct"]
+        reward_pct = round(abs(tp1 - curr) / curr * 100, 2)
+        rr = sniper["rr_tp1"]
+        lot_info = {
+            "lots": sniper["lot_size"],
+            "actual_risk_usd": sniper["risk_usd"],
+            "actual_risk_pct": sniper["risk_pct"],
+            "price_dist": sniper["sl_dist"]
+        }
     else:
+        sl_dist = 4.0 if asset_type == "GOLD" else 350.0
+        stop_loss = round(curr - sl_dist, 2)
+        tp1 = round(curr + (sl_dist * 1.2), 2)
+        tp2 = round(curr + (sl_dist * 2.0), 2)
+        risk_pct = 1.0
+        reward_pct = 1.2
+        rr = 1.2
         lot_info = {
             "lots": 0.05,
             "actual_risk_usd": round(account_balance * (target_risk / 100.0), 2),
             "actual_risk_pct": target_risk,
-            "price_dist": round(abs(curr - stop_loss), 2)
+            "price_dist": sl_dist
         }
 
     return {
@@ -701,6 +736,18 @@ def auto_scanner_worker(token: str, chat_id_getter):
                         g_buf = generate_mt5_chart("GC=F", "GOLD (XAU/USD)")
                         if g_buf:
                             send_telegram_chart(token, target_chat_id, g_buf, f"📊 MT5 Chart Alert: Gold (${g['price']:,.2f}) | {g['verdict']}")
+
+                # Live MT5 Auto-Execution for A+ setups (if /auto_trade on)
+                global AUTO_TRADE_LIVE
+                if AUTO_TRADE_LIVE and MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected:
+                    if b['is_a_plus']:
+                        res = live_broker.execute_live_sniper_order("BTC", "BUY", b["entry"], b["stop_loss"], b["tp1"], b["lot_info"]["lots"], comment="AutoTrader-A+")
+                        if res.get("success"):
+                            send_message(token, target_chat_id, f"⚡ *LIVE AUTO-EXECUTION TRIGGERED (A+ SETUP)*\n• Symbol: `{res['symbol']}`\n• BUY `{res['lots']}` lots @ `${res['price']:,.2f}`\n• Ticket: `#{res['ticket']}`\n• SL: `${res['sl']:,.2f}` | TP: `${res['tp']:,.2f}`")
+                    if g['is_a_plus']:
+                        res = live_broker.execute_live_sniper_order("GOLD", "BUY", g["entry"], g["stop_loss"], g["tp1"], g["lot_info"]["lots"], comment="AutoTrader-A+")
+                        if res.get("success"):
+                            send_message(token, target_chat_id, f"⚡ *LIVE AUTO-EXECUTION TRIGGERED (A+ SETUP)*\n• Symbol: `{res['symbol']}`\n• BUY `{res['lots']}` lots @ `${res['price']:,.2f}`\n• Ticket: `#{res['ticket']}`\n• SL: `${res['sl']:,.2f}` | TP: `${res['tp']:,.2f}`")
         except Exception:
             time.sleep(10)
 
@@ -722,10 +769,22 @@ def start_bot():
         print(f"❌ Telegram Connection Failed: {bot_first_name}")
         return
 
+    # ── Initialize Live MT5 Broker Connection ──────────────────────────────
+    mt5_banner = "NOT CONNECTED ⚪"
+    if MT5_EXECUTOR_AVAILABLE and live_broker:
+        login = os.environ.get("MT5_LOGIN", "").strip() or None
+        password = os.environ.get("MT5_PASSWORD", "").strip() or None
+        server = os.environ.get("MT5_SERVER", "").strip() or None
+        path = os.environ.get("MT5_PATH", "").strip() or None
+        connected, status_text = live_broker.connect(login, password, server, path)
+        print(f"\n{status_text}\n")
+        mt5_banner = "ONLINE 🟢" if connected else "DISCONNECTED ⚪"
+
     print("=" * 70)
     print("  🚀 ALL-SKILLS QUANTITATIVE HARD-ASSET BOT (GOLD & BTC)")
     print("=" * 70)
     print(f"  🟢 Telegram Connected : @{bot_username} ({bot_first_name})")
+    print(f"  🏦 Live MT5 Broker    : {mt5_banner}")
     print(f"  🧠 Self-Learning      : {'ONLINE (learning_memory.json)' if LEARNING_AVAILABLE else 'OFFLINE'}")
     print(f"  🛡️ Combined Skills    : 12 Active Modules (Macro, Levels, Traps, FVG, Sizing)")
     print("=" * 70)
@@ -771,10 +830,18 @@ def start_bot():
                             f"🚀 *All-Skills Quantitative Hard-Asset Bot*\n\n"
                             f"Welcome {sender_name}! All 12 trading skills are actively combined and monitoring Gold & Bitcoin.\n\n"
                             f"Commands:\n"
-                            f"• `/scan` - Full multi-skill audit for Gold & BTC (with default MT5 Charts)\n"
-                            f"• `/btc` - Deep Bitcoin audit with MT5 Chart & Trade Ticket\n"
-                            f"• `/gold` - Deep Gold audit with MT5 Chart & Trade Ticket\n"
-                            f"• `/risk [balance]` - Institutional risk audit & exact lot sizing (e.g. `/risk 25000`)\n"
+                            f"• `/scan` - High win-rate audit for Gold & BTC with default MT5 Charts\n"
+                            f"• `/btc` - Deep Bitcoin audit with MT5 Chart & Sniper ticket\n"
+                            f"• `/gold` - Deep Gold audit with MT5 Chart & Sniper ticket\n"
+                            f"• `/account` - Live MT5 account equity, balance, margin & broker info\n"
+                            f"• `/positions` - Live MT5 open trades & real-time PnL\n"
+                            f"• `/buy_gold` - Live MT5 Instant Buy with small SL & small TP\n"
+                            f"• `/sell_gold` - Live MT5 Instant Sell with small SL & small TP\n"
+                            f"• `/buy_btc` - Live MT5 Instant Buy with small SL & small TP\n"
+                            f"• `/sell_btc` - Live MT5 Instant Sell with small SL & small TP\n"
+                            f"• `/close_all` - Emergency close all live MT5 positions\n"
+                            f"• `/auto_trade on|off` - Toggle auto-execution for A+ setups\n"
+                            f"• `/risk [balance]` - Institutional risk audit & exact lot sizing\n"
                             f"• `/levels` - Institutional S/R, Pivots & Golden Pocket\n"
                             f"• `/traps` - Wyckoff trap inspection (Springs & Upthrusts)\n"
                             f"• `/debate` - Adversarial Bull vs. Bear debate\n"
@@ -891,6 +958,143 @@ def start_bot():
                             risk_report = f"🛡️ *Risk Audit:* Balance `${active_bal:,.2f}` | 1% Risk: `${active_bal*0.01:,.2f}`"
 
                         send_message(token, sender_id, risk_report)
+
+                    elif msg_text.startswith("/account"):
+                        acc = live_broker.get_live_account_data() if (MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected) else None
+                        if acc:
+                            trade_str = "ENABLED ✅" if acc["trade_allowed"] else "DISABLED ⚠️ (Enable 'Allow Algo Trading' in MT5)"
+                            text = (
+                                f"🏦 *LIVE MT5 BROKER ACCOUNT SUMMARY*\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"• Status: 🟢 *LIVE BROKER CONNECTED*\n"
+                                f"• Broker: `{acc['broker']}`\n"
+                                f"• Account ID: `#{acc['login']}` ({acc['server']})\n"
+                                f"• Live Balance: `${acc['balance']:,.2f} {acc['currency']}`\n"
+                                f"• Live Equity:  `${acc['equity']:,.2f} {acc['currency']}`\n"
+                                f"• Free Margin: `${acc['margin_free']:,.2f}`\n"
+                                f"• Leverage: `1:{acc['leverage']}`\n"
+                                f"• Open Trades: `{acc['open_positions_count']}`\n"
+                                f"• Algo Trading: `{trade_str}`\n"
+                                f"• Auto-Execution: `{'ON 🟢' if AUTO_TRADE_LIVE else 'OFF ⚪'}`\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"⚡ *Live Risk Engine:* Position sizing is dynamically linked to your `${acc['equity']:,.2f}` equity in real-time."
+                            )
+                        else:
+                            text = (
+                                "❌ *LIVE MT5 BROKER NOT CONNECTED*\n\n"
+                                "Please make sure:\n"
+                                "1. MetaTrader 5 terminal is running on your VPS.\n"
+                                "2. You are logged into your live trading account.\n"
+                                "3. 'Allow algorithmic trading' is checked in `Tools -> Options -> Expert Advisors`."
+                            )
+                        send_message(token, sender_id, text)
+
+                    elif msg_text.startswith("/positions"):
+                        positions = live_broker.get_open_positions() if (MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected) else []
+                        if positions:
+                            lines = [
+                                "📋 *LIVE MT5 OPEN POSITIONS*",
+                                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                            ]
+                            tot_pnl = 0.0
+                            for p in positions:
+                                tot_pnl += p["profit"]
+                                icon = "🟢" if p["profit"] >= 0 else "🔴"
+                                lines.append(
+                                    f"• `{p['symbol']}` {p['type']} `{p['lots']}` lots\n"
+                                    f"  Ticket: `#{p['ticket']}` | Open: `${p['open_price']:,.2f}`\n"
+                                    f"  Current: `${p['current_price']:,.2f}` | PnL: {icon} `${p['profit']:+,.2f}`\n"
+                                    f"  SL: `${p['sl']:,.2f}` | TP: `${p['tp']:,.2f}`"
+                                )
+                            lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                            lines.append(f"💰 *Total Floating PnL:* `${tot_pnl:+,.2f}`")
+                            lines.append("Send `/close_all` to instantly liquidate all open positions.")
+                            send_message(token, sender_id, "\n".join(lines))
+                        else:
+                            send_message(token, sender_id, "ℹ️ *No Open Positions:* There are currently no active live trades running in MT5.")
+
+                    elif msg_text.startswith("/buy_gold") or msg_text.startswith("/sell_gold"):
+                        is_buy = msg_text.startswith("/buy_gold")
+                        action = "BUY" if is_buy else "SELL"
+                        if not (MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected):
+                            send_message(token, sender_id, "❌ Cannot execute live trade: MT5 is disconnected. Open MT5 on your VPS.")
+                        else:
+                            send_message(token, sender_id, f"⚡ Executing Live {action} Order on Gold (XAU/USD)...")
+                            data = run_full_pipeline()
+                            g = data["gold"]
+                            bal, risk = get_risk_config()
+                            sniper = calculate_sniper_levels("GOLD", g["price"], g["atr"], action, bal, risk)
+                            res = live_broker.execute_live_sniper_order("GOLD", action, sniper["entry"], sniper["stop_loss"], sniper["tp1"], sniper["lot_size"], comment="Telegram-GoldSniper")
+                            if res.get("success"):
+                                order_ticket = (
+                                    f"🟢 *LIVE MT5 ORDER EXECUTED!*\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"• Symbol: `{res['symbol']}` ({res['action']})\n"
+                                    f"• Ticket: `#{res['ticket']}`\n"
+                                    f"• Volume: `{res['lots']}` Lots (Micro Lot Sizing)\n"
+                                    f"• Entry: `${res['price']:,.2f}`\n"
+                                    f"• Small SL: `${res['sl']:,.2f}` (-${abs(res['price']-res['sl']):.2f} tight risk)\n"
+                                    f"• Small TP: `${res['tp']:,.2f}` (+${abs(res['tp']-res['price']):.2f} quick scalp)\n"
+                                    f"• Win Rate Target: ~75% High Probability Focus\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"Type `/positions` to track live floating PnL."
+                                )
+                                send_message(token, sender_id, order_ticket)
+                            else:
+                                send_message(token, sender_id, f"❌ Live Order Failed: {res.get('error')}")
+
+                    elif msg_text.startswith("/buy_btc") or msg_text.startswith("/sell_btc"):
+                        is_buy = msg_text.startswith("/buy_btc")
+                        action = "BUY" if is_buy else "SELL"
+                        if not (MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected):
+                            send_message(token, sender_id, "❌ Cannot execute live trade: MT5 is disconnected. Open MT5 on your VPS.")
+                        else:
+                            send_message(token, sender_id, f"⚡ Executing Live {action} Order on Bitcoin (BTC/USD)...")
+                            data = run_full_pipeline()
+                            b = data["btc"]
+                            bal, risk = get_risk_config()
+                            sniper = calculate_sniper_levels("BTC", b["price"], b["atr"], action, bal, risk)
+                            res = live_broker.execute_live_sniper_order("BTC", action, sniper["entry"], sniper["stop_loss"], sniper["tp1"], sniper["lot_size"], comment="Telegram-BtcSniper")
+                            if res.get("success"):
+                                order_ticket = (
+                                    f"🟢 *LIVE MT5 ORDER EXECUTED!*\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"• Symbol: `{res['symbol']}` ({res['action']})\n"
+                                    f"• Ticket: `#{res['ticket']}`\n"
+                                    f"• Volume: `{res['lots']}` Lots (Micro Contract)\n"
+                                    f"• Entry: `${res['price']:,.2f}`\n"
+                                    f"• Small SL: `${res['sl']:,.2f}` (-${abs(res['price']-res['sl']):.2f} tight risk)\n"
+                                    f"• Small TP: `${res['tp']:,.2f}` (+${abs(res['tp']-res['price']):.2f} quick scalp)\n"
+                                    f"• Win Rate Target: ~75% High Probability Focus\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"Type `/positions` to track live floating PnL."
+                                )
+                                send_message(token, sender_id, order_ticket)
+                            else:
+                                send_message(token, sender_id, f"❌ Live Order Failed: {res.get('error')}")
+
+                    elif msg_text.startswith("/close_all"):
+                        if not (MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected):
+                            send_message(token, sender_id, "❌ MT5 is disconnected.")
+                        else:
+                            send_message(token, sender_id, "⚠️ Closing all active live MT5 positions...")
+                            res = live_broker.close_all_positions()
+                            if res.get("success") and res.get("closed_count", 0) > 0:
+                                send_message(token, sender_id, f"🚨 *EMERGENCY CLOSE-ALL COMPLETED!*\n• Closed: `{res['closed_count']}` positions\n• Total Realized PnL: `${res['total_pnl']:+,.2f}`")
+                            else:
+                                send_message(token, sender_id, f"ℹ️ {res.get('msg', 'No open positions to close.')}")
+
+                    elif msg_text.startswith("/auto_trade"):
+                        parts = msg_text.strip().split()
+                        if len(parts) > 1 and parts[1].lower() in ("on", "true", "enable", "1"):
+                            AUTO_TRADE_LIVE = True
+                            send_message(token, sender_id, "🟢 *LIVE AUTO-EXECUTION ENABLED!*\nThe bot will automatically place live MT5 sniper orders whenever an A+ setup (≥8/10) is detected.")
+                        elif len(parts) > 1 and parts[1].lower() in ("off", "false", "disable", "0"):
+                            AUTO_TRADE_LIVE = False
+                            send_message(token, sender_id, "⚪ *LIVE AUTO-EXECUTION DISABLED.*\nThe bot will send notifications and charts for alerts, but will require manual /buy or /sell command to execute.")
+                        else:
+                            status_str = "ENABLED 🟢" if AUTO_TRADE_LIVE else "DISABLED ⚪"
+                            send_message(token, sender_id, f"ℹ️ *Auto-Trade Status:* `{status_str}`\nUsage: `/auto_trade on` or `/auto_trade off`")
 
                     elif msg_text.startswith("/levels"):
                         data = run_full_pipeline()

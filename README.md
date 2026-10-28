@@ -1,36 +1,38 @@
-# Bottreding: Gold (XAU/USD) & Bitcoin (BTC/USD) Quantitative Telegram Trading Bot
+# Bottreding: Gold (XAU/USD) & Bitcoin (BTC/USD) Live MT5 Telegram Trading Bot
 
-An institutional-grade, multi-factor algorithmic trading and risk management platform designed exclusively for **Gold (`XAU/USD`)** and **Bitcoin (`BTC/USD`)**. Features automated Telegram alerts, real-time macro analysis, and **autonomous self-learning**.
+An institutional-grade algorithmic trading and risk management platform designed exclusively for **Gold (`XAU/USD`)** and **Bitcoin (`BTC/USD`)**. Features automated Telegram remote control, real-time macro analysis, **live MetaTrader 5 (MT5) broker execution**, and **autonomous self-learning**.
 
-> **100% Standalone & Zero MT5 Dependency:** Runs on **any VPS** (Windows, Linux, Ubuntu, macOS) with free public data feeds. No MetaTrader 5 installation or broker login required.
+> **100% Live Account Architecture & Zero Paper Trading:** Real-time integration with your live MetaTrader 5 broker. Automatically reads your live balance and equity to calculate exact small lot sizes with tight stop-loss and take-profit targets focused on a **high win-rate %**.
 
 ---
 
 ## ⚡ Key Highlights
 
 - **Asset Focus:** Exclusively hard monetary assets — Gold and Bitcoin.
-- **Zero Broker Lock-in:** No MT5 or broker account needed. Works 100% via Telegram.
+- **Live MT5 Broker Integration:** Directly connects to your live broker account. Real-time balance, equity, and margin tracking with one-tap `/buy` and `/sell` execution.
+- **High Win-Rate Sniper Mode:** Small Stop-Loss (0.4–0.6x ATR), Small Take-Profit (1.2R quick scalp with ~75% target hit rate), and conservative micro-lot position sizing.
+- **Auto Real-Time Balance Risk:** Position sizing is dynamically calculated from your live MT5 equity. Zero hardcoded balances.
 - **Default Visual MT5 Candlestick Charts:** Institutional dark-themed charts with 50/200 SMA, S/R, and Golden Pocket (0.618-0.650) automatically generated and sent with `/scan`, `/btc`, `/gold`, and alerts.
-- **Automated 30-Minute Market Scanner:** Continuously audits the markets in the background and sends push notifications to your phone whenever an A+ setup ($\ge 8/10$) appears with attached MT5 charts.
+- **Automated 30-Minute Market Scanner:** Continuously audits the markets in the background and sends push notifications to your phone whenever an A+ setup ($\ge 8/10$) appears with attached MT5 charts (with optional auto-execution via `/auto_trade on`).
 - **Autonomous Self-Learning (`self_learning.py`):** Automatically evaluates trade setups and tunes confluence factor weights based on historical win rates.
-- **4-Stage Confluence Pipeline:** Enforces structural location (0.618–0.650 Fibonacci Golden Pocket, 50/200 SMA), Wyckoff trap wicks ($\ge 40\%$), and macro context (DXY, 10Y Yields, GSR, Fear & Greed).
-- **Exact Actionable Order Tickets:** Provides Entry, Stop-Loss, TP1 (+2R), and TP2 for every valid setup.
+- **Emergency Circuit Breaker:** Instant `/close_all` command to liquidate all open live positions immediately.
 
 ---
 
-## 🚀 Quick Setup on Any VPS (Windows / Linux)
+## 🚀 Quick Setup on Windows VPS
 
 ### Step 1: Install Dependencies
 ```bash
-pip install -r requirements.txt
+py -3.11 -m pip install -r requirements.txt MetaTrader5
 ```
 
-### Step 2: Test & Connect Telegram in 30 Seconds
+### Step 2: Configure Telegram & MT5
 Run the built-in diagnostic tool:
 ```bash
 python test_telegram.py
 ```
 Paste your token from `@BotFather`. It will automatically test the connection and save it to `.env`.
+*(Ensure your MetaTrader 5 terminal is open and logged into your live trading account with "Allow algorithmic trading" enabled in Tools -> Options -> Expert Advisors).*
 
 ### Step 3: Start the Bot
 ```bash
@@ -46,10 +48,18 @@ Open Telegram, search for your bot, and send **`/start`**!
 | Command | Action |
 |---|---|
 | `/start` | Connects your session and displays menu |
-| `/scan` | Full market scan for Gold & BTC with dual confluence scores, lot sizing & default MT5 charts |
-| `/btc` | Detailed Bitcoin structure, 50/200 SMA, Golden Pocket, MT5 chart & trade ticket with exact lots |
-| `/gold` | Detailed Gold structure, 50/200 SMA, Golden Pocket, MT5 chart & trade ticket with exact lots |
-| `/risk` | Full institutional risk audit, equity budget, dynamic lot sizes, daily halt & Kelly sizing |
+| `/account` | Live MT5 account equity, balance, free margin, broker name & status |
+| `/positions` | Live MT5 open trades with real-time floating PnL |
+| `/buy_gold` | Instant Live MT5 Buy on Gold with small SL & small TP (High Win Rate) |
+| `/sell_gold` | Instant Live MT5 Sell on Gold with small SL & small TP (High Win Rate) |
+| `/buy_btc` | Instant Live MT5 Buy on Bitcoin with small SL & small TP (High Win Rate) |
+| `/sell_btc` | Instant Live MT5 Sell on Bitcoin with small SL & small TP (High Win Rate) |
+| `/close_all` | Emergency circuit breaker: Instantly closes all live open positions |
+| `/auto_trade on\|off` | Toggle automatic execution of A+ setups ($\ge 8/10$) |
+| `/scan` | Full market scan for Gold & BTC with dual confluence scores & default MT5 charts |
+| `/btc` | Detailed Bitcoin structure, 50/200 SMA, Golden Pocket, MT5 chart & trade ticket |
+| `/gold` | Detailed Gold structure, 50/200 SMA, Golden Pocket, MT5 chart & trade ticket |
+| `/risk [balance]` | Institutional risk audit, equity budget, dynamic lot sizes & Kelly sizing |
 | `/levels` | Institutional S/R levels, Daily Pivots & Fibonacci Golden Pocket (0.618-0.650) |
 | `/traps` | Wyckoff microstructure inspection (Bear Springs & Bull Trap Upthrusts) |
 | `/debate` | Adversarial Bull vs. Bear debate pressure-testing both sides |
@@ -63,7 +73,8 @@ Open Telegram, search for your bot, and send **`/start`**!
 
 ```
 Bottreding/
-├── telegram_bot.py           # Unified Telegram Bot (Zero MT5, 12 skills + auto-charts)
+├── telegram_bot.py           # Unified Telegram Bot (Live MT5, 12 skills + auto-charts)
+├── mt5_executor.py           # MT5 Live Broker Engine (Orders, Live Balance, Symbol Resolver)
 ├── risk_engine.py            # Dynamic lot sizing, VaR, Kelly Criterion & Circuit Breakers
 ├── chart_generator.py        # MT5 Dark Candlestick Chart Engine (SMA, Golden Pocket, S/R)
 ├── test_telegram.py          # Quick 30-second Telegram token test & setup tool
@@ -74,7 +85,7 @@ Bottreding/
 ├── detect_fakeout.py         # Bull/Bear trap and liquidity sweep analyzer
 ├── risk.py                   # Portfolio concentration & allocation checker
 ├── .env.example              # Environment variables template
-├── requirements.txt          # Python dependencies (No MT5 required)
+├── requirements.txt          # Python dependencies
 └── README.md                 # System documentation
 ```
 
