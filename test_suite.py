@@ -306,6 +306,10 @@ class TestHardAssetProject(unittest.TestCase):
             "/risk",
             "/risk 25000",
 
+            # Quantitative Backtest Hub
+            "/backtest",
+            "/backtest gold scalp 90",
+
             # Status Hub
             "/status"
         ]

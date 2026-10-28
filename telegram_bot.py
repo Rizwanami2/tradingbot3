@@ -87,6 +87,13 @@ except Exception:
     live_broker = None
     MT5_EXECUTOR_AVAILABLE = False
 
+# Import Quantitative Backtesting Engine
+try:
+    from backtest import run_historical_backtest, format_backtest_telegram_card
+    BACKTEST_AVAILABLE = True
+except Exception:
+    BACKTEST_AVAILABLE = False
+
 # Live auto-trade state and separate watchlist ('OFF', 'BOTH', 'GOLD', 'BTC')
 AUTO_TRADE_MODE = "OFF"
 AUTO_TRADE_LIVE = False
@@ -848,7 +855,7 @@ def format_welcome_menu(sender_name: str) -> str:
         f"• MT5 Live Broker    : `{mt5_status}` (Auto-Managed Leverage)\n"
         f"• Active Strategy    : `{strat['name']}` (`{strat['code']}`) 🎯\n"
         f"• Auto-Trade Mode    : `{auto_desc}`\n"
-        f"• Auto-Trailing & BE : `{trail_st}` (+0.6R Breakeven / +1.0R Trail)\n\n"
+        f"• Auto-Trailing & BE : `{trail_st}` (+0.4R Breakeven / +0.75R Trail)\n\n"
         f"🗂️ *MODERN COMMAND HUBS:*\n"
         f"📊 `/market` - Institutional analysis & MT5 visual charts\n"
         f"   └ Options: `/market btc`, `/market gold`, `/market macro`, `/market levels`\n\n"
@@ -858,6 +865,7 @@ def format_welcome_menu(sender_name: str) -> str:
         f"   └ Options: `/strategy scalp`, `/strategy swing`, `/strategy balance`, `/strategy swap`\n\n"
         f"💼 `/portfolio` - Unified balance, equity, positions & risk budget\n\n"
         f"🛡️ `/trail` - Automated Trailing Stop & Breakeven controller (`/trail on|off`)\n\n"
+        f"📈 `/backtest` - Institutional historical strategy simulator (`/backtest [gold|btc] [scalp|swing]`)\n\n"
         f"🧠 `/learn` - Bayesian factor rankings & self-training (`/learn train`)\n\n"
         f"ℹ️ `/status` - Live server latency, MT5 connection & engine health\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -1610,7 +1618,36 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
         send_message(token, sender_id, risk_report)
         return
 
-    # ── 9. STATUS HUB (/status) ──
+    # ── 9. QUANTITATIVE BACKTEST HUB (/backtest [gold|btc] [scalp|swing|balance|swap] [days]) ──
+    if cmd == "/backtest":
+        parts = args_lower.split()
+        target_asset = "GOLD"
+        target_strat = None
+        target_days = 365
+
+        for p in parts:
+            if p in ("btc", "bitcoin"):
+                target_asset = "BTC"
+            elif p in ("gold", "xau", "xauusd"):
+                target_asset = "GOLD"
+            elif p in ("scalp", "swing", "balance", "swap"):
+                target_strat = p.upper()
+            elif p.isdigit():
+                target_days = max(30, min(int(p), 730))
+
+        if not target_strat:
+            target_strat = get_active_strategy()["code"] if RISK_ENGINE_AVAILABLE else "SCALP"
+
+        send_message(token, sender_id, f"⏳ Running institutional historical backtest for {target_asset} [{target_strat}] across past {target_days} days...")
+        if BACKTEST_AVAILABLE:
+            res = run_historical_backtest(asset=target_asset, strategy_code=target_strat, lookback_days=target_days)
+            card = format_backtest_telegram_card(res)
+            send_message(token, sender_id, card)
+        else:
+            send_message(token, sender_id, "⚠️ Backtesting engine temporarily unavailable.")
+        return
+
+    # ── 10. STATUS HUB (/status) ──
     if cmd == "/status":
         acc_data = live_broker.get_live_account_data() if (MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected) else None
         broker_line = f"🟢 Connected (#{acc_data['login']} on {acc_data['broker']})" if acc_data else "⚪ Disconnected (Open MT5 on VPS)"
