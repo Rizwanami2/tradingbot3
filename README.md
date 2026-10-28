@@ -46,9 +46,10 @@ Open Telegram, search for your bot, and send **`/start`**!
 | Command | Action |
 |---|---|
 | `/start` | Connects your session and displays menu |
-| `/scan` | Full market scan for Gold & BTC with dual confluence scores and default MT5 charts |
-| `/btc` | Detailed Bitcoin structure, 50/200 SMA, Golden Pocket, MT5 chart & trade ticket |
-| `/gold` | Detailed Gold structure, 50/200 SMA, Golden Pocket, MT5 chart & trade ticket |
+| `/scan` | Full market scan for Gold & BTC with dual confluence scores, lot sizing & default MT5 charts |
+| `/btc` | Detailed Bitcoin structure, 50/200 SMA, Golden Pocket, MT5 chart & trade ticket with exact lots |
+| `/gold` | Detailed Gold structure, 50/200 SMA, Golden Pocket, MT5 chart & trade ticket with exact lots |
+| `/risk` | Full institutional risk audit, equity budget, dynamic lot sizes, daily halt & Kelly sizing |
 | `/levels` | Institutional S/R levels, Daily Pivots & Fibonacci Golden Pocket (0.618-0.650) |
 | `/traps` | Wyckoff microstructure inspection (Bear Springs & Bull Trap Upthrusts) |
 | `/debate` | Adversarial Bull vs. Bear debate pressure-testing both sides |
@@ -63,6 +64,7 @@ Open Telegram, search for your bot, and send **`/start`**!
 ```
 Bottreding/
 ├── telegram_bot.py           # Unified Telegram Bot (Zero MT5, 12 skills + auto-charts)
+├── risk_engine.py            # Dynamic lot sizing, VaR, Kelly Criterion & Circuit Breakers
 ├── chart_generator.py        # MT5 Dark Candlestick Chart Engine (SMA, Golden Pocket, S/R)
 ├── test_telegram.py          # Quick 30-second Telegram token test & setup tool
 ├── autotrader_pipeline.py    # 4-stage deterministic execution engine
@@ -70,6 +72,7 @@ Bottreding/
 ├── terminal.py               # Interactive hard-asset multi-factor dashboard
 ├── find_levels.py            # Key level, S/R flip & Fibonacci Golden Pocket scanner
 ├── detect_fakeout.py         # Bull/Bear trap and liquidity sweep analyzer
+├── risk.py                   # Portfolio concentration & allocation checker
 ├── .env.example              # Environment variables template
 ├── requirements.txt          # Python dependencies (No MT5 required)
 └── README.md                 # System documentation

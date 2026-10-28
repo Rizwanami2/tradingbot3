@@ -67,6 +67,13 @@ try:
 except Exception:
     CHARTS_AVAILABLE = False
 
+# Import Institutional Risk Management & Sizing Engine
+try:
+    from risk_engine import calculate_lot_size, generate_risk_audit_text, validate_trade_risk
+    RISK_ENGINE_AVAILABLE = True
+except Exception:
+    RISK_ENGINE_AVAILABLE = False
+
 
 ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config_telegram.json")
@@ -87,6 +94,22 @@ def load_env():
                         os.environ[k] = v
         except Exception:
             pass
+
+
+def get_risk_config():
+    """Loads account balance and risk % from environment or defaults."""
+    load_env()
+    try:
+        balance = float(os.environ.get("ACCOUNT_BALANCE", "10000.0").strip())
+    except Exception:
+        balance = 10000.0
+
+    try:
+        risk_pct = float(os.environ.get("RISK_PCT_PER_TRADE", "1.0").strip())
+    except Exception:
+        risk_pct = 1.0
+
+    return balance, risk_pct
 
 
 def get_credentials():
@@ -509,6 +532,18 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
     reward_pct = abs(tp1 - curr) / curr * 100 if curr > 0 else 2.0
     rr = reward_pct / risk_pct if risk_pct > 0 else 2.0
 
+    account_balance, base_risk = get_risk_config()
+    target_risk = base_risk if is_a_plus else (base_risk * 0.5)
+    if RISK_ENGINE_AVAILABLE:
+        lot_info = calculate_lot_size(asset_type, curr, stop_loss, account_balance, target_risk)
+    else:
+        lot_info = {
+            "lots": 0.05,
+            "actual_risk_usd": round(account_balance * (target_risk / 100.0), 2),
+            "actual_risk_pct": target_risk,
+            "price_dist": round(abs(curr - stop_loss), 2)
+        }
+
     return {
         "asset": asset_type,
         "symbol": symbol,
@@ -535,7 +570,8 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
         "tp2": tp2,
         "risk_pct": risk_pct,
         "reward_pct": reward_pct,
-        "rr": rr
+        "rr": rr,
+        "lot_info": lot_info
     }
 
 
@@ -607,23 +643,29 @@ def format_scan_summary(data: dict) -> str:
     ]
 
     if b['is_a_plus']:
+        b_lot = b.get('lot_info', {})
+        b_lot_str = f"{b_lot.get('lots', 0.05)} BTC Lots (${b_lot.get('actual_risk_usd', 100.0):,.0f} risk)"
         lines.extend([
             f"⚡ *ACTIONABLE BTC ORDER TICKET:*",
             f"• Entry Zone: `${b['entry']:,.2f}`",
             f"• Stop-Loss:  `${b['stop_loss']:,.2f}` (-{b['risk_pct']:.2f}%)",
             f"• Target 1:   `${b['tp1']:,.2f}` (+{b['reward_pct']:.2f}%)",
             f"• Target 2:   `${b['tp2']:,.2f}`",
+            f"• Position Size: `{b_lot_str}`",
             f"• Risk/Reward: 1:{b['rr']:.2f}",
             ""
         ])
 
     if g['is_a_plus']:
+        g_lot = g.get('lot_info', {})
+        g_lot_str = f"{g_lot.get('lots', 0.05)} Standard Lots (${g_lot.get('actual_risk_usd', 100.0):,.0f} risk)"
         lines.extend([
             f"⚡ *ACTIONABLE GOLD ORDER TICKET:*",
             f"• Entry Zone: `${g['entry']:,.2f}`",
             f"• Stop-Loss:  `${g['stop_loss']:,.2f}` (-{g['risk_pct']:.2f}%)",
             f"• Target 1:   `${g['tp1']:,.2f}` (+{g['reward_pct']:.2f}%)",
             f"• Target 2:   `${g['tp2']:,.2f}`",
+            f"• Position Size: `{g_lot_str}`",
             f"• Risk/Reward: 1:{g['rr']:.2f}",
             ""
         ])
@@ -732,6 +774,7 @@ def start_bot():
                             f"• `/scan` - Full multi-skill audit for Gold & BTC (with default MT5 Charts)\n"
                             f"• `/btc` - Deep Bitcoin audit with MT5 Chart & Trade Ticket\n"
                             f"• `/gold` - Deep Gold audit with MT5 Chart & Trade Ticket\n"
+                            f"• `/risk [balance]` - Institutional risk audit & exact lot sizing (e.g. `/risk 25000`)\n"
                             f"• `/levels` - Institutional S/R, Pivots & Golden Pocket\n"
                             f"• `/traps` - Wyckoff trap inspection (Springs & Upthrusts)\n"
                             f"• `/debate` - Adversarial Bull vs. Bear debate\n"
@@ -777,6 +820,7 @@ def start_bot():
                             f"• Stop-Loss: `${b['stop_loss']:,.2f}` (-{b['risk_pct']:.2f}%)\n"
                             f"• Target 1: `${b['tp1']:,.2f}` (+{b['reward_pct']:.2f}%)\n"
                             f"• Target 2: `${b['tp2']:,.2f}`\n"
+                            f"• Position Size: `{b['lot_info']['lots']}` BTC Lots (${b['lot_info']['actual_risk_usd']:,.2f} risk | {b['lot_info']['actual_risk_pct']:.2f}% equity)\n"
                             f"• Risk/Reward: 1:{b['rr']:.2f}"
                         )
                         send_message(token, sender_id, ticket)
@@ -807,6 +851,7 @@ def start_bot():
                             f"• Stop-Loss: `${g['stop_loss']:,.2f}` (-{g['risk_pct']:.2f}%)\n"
                             f"• Target 1: `${g['tp1']:,.2f}` (+{g['reward_pct']:.2f}%)\n"
                             f"• Target 2: `${g['tp2']:,.2f}`\n"
+                            f"• Position Size: `{g['lot_info']['lots']}` Standard Lots (${g['lot_info']['actual_risk_usd']:,.2f} risk | {g['lot_info']['actual_risk_pct']:.2f}% equity)\n"
                             f"• Risk/Reward: 1:{g['rr']:.2f}"
                         )
                         send_message(token, sender_id, ticket)
@@ -814,6 +859,38 @@ def start_bot():
                             g_buf = generate_mt5_chart("GC=F", "GOLD (XAU/USD)")
                             if g_buf:
                                 send_telegram_chart(token, sender_id, g_buf, f"📊 MT5 Chart: Gold (${g['price']:,.2f})")
+
+                    elif msg_text.startswith("/risk"):
+                        parts = msg_text.strip().split()
+                        custom_bal = None
+                        if len(parts) > 1:
+                            try:
+                                custom_bal = float(parts[1].replace("$", "").replace(",", ""))
+                            except ValueError:
+                                pass
+
+                        cfg_bal, cfg_risk = get_risk_config()
+                        active_bal = custom_bal if (custom_bal and custom_bal > 0) else cfg_bal
+
+                        send_message(token, sender_id, f"🛡️ Computing institutional risk audit & position sizing for ${active_bal:,.2f} equity...")
+                        data = run_full_pipeline()
+
+                        win_rate = 0.55
+                        if LEARNING_AVAILABLE and learning_engine and learning_engine.total_signals > 0:
+                            win_rate = learning_engine.overall_win_rate
+
+                        if RISK_ENGINE_AVAILABLE:
+                            risk_report = generate_risk_audit_text(
+                                account_balance=active_bal,
+                                risk_pct=cfg_risk,
+                                btc_data=data["btc"],
+                                gold_data=data["gold"],
+                                win_rate=win_rate
+                            )
+                        else:
+                            risk_report = f"🛡️ *Risk Audit:* Balance `${active_bal:,.2f}` | 1% Risk: `${active_bal*0.01:,.2f}`"
+
+                        send_message(token, sender_id, risk_report)
 
                     elif msg_text.startswith("/levels"):
                         data = run_full_pipeline()
