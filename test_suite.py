@@ -98,8 +98,29 @@ class TestHardAssetProject(unittest.TestCase):
         self.assertFalse(scalp_bad["passed"])
         self.assertIn("Rejection Wick", scalp_bad["veto_reasons"][0])
 
-        scalp_good = risk_engine.validate_strategy_accuracy("SCALP", "GOLD", 2740.0, atr=28.0, rsi=52.0, adx=24.0, levels=mock_levels, trap_type="CLEAN", upper_wick_pct=10.0)
+        # Scalp: Candle body < 35% (indecision doji) should fail
+        scalp_doji = risk_engine.validate_strategy_accuracy("SCALP", "GOLD", 2740.0, atr=28.0, rsi=52.0, adx=24.0, levels=mock_levels, trap_type="CLEAN", upper_wick_pct=10.0, candle_body_pct=25.0)
+        self.assertFalse(scalp_doji["passed"])
+        self.assertIn("Indecision Candle Body", scalp_doji["veto_reasons"][0])
+
+        scalp_good = risk_engine.validate_strategy_accuracy("SCALP", "GOLD", 2740.0, atr=28.0, rsi=52.0, adx=24.0, levels=mock_levels, trap_type="CLEAN", upper_wick_pct=10.0, candle_body_pct=60.0)
         self.assertTrue(scalp_good["passed"])
+
+        # Swing: Directional flow alignment (+DI vs -DI)
+        swing_bear_di = risk_engine.validate_strategy_accuracy("SWING", "GOLD", 2740.0, atr=28.0, rsi=52.0, adx=28.0, levels=mock_levels, trap_type="CLEAN", plus_di=15.0, minus_di=30.0, action="BUY")
+        self.assertFalse(swing_bear_di["passed"])
+        self.assertIn("Bearish Directional Flow", swing_bear_di["veto_reasons"][0])
+
+        # Session & Rollover intelligence
+        from datetime import datetime
+        dt_rollover = datetime(2026, 10, 28, 22, 5)
+        dt_overlap = datetime(2026, 10, 28, 14, 0)
+        sess_roll = risk_engine.get_market_session(dt_rollover)
+        sess_over = risk_engine.get_market_session(dt_overlap)
+        self.assertTrue(sess_roll["is_rollover"])
+        self.assertEqual(sess_roll["badge"], "🚨")
+        self.assertTrue(sess_over["is_golden_overlap"])
+        self.assertEqual(sess_over["badge"], "🌟")
 
         # Swing: ADX < 20 (chop) should fail
         swing_bad = risk_engine.validate_strategy_accuracy("SWING", "GOLD", 2740.0, atr=28.0, rsi=52.0, adx=15.0, levels=mock_levels, trap_type="CLEAN")

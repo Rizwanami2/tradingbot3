@@ -72,7 +72,8 @@ try:
     from risk_engine import (
         calculate_lot_size, generate_risk_audit_text, validate_trade_risk,
         calculate_sniper_levels, calculate_strategy_levels, STRATEGIES,
-        set_active_strategy, get_active_strategy, validate_strategy_accuracy
+        set_active_strategy, get_active_strategy, validate_strategy_accuracy,
+        get_market_session
     )
     RISK_ENGINE_AVAILABLE = True
 except Exception:
@@ -271,9 +272,9 @@ def compute_atr(df, period: int = 14) -> float:
 
 
 def compute_adx(df, period: int = 14) -> tuple:
-    """Computes ADX and determines regime (Trending > 25 vs Chop < 20)."""
+    """Computes ADX and determines regime (Trending > 25 vs Chop < 20), plus Directional Indicators (+DI, -DI)."""
     if len(df) < period * 2:
-        return 22.0, "CHOP / RANGE"
+        return 22.0, "CHOP / RANGE", 20.0, 20.0
     
     up_move = df["High"] - df["High"].shift(1)
     down_move = df["Low"].shift(1) - df["Low"]
@@ -295,9 +296,11 @@ def compute_adx(df, period: int = 14) -> tuple:
     dx = 100 * (np.abs(plus_di - minus_di) / (plus_di + minus_di))
     adx_series = dx.rolling(period).mean()
     adx = float(adx_series.iloc[-1]) if not adx_series.empty and not np.isnan(adx_series.iloc[-1]) else 22.0
+    plus_di_val = float(plus_di.iloc[-1]) if not plus_di.empty and not np.isnan(plus_di.iloc[-1]) else 20.0
+    minus_di_val = float(minus_di.iloc[-1]) if not minus_di.empty and not np.isnan(minus_di.iloc[-1]) else 20.0
 
     regime = "TRENDING (ADX > 25)" if adx >= 25 else "CHOP / CONSOLIDATION (ADX < 20)" if adx <= 20 else "TRANSITIONAL (20-25)"
-    return adx, regime
+    return adx, regime, plus_di_val, minus_di_val
 
 
 # ==============================================================================
@@ -444,7 +447,7 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
     # Technical indicators
     rsi = compute_rsi(hist["Close"], 14)
     atr = compute_atr(hist, 14)
-    adx, regime = compute_adx(hist, 14)
+    adx, regime, plus_di, minus_di = compute_adx(hist, 14)
 
     # Imbalance & Trap analysis
     fvg = detect_fvg(hist)
@@ -540,6 +543,7 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
     c_range = c_high - c_low
     up_wick_pct = ((c_high - max(c_open, c_close)) / c_range * 100) if c_range > 0 else 0.0
     low_wick_pct = ((min(c_open, c_close) - c_low) / c_range * 100) if c_range > 0 else 0.0
+    candle_body_pct = ((abs(c_close - c_open)) / c_range * 100) if c_range > 0 else 50.0
 
     acc_data = live_broker.get_live_account_data() if (MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected) else None
     broker_lev = acc_data.get("leverage") if acc_data else None
@@ -562,6 +566,9 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
             trap_type=trap_type,
             upper_wick_pct=up_wick_pct,
             lower_wick_pct=low_wick_pct,
+            candle_body_pct=candle_body_pct,
+            plus_di=plus_di,
+            minus_di=minus_di,
             macro=macro,
             swap_info=swap_info,
             action="BUY"
@@ -645,12 +652,16 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
         "rsi": rsi,
         "atr": atr,
         "adx": adx,
+        "plus_di": plus_di,
+        "minus_di": minus_di,
         "regime": regime,
         "fvg": fvg,
         "mayer": mayer,
         "vol30": vol30,
+        "candle_body_pct": candle_body_pct,
         "trap_type": trap_type,
         "trap_detail": trap_detail,
+        "strat_accuracy": strat_accuracy,
         "base_score": base_score,
         "adaptive_score": adaptive_score,
         "final_score": final_score,
@@ -760,11 +771,17 @@ def format_scan_summary(data: dict) -> str:
     if not b or not g:
         return "⚠️ Market data temporarily unavailable from provider. Retrying momentarily..."
 
+    session_info = get_market_session() if RISK_ENGINE_AVAILABLE else None
+    strat = get_active_strategy() if RISK_ENGINE_AVAILABLE else {"name": "Scalp Sniper", "code": "SCALP"}
+    session_badge = f"{session_info.get('badge', '🌐')} {session_info.get('name', 'Active')}" if session_info else "Active Market"
+    edge_str = session_info.get('win_rate_edge', 'Normal') if session_info else 'Normal'
+
     b_gp_str = f"✅ INSIDE (${b['levels']['fib_650']:,.0f} - ${b['levels']['fib_618']:,.0f})" if b['levels']['in_golden_pocket'] else "Outside GP"
     g_gp_str = f"✅ INSIDE (${g['levels']['fib_650']:,.0f} - ${g['levels']['fib_618']:,.0f})" if g['levels']['in_golden_pocket'] else "Outside GP"
 
     lines = [
-        "📊 *HARD-ASSET MULTI-SKILL SCAN*",
+        f"📊 *HARD-ASSET MULTI-SKILL SCAN* ({session_badge})",
+        f"🎯 Active Profile: *{strat['name']} ({strat['code']})* | Edge: `{edge_str}`",
         "",
         f"🌐 *Macro Radar:*",
         f"• DXY: `{m['dxy']:.2f}` ({m['dxy_chg']:+.2f}%) | 10Y Yield: `{m['tnx']:.2f}%`",
@@ -772,15 +789,15 @@ def format_scan_summary(data: dict) -> str:
         "",
         f"₿ *Bitcoin (BTC-USD):* `${b['price']:,.2f}`",
         f"• Score: `{b['base_score']}/10` (Learned: `{b['adaptive_score']:.1f}/10`) ──► {b['verdict']}",
-        f"• Regime: `{b['regime']}` (ADX: `{b['adx']:.1f}`)",
+        f"• Regime: `{b['regime']}` (ADX: `{b['adx']:.1f}` | DI: +{b.get('plus_di', 0):.0f}/-{b.get('minus_di', 0):.0f})",
         f"• Golden Pocket: {b_gp_str}",
-        f"• Microstructure: `{b['trap_type']}` | FVG: `{b['fvg']}`",
+        f"• Microstructure: `{b['trap_type']}` | Body: `{b.get('candle_body_pct', 50):.0f}%`",
         "",
         f"🥇 *Gold (XAU/USD):* `${g['price']:,.2f}`",
         f"• Score: `{g['base_score']}/10` (Learned: `{g['adaptive_score']:.1f}/10`) ──► {g['verdict']}",
-        f"• Regime: `{g['regime']}` (ADX: `{g['adx']:.1f}`)",
+        f"• Regime: `{g['regime']}` (ADX: `{g['adx']:.1f}` | DI: +{g.get('plus_di', 0):.0f}/-{g.get('minus_di', 0):.0f})",
         f"• Golden Pocket: {g_gp_str}",
-        f"• Microstructure: `{g['trap_type']}` | FVG: `{g['fvg']}`",
+        f"• Microstructure: `{g['trap_type']}` | Body: `{g.get('candle_body_pct', 50):.0f}%`",
         ""
     ]
 
@@ -853,11 +870,11 @@ def trailing_monitor_worker(token: str, chat_id_getter):
     Automated Profile-Aware Trailing Stop & Breakeven Monitor.
     Runs every 12 seconds:
       - Automatically reads strategy profile (SCALP, SWING, BALANCE, SWAP) from position comment or active strategy.
-      - SCALP: Locks Breakeven at +0.45R, trails at +0.80R (0.35R step).
+      - SCALP: Locks Breakeven at +0.40R, trails at +0.75R (0.30R step).
       - SWING: Locks Breakeven at +1.00R, trails at +1.50R (0.70R step).
-      - BALANCE: Locks Breakeven at +0.65R, trails at +1.10R (0.40R step).
+      - BALANCE: Locks Breakeven at +0.60R, trails at +1.05R (0.35R step).
       - SWAP: Locks Breakeven at +0.80R, trails at +1.30R (0.60R step).
-      - Rollover hour protection (freezes modifications during 21:55-22:08 UTC).
+      - Rollover hour protection (freezes modifications during 21:50-22:15 UTC).
     """
     global TRAILING_STOP_ENABLED
     print("🛡️ Automated Profile-Aware Trailing Stop & Breakeven Monitor: ACTIVE (Every 12s)")
@@ -888,24 +905,30 @@ def format_elite_alert(asset: str, data: dict) -> str:
     icon = "₿" if asset == "BTC" else "🥇"
     lv = item["levels"]
     lot_info = item.get("lot_info", {})
+    strat_code = lot_info.get("strategy", "SCALP")
+    strat = STRATEGIES.get(strat_code, {}) if RISK_ENGINE_AVAILABLE else {}
+    target_wr = strat.get("target_win_rate", "80-85%")
+    session_info = get_market_session() if RISK_ENGINE_AVAILABLE else None
 
     lines = [
         f"🎯 *ELITE A+ TRADE SIGNAL (SCORE: {item['final_score']}/10)*",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         f"{icon} *Asset:* `{sym_name}`",
+        f"• Strategy Profile: `{strat.get('name', strat_code)} ({strat_code})` 🎯",
+        f"• Win-Rate Edge: `{target_wr}` ({session_info['badge'] if session_info else '🌐'} {session_info['name'] if session_info else 'Active'})",
         f"• Live Price: `${item['price']:,.2f}`",
         f"• Confluence: {'✅ Golden Pocket Active' if lv['in_golden_pocket'] else 'Key S/R Flip Level'}",
-        f"• Microstructure: `{item['trap_type']}` (Anti-Trap Clean)",
+        f"• Microstructure: `{item['trap_type']}` (Body: `{item.get('candle_body_pct', 50):.0f}%`)",
         f"• Momentum: `{item['regime']}` (ADX: `{item['adx']:.1f}`)",
         "",
         "⚡ *Precision Sniper Order Ticket:*",
         f"• Action: `BUY` (High Probability Setup)",
         f"• Entry Zone: `${item['entry']:,.2f}`",
         f"• Small Stop-Loss:  `${item['stop_loss']:,.2f}` (-{item['risk_pct']:.2f}%)",
-        f"• Small Take-Profit: `${item['tp1']:,.2f}` (+{item['reward_pct']:.2f}% | 1.2R Scalp)",
-        f"• Extended Target:   `${item['tp2']:,.2f}` (+2.0R)",
+        f"• Small Take-Profit: `${item['tp1']:,.2f}` (+{item['reward_pct']:.2f}% | {strat.get('rr_tp1', 1.2):.1f}R)",
+        f"• Extended Target:   `${item['tp2']:,.2f}` (+{strat.get('rr_tp2', 2.0):.1f}R)",
         f"• Recommended Size:  `{lot_info.get('lots', 0.05)}` Lots (${lot_info.get('actual_risk_usd', 50):,.2f} risk)",
-        f"• Win-Rate Focus:    `~75% High Probability Target`",
+        f"• Breakeven / Trail: BE at `+{strat.get('breakeven_r', 0.40):.2f}R` | Trail at `+{strat.get('trail_start_r', 0.75):.2f}R`",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         "🔒 *Anti-Spam Filter:* This signal is locked. Zero duplicate alerts while in progress."
     ]
@@ -1406,25 +1429,25 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             f"Active Strategy: *{curr_s['name']} ({curr_s['code']})* 🎯\n\n"
             f"Available Institutional Profiles:\n"
             f"1. ⚡ *SCALP* (`/strategy scalp`)\n"
-            f"   • Profile Risk: `0.50%` | Win Rate: `~75-80%`\n"
+            f"   • Profile Risk: `0.50%` | Target Win Rate: `~80-85%`\n"
             f"   • SL: `0.45x ATR` | Targets: `1.2R` / `2.0R`\n"
-            f"   • Trail: BE at `+0.45R` | Trail at `+0.80R` (0.35R step)\n"
-            f"   • Accuracy: Rejection wick <25%, RSI 35-68, High ATR\n\n"
+            f"   • Trail: BE at `+0.40R` | Trail at `+0.75R` (0.30R step)\n"
+            f"   • Accuracy: Rejection wick <20%, Candle body >=40%, RSI 38-68\n\n"
             f"2. 🌊 *SWING* (`/strategy swing`)\n"
-            f"   • Profile Risk: `1.00%` | Asymmetric Multi-Day Wave\n"
+            f"   • Profile Risk: `1.00%` | Target Win Rate: `~68-75%`\n"
             f"   • SL: `1.20x ATR` | Targets: `2.5R` / `3.5R`\n"
             f"   • Trail: BE at `+1.00R` | Trail at `+1.50R` (0.70R step)\n"
-            f"   • Accuracy: ADX >= 22 (Trending Only), Above 50 & 200 SMA\n\n"
+            f"   • Accuracy: ADX >= 22 (+DI > -DI), Above 50 & 200 SMA\n\n"
             f"3. ⚖️ *BALANCE* (`/strategy balance`)\n"
-            f"   • Profile Risk: `0.75%` | Mean-Reversion\n"
+            f"   • Profile Risk: `0.75%` | Target Win Rate: `~78-83%`\n"
             f"   • SL: `0.75x ATR` | Target: `1.8R` to 0.50 Fib Equilibrium\n"
-            f"   • Trail: BE at `+0.65R` | Trail at `+1.10R` (0.40R step)\n"
-            f"   • Accuracy: ADX <= 26 (Chop/Range), Extreme GP/S1 location\n\n"
+            f"   • Trail: BE at `+0.60R` | Trail at `+1.05R` (0.35R step)\n"
+            f"   • Accuracy: ADX <= 25 (Chop/Range), Extreme GP/S1 location\n\n"
             f"4. 🔄 *SWAP* (`/strategy swap`)\n"
-            f"   • Profile Risk: `0.75%` | Positive Carry & Financing\n"
+            f"   • Profile Risk: `0.75%` | Target Win Rate: `~72-78%`\n"
             f"   • SL: `0.90x ATR` | Targets: `2.0R` / `3.0R`\n"
             f"   • Trail: BE at `+0.80R` | Trail at `+1.30R` (0.60R step)\n"
-            f"   • Accuracy: Favorable rollover swap side, VIX <= 24\n"
+            f"   • Accuracy: Favorable rollover carry, VIX <= 22, Wed 3x check\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"Switch anytime: `/strategy scalp`, `/strategy swing`, `/strategy balance`, `/strategy swap`"
         )
@@ -1502,7 +1525,7 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
         sub = args_lower.strip()
         if sub in ("on", "true", "enable", "1"):
             TRAILING_STOP_ENABLED = True
-            send_message(token, sender_id, "🛡️ *AUTOMATED PROFILE-AWARE TRAILING STOP: ENABLED 🟢*\n• Scans open live MT5 positions every 12 seconds.\n• Adapts breakeven and trailing distance to each position's strategy profile (SCALP, SWING, BALANCE, SWAP).\n• Rollover insulation freezes trail during 21:55-22:08 UTC daily spread spikes.")
+            send_message(token, sender_id, "🛡️ *AUTOMATED PROFILE-AWARE TRAILING STOP: ENABLED 🟢*\n• Scans open live MT5 positions every 12 seconds.\n• Adapts breakeven and trailing distance to each position's strategy profile (SCALP, SWING, BALANCE, SWAP).\n• Rollover insulation freezes trail during 21:50-22:15 UTC daily spread spikes.")
             return
         elif sub in ("off", "false", "disable", "0"):
             TRAILING_STOP_ENABLED = False
@@ -1510,16 +1533,16 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             return
         else:
             st = "ENABLED 🟢" if TRAILING_STOP_ENABLED else "DISABLED ⚪"
-            curr_s = get_active_strategy() if RISK_ENGINE_AVAILABLE else {"name": "Scalp Sniper", "code": "SCALP", "breakeven_r": 0.45, "trail_start_r": 0.80, "trail_step_r": 0.35}
+            curr_s = get_active_strategy() if RISK_ENGINE_AVAILABLE else {"name": "Scalp Sniper", "code": "SCALP", "breakeven_r": 0.40, "trail_start_r": 0.75, "trail_step_r": 0.30}
             send_message(token, sender_id, (
                 f"🛡️ *AUTOMATED PROFILE-AWARE TRAILING CONTROLLER*\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"• Monitor Status     : `{st}`\n"
                 f"• Active Profile     : *{curr_s['name']} ({curr_s['code']})* 🎯\n"
-                f"• Breakeven Trigger  : `+{curr_s.get('breakeven_r', 0.60):.2f}R` (Instant Risk-Free)\n"
-                f"• Trailing Trigger   : Starts at `+{curr_s.get('trail_start_r', 1.00):.2f}R`\n"
-                f"• Trailing Step      : `{curr_s.get('trail_step_r', 0.50):.2f}R` behind price\n"
-                f"• Rollover Shield    : `ACTIVE (Insulated from 21:55-22:08 UTC spread spikes)`\n"
+                f"• Breakeven Trigger  : `+{curr_s.get('breakeven_r', 0.40):.2f}R` (Instant Risk-Free)\n"
+                f"• Trailing Trigger   : Starts at `+{curr_s.get('trail_start_r', 0.75):.2f}R`\n"
+                f"• Trailing Step      : `{curr_s.get('trail_step_r', 0.30):.2f}R` behind price\n"
+                f"• Rollover Shield    : `ACTIVE (Insulated from 21:50-22:15 UTC spread spikes)`\n"
                 f"• Position Tracking  : Auto-detects SCALP / SWING / BALANCE / SWAP from ticket comment\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"Controls: `/trail on` to enable, `/trail off` to disable."

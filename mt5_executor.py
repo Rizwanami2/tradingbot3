@@ -270,6 +270,15 @@ class MT5LiveBroker:
         digits = sym_info.digits
         point = sym_info.point or (10 ** -digits)
 
+        # Spread-to-Risk Win-Rate Protection Guardrail
+        spread_cost = sym_info.spread * point
+        sl_distance = abs(fill_price - stop_loss)
+        if sl_distance > 0 and (spread_cost / sl_distance) > 0.18:
+            return {
+                "success": False,
+                "error": f"Broker spread too wide ({sym_info.spread} pts = ${spread_cost:.2f}) taking >18% of SL distance (${sl_distance:.2f}). Order blocked to protect win-rate."
+            }
+
         # Auto-calculate margin with broker leverage
         acc = self.account_info
         if acc and hasattr(mt5, "order_calc_margin"):
@@ -385,9 +394,9 @@ class MT5LiveBroker:
     TRAIL_PROFILES = {
         "SCALP": {
             "name": "SCALP",
-            "breakeven_r": 0.45,
-            "trail_start_r": 0.80,
-            "trail_step_r": 0.35,
+            "breakeven_r": 0.40,
+            "trail_start_r": 0.75,
+            "trail_step_r": 0.30,
         },
         "SWING": {
             "name": "SWING",
@@ -397,9 +406,9 @@ class MT5LiveBroker:
         },
         "BALANCE": {
             "name": "BALANCE",
-            "breakeven_r": 0.65,
-            "trail_start_r": 1.10,
-            "trail_step_r": 0.40,
+            "breakeven_r": 0.60,
+            "trail_start_r": 1.05,
+            "trail_step_r": 0.35,
         },
         "SWAP": {
             "name": "SWAP",
@@ -414,19 +423,19 @@ class MT5LiveBroker:
         """
         Automated Profile-Aware Trailing Stop & Breakeven Protection.
         Adapts trailing mechanics dynamically based on each position's strategy profile:
-          - SCALP: Fast breakeven at +0.45R, tight trailing starting at +0.80R (0.35R step).
+          - SCALP: Fast breakeven at +0.40R, tight trailing starting at +0.75R (0.30R step).
           - SWING: Wide breakeven at +1.00R, structural trailing starting at +1.50R (0.70R step).
-          - BALANCE: Breakeven at +0.65R, dynamic equilibrium trailing starting at +1.10R (0.40R step).
+          - BALANCE: Breakeven at +0.60R, dynamic equilibrium trailing starting at +1.05R (0.35R step).
           - SWAP: Breakeven at +0.80R, wide carry buffer starting at +1.30R (0.60R step).
-        Includes automatic rollover spread-spike insulation (freezes trail during 21:55-22:08 UTC daily).
+        Includes automatic rollover spread-spike insulation (freezes trail during 21:50-22:15 UTC daily).
         Returns list of modification events for alerts.
         """
         if not self.ensure_connected():
             return []
 
-        # ── 1. Rollover Spread-Spike Insulation (21:55 - 22:08 UTC) ──
+        # ── 1. Rollover Spread-Spike Insulation (21:50 - 22:15 UTC) ──
         now_utc = datetime.utcnow()
-        if (now_utc.hour == 21 and now_utc.minute >= 55) or (now_utc.hour == 22 and now_utc.minute <= 8):
+        if (now_utc.hour == 21 and now_utc.minute >= 50) or (now_utc.hour == 22 and now_utc.minute <= 15):
             return []
 
         positions = mt5.positions_get()
