@@ -105,9 +105,7 @@ class SelfLearningEngine:
         tmp_path = self.memory_path + ".tmp"
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(self.memory, f, indent=2)
-        if os.path.exists(self.memory_path):
-            os.remove(self.memory_path)
-        os.rename(tmp_path, self.memory_path)
+        os.replace(tmp_path, self.memory_path)
 
     def calculate_score(self, asset: str, active_features: dict) -> tuple:
         """

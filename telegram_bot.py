@@ -610,11 +610,54 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
     }
 
 
+_last_pipeline_cache = {
+    "macro": None,
+    "btc": None,
+    "gold": None,
+    "timestamp": 0
+}
+
+
 def run_full_pipeline():
-    macro = fetch_macro_context()
-    btc = analyze_asset_complete("BTC-USD", "BTC", macro)
-    gold = analyze_asset_complete("GC=F", "GOLD", macro)
-    return {"macro": macro, "btc": btc, "gold": gold}
+    global _last_pipeline_cache
+    now = time.time()
+    # Cache for up to 10 seconds to avoid provider rate-limits on rapid commands
+    if _last_pipeline_cache["btc"] and _last_pipeline_cache["gold"] and (now - _last_pipeline_cache["timestamp"] < 10):
+        return _last_pipeline_cache
+
+    try:
+        macro = fetch_macro_context()
+    except Exception:
+        macro = _last_pipeline_cache["macro"] or {
+            "dxy": 102.0, "dxy_chg": 0.0, "tnx": 4.5, "tnx_chg": 0.0,
+            "vix": 18.0, "gsr": 80.0, "fg_val": 50, "fg_label": "Neutral"
+        }
+
+    try:
+        btc = analyze_asset_complete("BTC-USD", "BTC", macro)
+    except Exception:
+        btc = None
+
+    try:
+        gold = analyze_asset_complete("GC=F", "GOLD", macro)
+    except Exception:
+        gold = None
+
+    # Resilient fallback to last known good snapshot if temporary provider failure
+    if btc is None and _last_pipeline_cache["btc"]:
+        btc = _last_pipeline_cache["btc"]
+    if gold is None and _last_pipeline_cache["gold"]:
+        gold = _last_pipeline_cache["gold"]
+
+    result = {"macro": macro, "btc": btc, "gold": gold}
+    if btc and gold:
+        _last_pipeline_cache = {
+            "macro": macro,
+            "btc": btc,
+            "gold": gold,
+            "timestamp": now
+        }
+    return result
 
 
 # ==============================================================================
@@ -622,20 +665,23 @@ def run_full_pipeline():
 # ==============================================================================
 
 def generate_adversarial_debate(data: dict) -> str:
-    m = data["macro"]
-    b = data["btc"]
-    g = data["gold"]
+    m = data.get("macro", {})
+    b = data.get("btc")
+    g = data.get("gold")
+
+    if not b or not g:
+        return "⚠️ Market data temporarily unavailable for dialectical debate. Please try again."
 
     lines = [
         "⚔️ *ADVERSARIAL BULL VS. BEAR DEBATE*",
         "",
         "₿ *BITCOIN (BTC-USD):*",
         f"🐂 *Bull Thesis:* Price (${b['price']:,.2f}) supported by 200 SMA (${b['levels']['ma200']:,.0f}). Mayer Multiple at {b['mayer']:.2f}x indicates institutional accumulation zone without retail euphoria. Market regime is {b['regime']}.",
-        f"🐻 *Bear Counter:* Macro 10Y Yields at {m['tnx']:.2f}% ({m['tnx_chg']:+.2f}%) maintain liquidity drag. Recent imbalance: {b['fvg']}. Invalidation stop sits at ${b['stop_loss']:,.2f}.",
+        f"🐻 *Bear Counter:* Macro 10Y Yields at {m.get('tnx', 4.5):.2f}% ({m.get('tnx_chg', 0.0):+.2f}%) maintain liquidity drag. Recent imbalance: {b['fvg']}. Invalidation stop sits at ${b['stop_loss']:,.2f}.",
         "",
         "🥇 *GOLD (XAU/USD):*",
-        f"🐂 *Bull Thesis:* Gold/Silver Ratio at {m['gsr']:.1f}x signals structural metal undervaluation. Physical central bank demand creates solid floor. No bull trap rejection.",
-        f"🐻 *Bear Counter:* DXY trading at {m['dxy']:.2f} ({m['dxy_chg']:+.2f}%). Real yield firmness caps explosive breakout momentum until DXY rolls over.",
+        f"🐂 *Bull Thesis:* Gold/Silver Ratio at {m.get('gsr', 80.0):.1f}x signals structural metal undervaluation. Physical central bank demand creates solid floor. No bull trap rejection.",
+        f"🐻 *Bear Counter:* DXY trading at {m.get('dxy', 102.0):.2f} ({m.get('dxy_chg', 0.0):+.2f}%). Real yield firmness caps explosive breakout momentum until DXY rolls over.",
         "",
         f"⚖️ *Consensus Verdict:*",
         f"• BTC: {b['verdict']}",
@@ -649,9 +695,12 @@ def generate_adversarial_debate(data: dict) -> str:
 # ==============================================================================
 
 def format_scan_summary(data: dict) -> str:
-    m = data["macro"]
-    b = data["btc"]
-    g = data["gold"]
+    m = data.get("macro", {})
+    b = data.get("btc")
+    g = data.get("gold")
+
+    if not b or not g:
+        return "⚠️ Market data temporarily unavailable from provider. Retrying momentarily..."
 
     b_gp_str = f"✅ INSIDE (${b['levels']['fib_650']:,.0f} - ${b['levels']['fib_618']:,.0f})" if b['levels']['in_golden_pocket'] else "Outside GP"
     g_gp_str = f"✅ INSIDE (${g['levels']['fib_650']:,.0f} - ${g['levels']['fib_618']:,.0f})" if g['levels']['in_golden_pocket'] else "Outside GP"
@@ -793,6 +842,7 @@ def auto_scanner_worker(token: str, chat_id_getter):
       5. Optional Auto-Trade Execution if /auto_trade on.
     """
     print("⏰ Automated 1-Minute Live Candle Scanner: ACTIVE (Monitoring Gold & BTC every 60s)")
+    global AUTO_TRADE_LIVE
 
     # Active setup trackers (None = IDLE; dict = setup currently active and locked)
     active_btc_setup = None
@@ -810,7 +860,7 @@ def auto_scanner_worker(token: str, chat_id_getter):
                 continue
 
             data = run_full_pipeline()
-            if not data:
+            if not data or not data.get("btc") or not data.get("gold"):
                 continue
 
             b = data["btc"]
@@ -908,6 +958,7 @@ def auto_scanner_worker(token: str, chat_id_getter):
 
 
 def start_bot():
+    global AUTO_TRADE_LIVE
     token, chat_id = get_credentials()
 
     if not token or token == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
@@ -1000,7 +1051,10 @@ def start_bot():
 
                     elif msg_text.startswith("/btc"):
                         data = run_full_pipeline()
-                        b = data["btc"]
+                        b = data.get("btc")
+                        if not b:
+                            send_message(token, sender_id, "⚠️ Market data for Bitcoin is temporarily unavailable. Please retry in a moment.")
+                            continue
                         lv = b["levels"]
                         ticket = (
                             f"₿ *Bitcoin (BTC-USD) Multi-Skill Audit:*\n"
@@ -1030,9 +1084,12 @@ def start_bot():
 
                     elif msg_text.startswith("/gold"):
                         data = run_full_pipeline()
-                        g = data["gold"]
+                        g = data.get("gold")
+                        if not g:
+                            send_message(token, sender_id, "⚠️ Market data for Gold is temporarily unavailable. Please retry in a moment.")
+                            continue
                         lv = g["levels"]
-                        m = data["macro"]
+                        m = data.get("macro", {})
                         ticket = (
                             f"🥇 *Gold (XAU/USD / GC=F) Multi-Skill Audit:*\n"
                             f"• Price: `${g['price']:,.2f}`\n"
@@ -1153,7 +1210,10 @@ def start_bot():
                         else:
                             send_message(token, sender_id, f"⚡ Executing Live {action} Order on Gold (XAU/USD)...")
                             data = run_full_pipeline()
-                            g = data["gold"]
+                            g = data.get("gold")
+                            if not g:
+                                send_message(token, sender_id, "❌ Live price for Gold unavailable. Please retry.")
+                                continue
                             bal, risk = get_risk_config()
                             sniper = calculate_sniper_levels("GOLD", g["price"], g["atr"], action, bal, risk)
                             res = live_broker.execute_live_sniper_order("GOLD", action, sniper["entry"], sniper["stop_loss"], sniper["tp1"], sniper["lot_size"], comment="Telegram-GoldSniper")
@@ -1183,7 +1243,10 @@ def start_bot():
                         else:
                             send_message(token, sender_id, f"⚡ Executing Live {action} Order on Bitcoin (BTC/USD)...")
                             data = run_full_pipeline()
-                            b = data["btc"]
+                            b = data.get("btc")
+                            if not b:
+                                send_message(token, sender_id, "❌ Live price for Bitcoin unavailable. Please retry.")
+                                continue
                             bal, risk = get_risk_config()
                             sniper = calculate_sniper_levels("BTC", b["price"], b["atr"], action, bal, risk)
                             res = live_broker.execute_live_sniper_order("BTC", action, sniper["entry"], sniper["stop_loss"], sniper["tp1"], sniper["lot_size"], comment="Telegram-BtcSniper")
@@ -1214,7 +1277,7 @@ def start_bot():
                             if res.get("success") and res.get("closed_count", 0) > 0:
                                 send_message(token, sender_id, f"🚨 *EMERGENCY CLOSE-ALL COMPLETED!*\n• Closed: `{res['closed_count']}` positions\n• Total Realized PnL: `${res['total_pnl']:+,.2f}`")
                             else:
-                                send_message(token, sender_id, f"ℹ️ {res.get('msg', 'No open positions to close.')}")
+                                send_message(token, sender_id, f"ℹ️ {res.get('msg') or res.get('error', 'No open positions to close.')}")
 
                     elif msg_text.startswith("/auto_trade"):
                         parts = msg_text.strip().split()
@@ -1249,8 +1312,13 @@ def start_bot():
 
                     elif msg_text.startswith("/levels"):
                         data = run_full_pipeline()
-                        b_lv = data["btc"]["levels"]
-                        g_lv = data["gold"]["levels"]
+                        b = data.get("btc")
+                        g = data.get("gold")
+                        if not b or not g:
+                            send_message(token, sender_id, "⚠️ Key levels temporarily unavailable. Please try again.")
+                            continue
+                        b_lv = b["levels"]
+                        g_lv = g["levels"]
                         levels_msg = (
                             f"📐 *INSTITUTIONAL KEY LEVELS & FIBONACCI*\n\n"
                             f"₿ *Bitcoin (BTC-USD):* `${b_lv['curr']:,.2f}`\n"
@@ -1270,8 +1338,11 @@ def start_bot():
 
                     elif msg_text.startswith("/traps"):
                         data = run_full_pipeline()
-                        b = data["btc"]
-                        g = data["gold"]
+                        b = data.get("btc")
+                        g = data.get("gold")
+                        if not b or not g:
+                            send_message(token, sender_id, "⚠️ Trap audit data temporarily unavailable. Please try again.")
+                            continue
                         trap_msg = (
                             f"🪤 *WYCKOFF TRAP & LIQUIDITY SWEEP AUDIT*\n\n"
                             f"₿ *Bitcoin:* `{b['trap_type']}`\n"
@@ -1290,7 +1361,10 @@ def start_bot():
 
                     elif msg_text.startswith("/macro"):
                         data = run_full_pipeline()
-                        m = data["macro"]
+                        m = data.get("macro")
+                        if not m:
+                            send_message(token, sender_id, "⚠️ Macro radar data temporarily unavailable. Please try again.")
+                            continue
                         macro_text = (
                             f"🌐 *GLOBAL MACRO RADAR*\n\n"
                             f"• US Dollar Index (DXY): `{m['dxy']:.2f}` ({m['dxy_chg']:+.2f}%)\n"

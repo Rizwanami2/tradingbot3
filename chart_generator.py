@@ -12,8 +12,17 @@ if hasattr(sys.stdout, "reconfigure"):
 import io
 import os
 import urllib.request
+import ssl
 from datetime import datetime
 import numpy as np
+
+# Fix for Windows VPS missing root CA certificates or hosting provider SSL inspection
+try:
+    _create_unverified_https_context = ssl._create_unverified_context
+except AttributeError:
+    pass
+else:
+    ssl._create_default_https_context = _create_unverified_https_context
 
 import matplotlib
 matplotlib.use("Agg")  # Non-interactive headless backend for VPS
