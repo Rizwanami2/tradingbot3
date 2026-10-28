@@ -20,3 +20,4 @@ config_telegram.local.json
 *.tmp
 .DS_Store
 Thumbs.db
+learning_memory.json
