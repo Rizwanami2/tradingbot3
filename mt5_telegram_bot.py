@@ -62,28 +62,116 @@ PAPER_ACCOUNT = {
 }
 
 
-def load_config():
-    if not os.path.exists(CONFIG_PATH):
-        print(f"[!] Config file not found: {CONFIG_PATH}")
-        return None
+ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
+
+
+def load_env_file(filepath=None):
+    """
+    Parses key=value pairs from .env into os.environ.
+    Handles comments, whitespace, and quoted values without requiring third-party libraries.
+    """
+    if filepath is None:
+        filepath = ENV_PATH
+    if not os.path.exists(filepath):
+        return False
     try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except json.JSONDecodeError as e:
-        print("\n" + "=" * 70)
-        print("  ❌ SYNTAX ERROR IN 'config_telegram.json'")
-        print("=" * 70)
-        print(f"  Error details: {e}")
-        print("\n  Common cause: Did you forget a comma (,) after your bot_token?")
-        print("  Make sure your file looks exactly like this:")
-        print('  {')
-        print('    "telegram": {')
-        print('      "bot_token": "YOUR_TOKEN_HERE",  <-- Note the comma here!')
-        print('      "chat_id": "YOUR_CHAT_ID_HERE"')
-        print('    },')
-        print('    ...')
-        print("=" * 70 + "\n")
-        return None
+        with open(filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    key, val = line.split("=", 1)
+                    key = key.strip()
+                    val = val.strip()
+                    if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
+                        val = val[1:-1]
+                    os.environ[key] = val
+        return True
+    except Exception as e:
+        print(f"⚠️ Error reading .env: {e}")
+        return False
+
+
+def update_env_variable(key: str, value: str, filepath=None):
+    """Updates or adds an environment variable in the .env file."""
+    if filepath is None:
+        filepath = ENV_PATH
+    lines = []
+    found = False
+    if os.path.exists(filepath):
+        with open(filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if stripped.startswith(f"{key}=") or stripped.startswith(f"{key} ="):
+                    lines.append(f"{key}={value}\n")
+                    found = True
+                else:
+                    lines.append(line)
+    if not found:
+        lines.append(f"{key}={value}\n")
+    try:
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+    except Exception:
+        pass
+
+
+def load_config():
+    # 1. Load .env file
+    has_env = load_env_file()
+
+    # 2. Base defaults
+    cfg = {
+        "telegram": {
+            "bot_token": os.environ.get("TELEGRAM_BOT_TOKEN", ""),
+            "chat_id": os.environ.get("TELEGRAM_CHAT_ID", "")
+        },
+        "mt5": {
+            "enabled": True,
+            "symbols": {
+                "BTC": os.environ.get("MT5_BTC_SYMBOL", "BTCUSD"),
+                "GOLD": os.environ.get("MT5_GOLD_SYMBOL", "XAUUSD")
+            },
+            "risk_pct_per_trade": float(os.environ.get("RISK_PCT_PER_TRADE", "1.0")),
+            "max_open_trades": 2
+        },
+        "pipeline": {
+            "scan_interval_seconds": 1800,
+            "min_confluence_to_alert": int(os.environ.get("MIN_CONFLUENCE_SCORE", "8"))
+        }
+    }
+
+    # 3. Layer config_telegram.json if it exists
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                json_cfg = json.load(f)
+                for sec in ["telegram", "mt5", "pipeline"]:
+                    if sec in json_cfg and isinstance(json_cfg[sec], dict):
+                        cfg[sec].update(json_cfg[sec])
+        except json.JSONDecodeError as e:
+            if not os.environ.get("TELEGRAM_BOT_TOKEN"):
+                print("\n" + "=" * 70)
+                print("  ❌ SYNTAX ERROR IN 'config_telegram.json'")
+                print("=" * 70)
+                print(f"  Error details: {e}")
+                print("  Tip: You can use a '.env' file instead!")
+                print("=" * 70 + "\n")
+                return None
+            else:
+                print(f"⚠️ 'config_telegram.json' has syntax error, using .env values.")
+
+    # 4. Environment variables take highest priority
+    if os.environ.get("TELEGRAM_BOT_TOKEN"):
+        cfg["telegram"]["bot_token"] = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if os.environ.get("TELEGRAM_CHAT_ID"):
+        cfg["telegram"]["chat_id"] = os.environ.get("TELEGRAM_CHAT_ID")
+
+    if has_env and os.environ.get("TELEGRAM_BOT_TOKEN"):
+        print("📁 Loaded credentials from .env file.")
+
+    return cfg
 
 
 def load_paper_state():
@@ -487,7 +575,7 @@ def handle_telegram_updates(config):
 
                     # Auto-capture Chat ID on first use if not yet configured
                     if not chat_id or chat_id in ("YOUR_TELEGRAM_CHAT_ID_HERE", "0", ""):
-                        print(f"🔑 Auto-authorized Chat ID: {sender_id} ({sender_name}). Saving to config_telegram.json...")
+                        print(f"🔑 Auto-authorized Chat ID: {sender_id} ({sender_name}). Saving...")
                         chat_id = sender_id
                         config["telegram"]["chat_id"] = sender_id
                         try:
@@ -495,6 +583,8 @@ def handle_telegram_updates(config):
                                 json.dump(config, f, indent=2)
                         except Exception:
                             pass
+                        if os.path.exists(ENV_PATH):
+                            update_env_variable("TELEGRAM_CHAT_ID", sender_id)
                     elif sender_id != chat_id:
                         print(f"⚠️ Ignored message from unauthorized Chat ID: {sender_id} (Expected: {chat_id})")
                         continue
