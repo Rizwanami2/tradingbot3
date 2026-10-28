@@ -62,6 +62,12 @@ STRATEGIES = {
         "sl_mult": 0.45,
         "rr_tp1": 1.20,
         "rr_tp2": 2.00,
+        "breakeven_r": 0.45,       # Fast breakeven lock at +0.45R (zero risk)
+        "trail_start_r": 0.80,     # Dynamic trail starts at +0.80R
+        "trail_step_r": 0.35,      # Tight 0.35R trailing buffer
+        "risk_pct": 0.50,          # Conservative 0.50% risk per scalp
+        "target_win_rate": "~75-80%",
+        "regime_filter": "Momentum with healthy ATR (Avoid low liquidity / chop)",
         "holding_time": "5 - 30 minutes",
         "lot_cap_gold": 0.20,
         "lot_cap_btc": 0.10
@@ -73,6 +79,12 @@ STRATEGIES = {
         "sl_mult": 1.20,
         "rr_tp1": 2.50,
         "rr_tp2": 3.50,
+        "breakeven_r": 1.00,       # Wider breakeven at +1.00R (doesn't choke pullbacks)
+        "trail_start_r": 1.50,     # Dynamic trail starts at +1.50R
+        "trail_step_r": 0.70,      # Structural 0.70R trail allowing waves to breathe
+        "risk_pct": 1.00,          # Full 1.00% institutional risk
+        "target_win_rate": "~55-65% (High R:R Asymmetry)",
+        "regime_filter": "Trending Only (ADX >= 22 & MA Alignment)",
         "holding_time": "1 - 5 days",
         "lot_cap_gold": 0.10,
         "lot_cap_btc": 0.05
@@ -84,6 +96,12 @@ STRATEGIES = {
         "sl_mult": 0.75,
         "rr_tp1": 1.80,
         "rr_tp2": 2.40,
+        "breakeven_r": 0.65,       # Breakeven at +0.65R (halfway to equilibrium)
+        "trail_start_r": 1.10,     # Trail starts at +1.10R
+        "trail_step_r": 0.40,      # Dynamic tightening near 0.50 Fib
+        "risk_pct": 0.75,          # 0.75% balanced risk
+        "target_win_rate": "~65-70%",
+        "regime_filter": "Range / Chop Only (ADX <= 26, extreme location)",
         "holding_time": "1 - 8 hours",
         "lot_cap_gold": 0.15,
         "lot_cap_btc": 0.08
@@ -91,10 +109,16 @@ STRATEGIES = {
     "SWAP": {
         "code": "SWAP",
         "name": "Positive Carry & Swap Aware",
-        "description": "Carry-conscious positioning prioritizing positive overnight financing and avoiding swap drag.",
+        "description": "Carry-conscious positioning prioritizing positive overnight financing and avoiding rollover drag.",
         "sl_mult": 0.90,
         "rr_tp1": 2.00,
         "rr_tp2": 3.00,
+        "breakeven_r": 0.80,       # Breakeven at +0.80R
+        "trail_start_r": 1.30,     # Trail starts at +1.30R
+        "trail_step_r": 0.60,      # Wide 0.60R buffer against rollover spread spikes
+        "risk_pct": 0.75,          # 0.75% risk with carry yield
+        "target_win_rate": "~60-70%",
+        "regime_filter": "Positive Rollover Carry & Low VIX (<=24)",
         "holding_time": "Multi-day / Positive Carry",
         "lot_cap_gold": 0.15,
         "lot_cap_btc": 0.08
@@ -117,6 +141,133 @@ def set_active_strategy(strat_name: str) -> tuple:
 def get_active_strategy() -> dict:
     """Returns the current active trading strategy metadata."""
     return STRATEGIES.get(ACTIVE_STRATEGY, STRATEGIES["SCALP"])
+
+
+def validate_strategy_accuracy(strat_code: str, asset: str, current_price: float,
+                               atr: float, rsi: float, adx: float,
+                               levels: dict, trap_type: str,
+                               upper_wick_pct: float = 0.0, lower_wick_pct: float = 0.0,
+                               macro: dict = None, swap_info: dict = None,
+                               action: str = "BUY") -> dict:
+    """
+    Multi-Factor Strategy Accuracy & Regime Validator.
+    Ensures that each trade setup strictly matches the mathematical conditions
+    where that specific strategy exhibits an institutional edge.
+    """
+    strat = STRATEGIES.get((strat_code or ACTIVE_STRATEGY).upper(), STRATEGIES["SCALP"])
+    asset_key = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
+    is_buy = action.upper() in ("BUY", "LONG")
+    macro = macro or {}
+
+    passed = True
+    veto_reasons = []
+    accuracy_factors = []
+
+    # ── A. SCALP ACCURACY RULES ──
+    if strat["code"] == "SCALP":
+        min_atr = 1.50 if asset_key == "GOLD" else 150.0
+        if atr < min_atr:
+            passed = False
+            veto_reasons.append(f"Low Volatility (ATR ${atr:.1f} < ${min_atr:.1f}). Spread risk too high for scalping.")
+        else:
+            accuracy_factors.append(f"Optimal Scalp Volatility (ATR ${atr:.1f})")
+
+        if is_buy and upper_wick_pct >= 25.0:
+            passed = False
+            veto_reasons.append(f"Candle Rejection Wick ({upper_wick_pct:.1f}% >= 25%). Selling pressure prevents clean scalp.")
+        elif not is_buy and lower_wick_pct >= 25.0:
+            passed = False
+            veto_reasons.append(f"Candle Absorption Wick ({lower_wick_pct:.1f}% >= 25%). Buying absorption prevents short scalp.")
+        else:
+            accuracy_factors.append("Clean Microstructure (Minimal Rejection Wick)")
+
+        if is_buy and (rsi > 68.0 or rsi < 35.0):
+            passed = False
+            veto_reasons.append(f"RSI Exhaustion ({rsi:.1f}). Long scalps require RSI 35-68.")
+        elif not is_buy and (rsi < 32.0 or rsi > 65.0):
+            passed = False
+            veto_reasons.append(f"RSI Oversold/Overbought ({rsi:.1f}). Short scalps require RSI 32-65.")
+        else:
+            accuracy_factors.append(f"Momentum Sweet Spot (RSI {rsi:.1f})")
+
+    # ── B. SWING ACCURACY RULES ──
+    elif strat["code"] == "SWING":
+        if adx < 20.0:
+            passed = False
+            veto_reasons.append(f"Chop Regime Detected (ADX {adx:.1f} < 20.0). Swing trading requires trending momentum.")
+        else:
+            accuracy_factors.append(f"Established Trend Regime (ADX {adx:.1f})")
+
+        ma50 = levels.get("ma50", np.nan)
+        ma200 = levels.get("ma200", np.nan)
+        if is_buy:
+            if not np.isnan(ma200) and current_price < ma200:
+                passed = False
+                veto_reasons.append(f"Counter-Trend Risk: Price below 200 SMA (${ma200:,.0f}).")
+            elif not np.isnan(ma50) and current_price < ma50:
+                passed = False
+                veto_reasons.append(f"Short-Term Trend Bearish: Price below 50 SMA (${ma50:,.0f}).")
+            else:
+                accuracy_factors.append("Bullish Trend Confluence (Above 50 & 200 SMA)")
+
+        dxy_chg = macro.get("dxy_chg", 0.0)
+        if is_buy and dxy_chg > 0.25:
+            passed = False
+            veto_reasons.append(f"USD Surge Headwind (DXY {dxy_chg:+.2f}%). Swing long delayed.")
+        else:
+            accuracy_factors.append("Macro Currency Tailwind")
+
+    # ── C. BALANCE ACCURACY RULES ──
+    elif strat["code"] == "BALANCE":
+        if adx > 28.0:
+            passed = False
+            veto_reasons.append(f"Trend Breakout in Progress (ADX {adx:.1f} > 28.0). Mean-reversion unsafe.")
+        else:
+            accuracy_factors.append(f"Range-Bound Auction (ADX {adx:.1f} <= 28.0)")
+
+        in_gp = levels.get("in_golden_pocket", False)
+        s1 = levels.get("s1", 0.0)
+        near_s1 = s1 > 0 and abs(current_price - s1) / current_price <= 0.015
+        if not (in_gp or near_s1):
+            passed = False
+            veto_reasons.append("Price not at range extreme (Golden Pocket 0.618-0.650 or Pivot S1).")
+        else:
+            accuracy_factors.append("Extreme Range Location (Golden Pocket / S1)")
+
+    # ── D. SWAP ACCURACY RULES ──
+    elif strat["code"] == "SWAP":
+        if swap_info and swap_info.get("available"):
+            fav = swap_info.get("favorable_side", "NONE")
+            if fav != action.upper() and not swap_info.get("positive_carry", False):
+                passed = False
+                veto_reasons.append(f"Negative Carry Cost: Broker rollover financing is unfavorable for {action}.")
+            else:
+                accuracy_factors.append("Positive Rollover Carry (Financing Yield)")
+        else:
+            accuracy_factors.append("Neutral Carry Assumed (Swap data pending)")
+
+        vix = macro.get("vix", 16.0)
+        if vix > 24.0:
+            passed = False
+            veto_reasons.append(f"Elevated Volatility (VIX {vix:.1f} > 24.0). Carry positions at risk of whipsaw.")
+        else:
+            accuracy_factors.append(f"Controlled Volatility Environment (VIX {vix:.1f})")
+
+    # Anti-Trap is mandatory across all profiles
+    if trap_type == "BULL_TRAP" and is_buy:
+        passed = False
+        veto_reasons.append("Institutional Bull Trap Detected at Resistance! Rejection in progress.")
+    elif trap_type == "BEAR_TRAP" and not is_buy:
+        passed = False
+        veto_reasons.append("Wyckoff Bear Trap / Spring Detected! Buying absorption in progress.")
+
+    return {
+        "passed": passed,
+        "strategy": strat["code"],
+        "strategy_name": strat["name"],
+        "accuracy_factors": accuracy_factors,
+        "veto_reasons": veto_reasons
+    }
 
 
 def calculate_lot_size(asset: str, entry_price: float, stop_loss_price: float,
@@ -192,22 +343,24 @@ def calculate_lot_size(asset: str, entry_price: float, stop_loss_price: float,
 def calculate_strategy_levels(asset: str, current_price: float, atr: float = 0.0,
                               action: str = "BUY", strategy: str = None,
                               account_balance: float = DEFAULT_ACCOUNT_BALANCE,
-                              risk_pct: float = DEFAULT_MAX_RISK_PCT,
+                              risk_pct: float = None,
                               broker_leverage: float = None,
                               margin_free: float = None,
-                              swap_info: dict = None) -> dict:
+                              swap_info: dict = None,
+                              levels: dict = None) -> dict:
     """
     Multi-Strategy Parameter Engine:
-      - SCALP: Small SL (0.45x ATR), quick 1.2R TP1, high win rate (~75%).
-      - SWING: Structural SL (1.20x ATR), 2.5R to 3.5R extended targets.
-      - BALANCE: Mean-reversion SL (0.75x ATR), 1.8R target to 0.50 Fib Equilibrium.
-      - SWAP: Carry-optimized SL (0.90x ATR), 2.0R target with rollover analysis.
+      - SCALP: Small SL (0.45x ATR), quick 1.2R TP1, high win rate (~75-80%), 0.50% risk.
+      - SWING: Structural SL (1.20x ATR), 2.5R to 3.5R extended targets, 1.00% risk.
+      - BALANCE: Mean-reversion SL (0.75x ATR), 1.8R target back to 0.50 Fib Equilibrium, 0.75% risk.
+      - SWAP: Carry-optimized SL (0.90x ATR), 2.0R target with rollover analysis, 0.75% risk.
     """
     asset_key = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
     is_buy = action.upper() in ("BUY", "LONG")
     strat_key = (strategy or ACTIVE_STRATEGY).upper()
     strat = STRATEGIES.get(strat_key, STRATEGIES["SCALP"])
 
+    target_risk = risk_pct if (risk_pct is not None and risk_pct > 0) else strat.get("risk_pct", 1.0)
     base_atr = atr if atr > 0 else (28.0 if asset_key == "GOLD" else 2200.0)
     sl_mult = strat["sl_mult"]
 
@@ -233,13 +386,27 @@ def calculate_strategy_levels(asset: str, current_price: float, atr: float = 0.0
         stop_loss = round(current_price - sl_dist, 2)
         tp1 = round(current_price + tp1_dist, 2)
         tp2 = round(current_price + tp2_dist, 2)
+        # Direct anchor for BALANCE: 0.50 Fibonacci Equilibrium
+        if strat_key == "BALANCE" and levels and "fib_500" in levels:
+            eq_val = levels["fib_500"]
+            if eq_val > current_price:
+                tp1 = round(eq_val, 2)
+                tp1_dist = round(tp1 - current_price, 2)
     else:
         stop_loss = round(current_price + sl_dist, 2)
         tp1 = round(current_price - tp1_dist, 2)
         tp2 = round(current_price - tp2_dist, 2)
+        if strat_key == "BALANCE" and levels and "fib_500" in levels:
+            eq_val = levels["fib_500"]
+            if eq_val < current_price:
+                tp1 = round(eq_val, 2)
+                tp1_dist = round(current_price - tp1, 2)
+
+    rr_tp1 = round(tp1_dist / sl_dist, 2) if sl_dist > 0 else strat["rr_tp1"]
+    rr_tp2 = round(tp2_dist / sl_dist, 2) if sl_dist > 0 else strat["rr_tp2"]
 
     # 3. Dynamic Position Sizing with Leverage & Margin Limits
-    lot_info = calculate_lot_size(asset_key, current_price, stop_loss, account_balance, risk_pct, broker_leverage, margin_free)
+    lot_info = calculate_lot_size(asset_key, current_price, stop_loss, account_balance, target_risk, broker_leverage, margin_free)
     cap_key = "lot_cap_gold" if asset_key == "GOLD" else "lot_cap_btc"
     max_cap = strat.get(cap_key, 0.20)
     clamped_lot = max(0.01, min(lot_info["lots"], max_cap))
@@ -266,8 +433,11 @@ def calculate_strategy_levels(asset: str, current_price: float, atr: float = 0.0
         "sl_dist": sl_dist,
         "tp1_dist": tp1_dist,
         "tp2_dist": tp2_dist,
-        "rr_tp1": strat["rr_tp1"],
-        "rr_tp2": strat["rr_tp2"],
+        "rr_tp1": rr_tp1,
+        "rr_tp2": rr_tp2,
+        "breakeven_r": strat.get("breakeven_r", 0.60),
+        "trail_start_r": strat.get("trail_start_r", 1.00),
+        "trail_step_r": strat.get("trail_step_r", 0.50),
         "lot_size": lot_info["lots"],
         "risk_usd": lot_info["actual_risk_usd"],
         "risk_pct": lot_info["actual_risk_pct"],

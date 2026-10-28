@@ -78,21 +78,52 @@ class TestHardAssetProject(unittest.TestCase):
         self.assertLessEqual(capped_lot["lots"], 0.05)
 
         # 4. Test Strategy Calculations for all 4 profiles (SCALP, SWING, BALANCE, SWAP)
+        mock_levels = {"fib_500": 2748.0, "fib_618": 2738.0, "fib_650": 2736.0, "in_golden_pocket": True, "ma50": 2720.0, "ma200": 2680.0}
         for s_code in ("SCALP", "SWING", "BALANCE", "SWAP"):
-            calc = risk_engine.calculate_strategy_levels("GOLD", 2740.0, atr=28.0, action="BUY", strategy=s_code, account_balance=10000.0, risk_pct=1.0)
+            calc = risk_engine.calculate_strategy_levels("GOLD", 2740.0, atr=28.0, action="BUY", strategy=s_code, account_balance=10000.0, levels=mock_levels)
             self.assertEqual(calc["strategy"], s_code)
             self.assertGreater(calc["tp1"], calc["entry"])
             self.assertLess(calc["stop_loss"], calc["entry"])
             self.assertGreater(calc["tp2"], calc["tp1"])
             self.assertGreater(calc["lot_size"], 0.0)
+            self.assertIn("breakeven_r", calc)
+            self.assertIn("trail_start_r", calc)
+            self.assertIn("trail_step_r", calc)
+            if s_code == "BALANCE":
+                self.assertEqual(calc["tp1"], 2748.0)  # Pinned to 0.50 Fib Equilibrium
 
-        # 5. Verify strategy switching
+        # 5. Test Strategy Accuracy Verification Engine
+        # Scalp: Rejection wick >= 25% should fail
+        scalp_bad = risk_engine.validate_strategy_accuracy("SCALP", "GOLD", 2740.0, atr=28.0, rsi=52.0, adx=24.0, levels=mock_levels, trap_type="CLEAN", upper_wick_pct=35.0)
+        self.assertFalse(scalp_bad["passed"])
+        self.assertIn("Rejection Wick", scalp_bad["veto_reasons"][0])
+
+        scalp_good = risk_engine.validate_strategy_accuracy("SCALP", "GOLD", 2740.0, atr=28.0, rsi=52.0, adx=24.0, levels=mock_levels, trap_type="CLEAN", upper_wick_pct=10.0)
+        self.assertTrue(scalp_good["passed"])
+
+        # Swing: ADX < 20 (chop) should fail
+        swing_bad = risk_engine.validate_strategy_accuracy("SWING", "GOLD", 2740.0, atr=28.0, rsi=52.0, adx=15.0, levels=mock_levels, trap_type="CLEAN")
+        self.assertFalse(swing_bad["passed"])
+        self.assertIn("Chop", swing_bad["veto_reasons"][0])
+
+        swing_good = risk_engine.validate_strategy_accuracy("SWING", "GOLD", 2740.0, atr=28.0, rsi=52.0, adx=28.0, levels=mock_levels, trap_type="CLEAN")
+        self.assertTrue(swing_good["passed"])
+
+        # Balance: ADX > 28 (strong trend) should fail
+        bal_bad = risk_engine.validate_strategy_accuracy("BALANCE", "GOLD", 2740.0, atr=28.0, rsi=52.0, adx=35.0, levels=mock_levels, trap_type="CLEAN")
+        self.assertFalse(bal_bad["passed"])
+        self.assertIn("Trend Breakout", bal_bad["veto_reasons"][0])
+
+        bal_good = risk_engine.validate_strategy_accuracy("BALANCE", "GOLD", 2740.0, atr=28.0, rsi=52.0, adx=18.0, levels=mock_levels, trap_type="CLEAN")
+        self.assertTrue(bal_good["passed"])
+
+        # 6. Verify strategy switching
         risk_engine.set_active_strategy("SWING")
         self.assertEqual(risk_engine.get_active_strategy()["code"], "SWING")
         risk_engine.set_active_strategy("SCALP")  # Reset to default
         self.assertEqual(risk_engine.get_active_strategy()["code"], "SCALP")
 
-        # 6. Test Risk Audit Text Generation
+        # 7. Test Risk Audit Text Generation
         audit_text = risk_engine.generate_risk_audit_text(account_balance=10000.0, risk_pct=1.0)
         self.assertIn("Portfolio Equity", audit_text)
         self.assertIn("Daily Circuit Breaker", audit_text)
@@ -122,7 +153,11 @@ class TestHardAssetProject(unittest.TestCase):
         self.assertFalse(close_res["success"])
 
         # Trailing positions when disconnected
-        trail_events = broker.trail_positions(breakeven_r=0.6, trail_step_r=0.5)
+        self.assertIn("SCALP", broker.TRAIL_PROFILES)
+        self.assertIn("SWING", broker.TRAIL_PROFILES)
+        self.assertIn("BALANCE", broker.TRAIL_PROFILES)
+        self.assertIn("SWAP", broker.TRAIL_PROFILES)
+        trail_events = broker.trail_positions(default_strategy="SWING")
         self.assertEqual(trail_events, [])
 
         # Position modification when disconnected

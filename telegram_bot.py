@@ -72,7 +72,7 @@ try:
     from risk_engine import (
         calculate_lot_size, generate_risk_audit_text, validate_trade_risk,
         calculate_sniper_levels, calculate_strategy_levels, STRATEGIES,
-        set_active_strategy, get_active_strategy
+        set_active_strategy, get_active_strategy, validate_strategy_accuracy
     )
     RISK_ENGINE_AVAILABLE = True
 except Exception:
@@ -535,6 +535,38 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
             "near_swing_support": bool(feat_support)
         }
 
+    curr_bar = hist.iloc[-1]
+    c_open, c_high, c_low, c_close = curr_bar["Open"], curr_bar["High"], curr_bar["Low"], curr_bar["Close"]
+    c_range = c_high - c_low
+    up_wick_pct = ((c_high - max(c_open, c_close)) / c_range * 100) if c_range > 0 else 0.0
+    low_wick_pct = ((min(c_open, c_close) - c_low) / c_range * 100) if c_range > 0 else 0.0
+
+    acc_data = live_broker.get_live_account_data() if (MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected) else None
+    broker_lev = acc_data.get("leverage") if acc_data else None
+    free_mrg = acc_data.get("margin_free") if acc_data else None
+    swap_info = live_broker.get_swap_rates(asset_type) if (MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected) else None
+
+    active_strat = get_active_strategy() if RISK_ENGINE_AVAILABLE else {"code": "SCALP", "name": "Sniper Scalp"}
+
+    # Profile-Specific Strategy Accuracy Verification
+    strat_accuracy = {"passed": True, "veto_reasons": []}
+    if RISK_ENGINE_AVAILABLE:
+        strat_accuracy = validate_strategy_accuracy(
+            strat_code=active_strat["code"],
+            asset=asset_type,
+            current_price=curr,
+            atr=atr,
+            rsi=rsi,
+            adx=adx,
+            levels=levels,
+            trap_type=trap_type,
+            upper_wick_pct=up_wick_pct,
+            lower_wick_pct=low_wick_pct,
+            macro=macro,
+            swap_info=swap_info,
+            action="BUY"
+        )
+
     base_score = len(factors_hit)
     adaptive_score = base_score
     if LEARNING_AVAILABLE and learning_engine:
@@ -543,32 +575,31 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
     final_score = max(base_score, int(round(adaptive_score)))
     is_a_plus = final_score >= 8
 
-    # VETO condition: Bull Trap at resistance kills all longs
+    # VETO conditions: Anti-Trap & Strategy-Specific Accuracy Filters
     if trap_type == "BULL_TRAP":
         is_a_plus = False
         verdict = "🔴 VETOED: Bull Trap at Resistance! Stand Aside or Fade."
+    elif not strat_accuracy["passed"]:
+        is_a_plus = False
+        verdict = f"🔴 VETOED [{active_strat['code']}]: {strat_accuracy['veto_reasons'][0]}"
     elif is_a_plus:
-        verdict = f"🟢 A+ SETUP (Score: {final_score}/10) - High Probability Execution"
+        verdict = f"🟢 A+ SETUP [{active_strat['code']}] (Score: {final_score}/10) - High Probability Execution"
     elif final_score >= 6:
-        verdict = f"🟡 B SETUP (Score: {final_score}/10) - Watchlist / Reduced Size"
+        verdict = f"🟡 B SETUP [{active_strat['code']}] (Score: {final_score}/10) - Watchlist / Reduced Size"
     else:
         verdict = f"🔴 VETOED (Score: {final_score}/10) - Insufficient Confluence"
 
     account_balance, base_risk = get_risk_config()
     target_risk = base_risk if is_a_plus else (base_risk * 0.5)
 
-    acc_data = live_broker.get_live_account_data() if (MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected) else None
-    broker_lev = acc_data.get("leverage") if acc_data else None
-    free_mrg = acc_data.get("margin_free") if acc_data else None
-    swap_info = live_broker.get_swap_rates(asset_type) if (MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected) else None
-
     # Multi-Strategy Parameter Calculation (SCALP, SWING, BALANCE, SWAP)
     if RISK_ENGINE_AVAILABLE:
         strat_calc = calculate_strategy_levels(
             asset_type, curr, atr=atr, action="BUY",
+            strategy=active_strat["code"],
             account_balance=account_balance, risk_pct=target_risk,
             broker_leverage=broker_lev, margin_free=free_mrg,
-            swap_info=swap_info
+            swap_info=swap_info, levels=levels
         )
         stop_loss = strat_calc["stop_loss"]
         tp1 = strat_calc["tp1"]
@@ -583,6 +614,9 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
             "price_dist": strat_calc["sl_dist"],
             "strategy": strat_calc["strategy"],
             "holding_time": strat_calc["holding_time"],
+            "breakeven_r": strat_calc["breakeven_r"],
+            "trail_start_r": strat_calc["trail_start_r"],
+            "trail_step_r": strat_calc["trail_step_r"],
             "swap_note": strat_calc.get("swap_note", "")
         }
     else:
@@ -816,13 +850,17 @@ def format_welcome_menu(sender_name: str) -> str:
 
 def trailing_monitor_worker(token: str, chat_id_getter):
     """
-    Automated Trailing Stop & Breakeven Monitor.
+    Automated Profile-Aware Trailing Stop & Breakeven Monitor.
     Runs every 12 seconds:
-      - Automatically moves Stop-Loss to Breakeven (+0.6R) making trades 100% risk-free.
-      - Trails Stop-Loss behind price (+1.0R, +1.5R) locking in profits.
+      - Automatically reads strategy profile (SCALP, SWING, BALANCE, SWAP) from position comment or active strategy.
+      - SCALP: Locks Breakeven at +0.45R, trails at +0.80R (0.35R step).
+      - SWING: Locks Breakeven at +1.00R, trails at +1.50R (0.70R step).
+      - BALANCE: Locks Breakeven at +0.65R, trails at +1.10R (0.40R step).
+      - SWAP: Locks Breakeven at +0.80R, trails at +1.30R (0.60R step).
+      - Rollover hour protection (freezes modifications during 21:55-22:08 UTC).
     """
     global TRAILING_STOP_ENABLED
-    print("🛡️ Automated Trailing Stop & Breakeven Monitor: ACTIVE (Monitoring open positions every 12s)")
+    print("🛡️ Automated Profile-Aware Trailing Stop & Breakeven Monitor: ACTIVE (Every 12s)")
     while True:
         try:
             time.sleep(12)
@@ -831,7 +869,8 @@ def trailing_monitor_worker(token: str, chat_id_getter):
             if not (MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected):
                 continue
 
-            events = live_broker.trail_positions(breakeven_r=0.6, trail_step_r=0.5)
+            strat_code = get_active_strategy()["code"] if RISK_ENGINE_AVAILABLE else "SCALP"
+            events = live_broker.trail_positions(default_strategy=strat_code)
             if events:
                 target_chat_id = chat_id_getter()
                 if target_chat_id:
@@ -1344,11 +1383,15 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             msg = (
                 f"🎯 *STRATEGY SWITCHED: {s['name'].upper()} ({s['code']})*\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"• Description   : {s['description']}\n"
-                f"• Stop-Loss     : {s['sl_mult']:.2f}x ATR\n"
-                f"• Targets       : {s['rr_tp1']:.1f}R (TP1) | {s['rr_tp2']:.1f}R (TP2)\n"
-                f"• Max Lot Caps  : {s['lot_cap_gold']} Gold | {s['lot_cap_btc']} BTC\n"
-                f"• Holding Time  : {s['holding_time']}\n"
+                f"• Description     : {s['description']}\n"
+                f"• Risk Per Trade  : `{s['risk_pct']:.2f}% equity` (Profile Sized)\n"
+                f"• Stop-Loss Ratio : `{s['sl_mult']:.2f}x ATR`\n"
+                f"• Targets         : `{s['rr_tp1']:.1f}R` (TP1) | `{s['rr_tp2']:.1f}R` (TP2)\n"
+                f"• Breakeven Lock  : `+{s['breakeven_r']:.2f}R` (Instant Risk-Free)\n"
+                f"• Trailing Stop   : Starts `+{s['trail_start_r']:.2f}R` (`{s['trail_step_r']:.2f}R` step)\n"
+                f"• Accuracy Regime : {s['regime_filter']}\n"
+                f"• Target Win Rate : `{s['target_win_rate']}`\n"
+                f"• Holding Horizon : `{s['holding_time']}`\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"All future manual and auto-executed trades will apply this profile."
             )
@@ -1358,31 +1401,30 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
         # Default /strategy: comparison table & current state
         curr_s = get_active_strategy()
         table = (
-            f"🎯 *MODULAR STRATEGY ENGINE*\n"
+            f"🎯 *MODULAR STRATEGY & PROFILE CONTROLLER*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"Active Strategy: *{curr_s['name']} ({curr_s['code']})* 🎯\n\n"
-            f"Available Institutional Strategies:\n"
+            f"Available Institutional Profiles:\n"
             f"1. ⚡ *SCALP* (`/strategy scalp`)\n"
-            f"   • Type: Precision Sniper Scalp\n"
-            f"   • Stop-Loss: `0.45x ATR` (Tight Risk)\n"
-            f"   • Targets: `1.2R (TP1)` / `2.0R (TP2)`\n"
-            f"   • Win Rate Focus: `~75% High Probability`\n"
-            f"   • Duration: `5 - 30 minutes`\n\n"
+            f"   • Profile Risk: `0.50%` | Win Rate: `~75-80%`\n"
+            f"   • SL: `0.45x ATR` | Targets: `1.2R` / `2.0R`\n"
+            f"   • Trail: BE at `+0.45R` | Trail at `+0.80R` (0.35R step)\n"
+            f"   • Accuracy: Rejection wick <25%, RSI 35-68, High ATR\n\n"
             f"2. 🌊 *SWING* (`/strategy swing`)\n"
-            f"   • Type: Macro Trend Wave Runner\n"
-            f"   • Stop-Loss: `1.20x ATR` (Wide Structural Buffer)\n"
-            f"   • Targets: `2.5R (TP1)` / `3.5R (TP2)`\n"
-            f"   • Duration: `1 - 5 days`\n\n"
+            f"   • Profile Risk: `1.00%` | Asymmetric Multi-Day Wave\n"
+            f"   • SL: `1.20x ATR` | Targets: `2.5R` / `3.5R`\n"
+            f"   • Trail: BE at `+1.00R` | Trail at `+1.50R` (0.70R step)\n"
+            f"   • Accuracy: ADX >= 22 (Trending Only), Above 50 & 200 SMA\n\n"
             f"3. ⚖️ *BALANCE* (`/strategy balance`)\n"
-            f"   • Type: Range Equilibrium Mean-Reversion\n"
-            f"   • Stop-Loss: `0.75x ATR`\n"
-            f"   • Target: `1.8R back to 0.50 Fib Equilibrium`\n"
-            f"   • Duration: `4 - 24 hours`\n\n"
+            f"   • Profile Risk: `0.75%` | Mean-Reversion\n"
+            f"   • SL: `0.75x ATR` | Target: `1.8R` to 0.50 Fib Equilibrium\n"
+            f"   • Trail: BE at `+0.65R` | Trail at `+1.10R` (0.40R step)\n"
+            f"   • Accuracy: ADX <= 26 (Chop/Range), Extreme GP/S1 location\n\n"
             f"4. 🔄 *SWAP* (`/strategy swap`)\n"
-            f"   • Type: Rollover Carry & Financing Strategy\n"
-            f"   • Stop-Loss: `0.90x ATR`\n"
-            f"   • Target: `2.0R with positive broker carry`\n"
-            f"   • Duration: `1 - 14 days`\n\n"
+            f"   • Profile Risk: `0.75%` | Positive Carry & Financing\n"
+            f"   • SL: `0.90x ATR` | Targets: `2.0R` / `3.0R`\n"
+            f"   • Trail: BE at `+0.80R` | Trail at `+1.30R` (0.60R step)\n"
+            f"   • Accuracy: Favorable rollover swap side, VIX <= 24\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"Switch anytime: `/strategy scalp`, `/strategy swing`, `/strategy balance`, `/strategy swap`"
         )
@@ -1460,7 +1502,7 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
         sub = args_lower.strip()
         if sub in ("on", "true", "enable", "1"):
             TRAILING_STOP_ENABLED = True
-            send_message(token, sender_id, "🛡️ *AUTOMATED TRAILING STOP & BREAKEVEN: ENABLED 🟢*\n• Scans open live MT5 positions every 12 seconds.\n• At +0.6R profit: Moves SL to Breakeven (+ spread buffer), making capital 100% risk-free.\n• At +1.0R / +1.5R: Dynamically trails SL behind price locking in gains.")
+            send_message(token, sender_id, "🛡️ *AUTOMATED PROFILE-AWARE TRAILING STOP: ENABLED 🟢*\n• Scans open live MT5 positions every 12 seconds.\n• Adapts breakeven and trailing distance to each position's strategy profile (SCALP, SWING, BALANCE, SWAP).\n• Rollover insulation freezes trail during 21:55-22:08 UTC daily spread spikes.")
             return
         elif sub in ("off", "false", "disable", "0"):
             TRAILING_STOP_ENABLED = False
@@ -1468,12 +1510,18 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             return
         else:
             st = "ENABLED 🟢" if TRAILING_STOP_ENABLED else "DISABLED ⚪"
+            curr_s = get_active_strategy() if RISK_ENGINE_AVAILABLE else {"name": "Scalp Sniper", "code": "SCALP", "breakeven_r": 0.45, "trail_start_r": 0.80, "trail_step_r": 0.35}
             send_message(token, sender_id, (
-                f"🛡️ *Automated Trailing Stop & Breakeven Controller:*\n"
-                f"• Current Status : `{st}`\n"
-                f"• Scan Frequency : `Every 12 seconds in background`\n"
-                f"• Breakeven Step : `+0.6R (Locks risk-free trade)`\n"
-                f"• Trailing Step  : `+1.0R (Trails 0.5x risk behind price)`\n\n"
+                f"🛡️ *AUTOMATED PROFILE-AWARE TRAILING CONTROLLER*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"• Monitor Status     : `{st}`\n"
+                f"• Active Profile     : *{curr_s['name']} ({curr_s['code']})* 🎯\n"
+                f"• Breakeven Trigger  : `+{curr_s.get('breakeven_r', 0.60):.2f}R` (Instant Risk-Free)\n"
+                f"• Trailing Trigger   : Starts at `+{curr_s.get('trail_start_r', 1.00):.2f}R`\n"
+                f"• Trailing Step      : `{curr_s.get('trail_step_r', 0.50):.2f}R` behind price\n"
+                f"• Rollover Shield    : `ACTIVE (Insulated from 21:55-22:08 UTC spread spikes)`\n"
+                f"• Position Tracking  : Auto-detects SCALP / SWING / BALANCE / SWAP from ticket comment\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"Controls: `/trail on` to enable, `/trail off` to disable."
             ))
             return
