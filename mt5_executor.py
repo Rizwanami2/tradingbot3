@@ -319,6 +319,27 @@ class MT5LiveBroker:
             "remaining": len(positions) - closed
         }
 
+    def has_open_position(self, asset: str) -> bool:
+        """Returns True if a live position for this asset is already open in MT5."""
+        if not self.is_connected or not MT5_AVAILABLE:
+            return False
+        symbol = self.resolve_symbol(asset)
+        positions = mt5.positions_get(symbol=symbol)
+        return positions is not None and len(positions) > 0
+
+    def get_live_1m_rates(self, asset: str, count: int = 60):
+        """Fetches the latest N 1-minute candles directly from the live broker."""
+        if not self.is_connected or not MT5_AVAILABLE:
+            return None
+        symbol = self.resolve_symbol(asset)
+        rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, count)
+        if rates is None or len(rates) == 0:
+            return None
+        import pandas as pd
+        df = pd.DataFrame(rates)
+        df["time"] = pd.to_datetime(df["time"], unit="s")
+        return df
+
 
 # Global Singleton Instance
 live_broker = MT5LiveBroker()

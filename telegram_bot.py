@@ -709,47 +709,128 @@ def format_scan_summary(data: dict) -> str:
     return "\n".join(lines)
 
 
+def format_welcome_menu(sender_name: str) -> str:
+    auto_status = "ENABLED 🟢" if AUTO_TRADE_LIVE else "DISABLED ⚪"
+    mt5_status = "CONNECTED 🟢" if (MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected) else "OFFLINE ⚪"
+    return (
+        f"🚀 *INSTITUTIONAL QUANTITATIVE TRADING BOT*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Welcome {sender_name}! High-probability quantitative engine for Gold (`XAU/USD`) & Bitcoin (`BTC/USD`).\n\n"
+        f"⚡ *Live Engine Status:*\n"
+        f"• Auto-Scanner: `1-MINUTE CANDLE CLOSE` 🟢\n"
+        f"• MT5 Live Broker: `{mt5_status}`\n"
+        f"• 1M Auto-Trade: `{auto_status}`\n\n"
+        f"💼 *1. LIVE MT5 BROKER & TRADING:*\n"
+        f"• `/account` - Live equity, balance, free margin & broker info\n"
+        f"• `/positions` - View all active live trades & real-time PnL\n"
+        f"• `/buy_gold` - Live Buy on Gold (Small SL & Small TP)\n"
+        f"• `/sell_gold` - Live Sell on Gold (Small SL & Small TP)\n"
+        f"• `/buy_btc` - Live Buy on Bitcoin (Small SL & Small TP)\n"
+        f"• `/sell_btc` - Live Sell on Bitcoin (Small SL & Small TP)\n"
+        f"• `/close_all` - 🚨 Emergency close all live positions\n"
+        f"• `/auto_trade on|off` - Toggle 1m automatic execution\n\n"
+        f"📊 *2. MARKET AUDIT & MT5 CHARTS:*\n"
+        f"• `/scan` - Full 12-skill scan + default MT5 Candlestick Charts\n"
+        f"• `/btc` - Deep Bitcoin audit with MT5 Chart & Sniper ticket\n"
+        f"• `/gold` - Deep Gold audit with MT5 Chart & Sniper ticket\n"
+        f"• `/levels` - Institutional Daily Pivots & Fibonacci Golden Pocket\n"
+        f"• `/traps` - Wyckoff trap inspection (Springs & Upthrusts)\n"
+        f"• `/macro` - Global Macro Radar (DXY, 10Y Yield, GSR, VIX)\n"
+        f"• `/debate` - Adversarial Bull vs. Bear debate pressure test\n\n"
+        f"🛡️ *3. RISK MANAGEMENT & POSITION SIZING:*\n"
+        f"• `/risk` - Audit risk budget & small lot sizes on live equity\n"
+        f"• `/risk [balance]` - Simulate custom equity (e.g. `/risk 25000`)\n\n"
+        f"🧠 *4. AUTONOMOUS SELF-LEARNING:*\n"
+        f"• `/learn` - View Bayesian factor rankings, win rates & weights\n"
+        f"• `/train` - Trigger 180-day walk-forward self-calibration\n\n"
+        f"ℹ️ *5. SYSTEM COMMANDS:*\n"
+        f"• `/status` - Bot uptime, MT5 status & 1m scanner health\n"
+        f"• `/menu` - Redisplay this organized command directory\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔔 *Continuous Scanner:* Active every 60 seconds on each 1-minute candle close!"
+    )
+
+
 def auto_scanner_worker(token: str, chat_id_getter):
-    """Background thread: runs multi-factor audit every 30 minutes and broadcasts alerts."""
-    print("⏰ Automated 30-Minute Multi-Skill Market Scanner: ACTIVE")
+    """
+    Background thread: Runs multi-factor quantitative audit on EVERY 1-MINUTE CANDLE.
+    Syncs precisely to the :00 second candle close.
+    Broadcasts alerts on A+ setups (>=8/10) and auto-executes if /auto_trade on.
+    """
+    print("⏰ Automated 1-Minute Live Candle Scanner: ACTIVE (Monitoring Gold & BTC every 60s)")
+
+    last_btc_alert_time = 0.0
+    last_gold_alert_time = 0.0
+    last_btc_alert_price = 0.0
+    last_gold_alert_price = 0.0
+    ALERT_COOLDOWN_SEC = 300.0  # 5-minute cooldown for repeated alert on same stagnant price
+
     while True:
         try:
-            time.sleep(1800)  # 30 minutes
+            # Sync to the next 1-minute candle close (:00 seconds)
+            now = time.time()
+            sleep_sec = max(5, int(60 - (now % 60)))
+            time.sleep(sleep_sec)
+
             target_chat_id = chat_id_getter()
             if not target_chat_id:
                 continue
 
+            current_time = time.time()
             data = run_full_pipeline()
+            if not data:
+                continue
+
             b = data["btc"]
             g = data["gold"]
 
-            if b['is_a_plus'] or g['is_a_plus']:
-                print(f"🚨 [{datetime.now().strftime('%H:%M:%S')}] A+ Setup Detected! Broadcasting Telegram alert...")
-                alert_text = "🚨 *INSTITUTIONAL TRADE ALERT (SCORE >= 8/10)*\n\n" + format_scan_summary(data)
-                send_message(token, target_chat_id, alert_text)
-                if CHARTS_AVAILABLE:
-                    if b['is_a_plus']:
+            # ── 1-Minute Bitcoin Audit ──
+            if b['is_a_plus']:
+                price_moved = abs(b['price'] - last_btc_alert_price) / b['price'] > 0.003 if last_btc_alert_price > 0 else True
+                cooldown_passed = (current_time - last_btc_alert_time) > ALERT_COOLDOWN_SEC
+                if price_moved or cooldown_passed:
+                    last_btc_alert_time = current_time
+                    last_btc_alert_price = b['price']
+                    print(f"🚨 [{datetime.now().strftime('%H:%M:%S')}] 1M Candle A+ Setup: Bitcoin (${b['price']:,.2f})! Score: {b['final_score']}/10")
+                    alert_text = f"🚨 *1-MINUTE CANDLE A+ SETUP DETECTED: BITCOIN*\n\n" + format_scan_summary(data)
+                    send_message(token, target_chat_id, alert_text)
+                    if CHARTS_AVAILABLE:
                         b_buf = generate_mt5_chart("BTC-USD", "BITCOIN (BTC-USD)")
                         if b_buf:
-                            send_telegram_chart(token, target_chat_id, b_buf, f"📊 MT5 Chart Alert: Bitcoin (${b['price']:,.2f}) | {b['verdict']}")
-                    if g['is_a_plus']:
+                            send_telegram_chart(token, target_chat_id, b_buf, f"📊 MT5 1M Chart: Bitcoin (${b['price']:,.2f}) | {b['verdict']}")
+
+                    # Auto-Trade execution (only if no existing open position to avoid duplicate staking)
+                    global AUTO_TRADE_LIVE
+                    if AUTO_TRADE_LIVE and MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected:
+                        if not live_broker.has_open_position("BTC"):
+                            res = live_broker.execute_live_sniper_order("BTC", "BUY", b["entry"], b["stop_loss"], b["tp1"], b["lot_info"]["lots"], comment="Auto1M-A+")
+                            if res.get("success"):
+                                send_message(token, target_chat_id, f"⚡ *LIVE 1M AUTO-EXECUTION (A+ SETUP)*\n• Symbol: `{res['symbol']}` (BUY)\n• Volume: `{res['lots']}` Lots\n• Price: `${res['price']:,.2f}`\n• Ticket: `#{res['ticket']}`\n• Small SL: `${res['sl']:,.2f}` | Small TP: `${res['tp']:,.2f}`")
+
+            # ── 1-Minute Gold Audit ──
+            if g['is_a_plus']:
+                g_price_moved = abs(g['price'] - last_gold_alert_price) / g['price'] > 0.002 if last_gold_alert_price > 0 else True
+                g_cooldown_passed = (current_time - last_gold_alert_time) > ALERT_COOLDOWN_SEC
+                if g_price_moved or g_cooldown_passed:
+                    last_gold_alert_time = current_time
+                    last_gold_alert_price = g['price']
+                    print(f"🚨 [{datetime.now().strftime('%H:%M:%S')}] 1M Candle A+ Setup: Gold (${g['price']:,.2f})! Score: {g['final_score']}/10")
+                    alert_text = f"🚨 *1-MINUTE CANDLE A+ SETUP DETECTED: GOLD*\n\n" + format_scan_summary(data)
+                    send_message(token, target_chat_id, alert_text)
+                    if CHARTS_AVAILABLE:
                         g_buf = generate_mt5_chart("GC=F", "GOLD (XAU/USD)")
                         if g_buf:
-                            send_telegram_chart(token, target_chat_id, g_buf, f"📊 MT5 Chart Alert: Gold (${g['price']:,.2f}) | {g['verdict']}")
+                            send_telegram_chart(token, target_chat_id, g_buf, f"📊 MT5 1M Chart: Gold (${g['price']:,.2f}) | {g['verdict']}")
 
-                # Live MT5 Auto-Execution for A+ setups (if /auto_trade on)
-                global AUTO_TRADE_LIVE
-                if AUTO_TRADE_LIVE and MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected:
-                    if b['is_a_plus']:
-                        res = live_broker.execute_live_sniper_order("BTC", "BUY", b["entry"], b["stop_loss"], b["tp1"], b["lot_info"]["lots"], comment="AutoTrader-A+")
-                        if res.get("success"):
-                            send_message(token, target_chat_id, f"⚡ *LIVE AUTO-EXECUTION TRIGGERED (A+ SETUP)*\n• Symbol: `{res['symbol']}`\n• BUY `{res['lots']}` lots @ `${res['price']:,.2f}`\n• Ticket: `#{res['ticket']}`\n• SL: `${res['sl']:,.2f}` | TP: `${res['tp']:,.2f}`")
-                    if g['is_a_plus']:
-                        res = live_broker.execute_live_sniper_order("GOLD", "BUY", g["entry"], g["stop_loss"], g["tp1"], g["lot_info"]["lots"], comment="AutoTrader-A+")
-                        if res.get("success"):
-                            send_message(token, target_chat_id, f"⚡ *LIVE AUTO-EXECUTION TRIGGERED (A+ SETUP)*\n• Symbol: `{res['symbol']}`\n• BUY `{res['lots']}` lots @ `${res['price']:,.2f}`\n• Ticket: `#{res['ticket']}`\n• SL: `${res['sl']:,.2f}` | TP: `${res['tp']:,.2f}`")
+                    # Auto-Trade execution (only if no existing open position)
+                    if AUTO_TRADE_LIVE and MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected:
+                        if not live_broker.has_open_position("GOLD"):
+                            res = live_broker.execute_live_sniper_order("GOLD", "BUY", g["entry"], g["stop_loss"], g["tp1"], g["lot_info"]["lots"], comment="Auto1M-A+")
+                            if res.get("success"):
+                                send_message(token, target_chat_id, f"⚡ *LIVE 1M AUTO-EXECUTION (A+ SETUP)*\n• Symbol: `{res['symbol']}` (BUY)\n• Volume: `{res['lots']}` Lots\n• Price: `${res['price']:,.2f}`\n• Ticket: `#{res['ticket']}`\n• Small SL: `${res['sl']:,.2f}` | Small TP: `${res['tp']:,.2f}`")
+
         except Exception:
-            time.sleep(10)
+            time.sleep(5)
 
 
 def start_bot():
@@ -825,31 +906,8 @@ def start_bot():
 
                     print(f"📩 [{datetime.now().strftime('%H:%M:%S')}] From {sender_name}: '{msg_text}'")
 
-                    if msg_text.startswith("/start") or msg_text.startswith("/help"):
-                        welcome = (
-                            f"🚀 *All-Skills Quantitative Hard-Asset Bot*\n\n"
-                            f"Welcome {sender_name}! All 12 trading skills are actively combined and monitoring Gold & Bitcoin.\n\n"
-                            f"Commands:\n"
-                            f"• `/scan` - High win-rate audit for Gold & BTC with default MT5 Charts\n"
-                            f"• `/btc` - Deep Bitcoin audit with MT5 Chart & Sniper ticket\n"
-                            f"• `/gold` - Deep Gold audit with MT5 Chart & Sniper ticket\n"
-                            f"• `/account` - Live MT5 account equity, balance, margin & broker info\n"
-                            f"• `/positions` - Live MT5 open trades & real-time PnL\n"
-                            f"• `/buy_gold` - Live MT5 Instant Buy with small SL & small TP\n"
-                            f"• `/sell_gold` - Live MT5 Instant Sell with small SL & small TP\n"
-                            f"• `/buy_btc` - Live MT5 Instant Buy with small SL & small TP\n"
-                            f"• `/sell_btc` - Live MT5 Instant Sell with small SL & small TP\n"
-                            f"• `/close_all` - Emergency close all live MT5 positions\n"
-                            f"• `/auto_trade on|off` - Toggle auto-execution for A+ setups\n"
-                            f"• `/risk [balance]` - Institutional risk audit & exact lot sizing\n"
-                            f"• `/levels` - Institutional S/R, Pivots & Golden Pocket\n"
-                            f"• `/traps` - Wyckoff trap inspection (Springs & Upthrusts)\n"
-                            f"• `/debate` - Adversarial Bull vs. Bear debate\n"
-                            f"• `/macro` - Global macro radar (DXY, 10Y Yield, GSR, VIX)\n"
-                            f"• `/learn` - View adaptive weights & win rates\n"
-                            f"• `/train` - Run walk-forward self-calibration\n\n"
-                            f"🔔 *Automated Alerts:* Active! You will receive instant notifications and MT5 charts whenever an A+ setup (≥8/10) appears."
-                        )
+                    if msg_text.startswith("/start") or msg_text.startswith("/help") or msg_text.startswith("/menu"):
+                        welcome = format_welcome_menu(sender_name)
                         send_message(token, sender_id, welcome)
 
                     elif msg_text.startswith("/scan"):
@@ -1088,13 +1146,32 @@ def start_bot():
                         parts = msg_text.strip().split()
                         if len(parts) > 1 and parts[1].lower() in ("on", "true", "enable", "1"):
                             AUTO_TRADE_LIVE = True
-                            send_message(token, sender_id, "🟢 *LIVE AUTO-EXECUTION ENABLED!*\nThe bot will automatically place live MT5 sniper orders whenever an A+ setup (≥8/10) is detected.")
+                            send_message(token, sender_id, "🟢 *LIVE AUTO-EXECUTION ENABLED!*\nThe bot will automatically place live MT5 sniper orders on every 1-minute candle close whenever an A+ setup (≥8/10) is detected.")
                         elif len(parts) > 1 and parts[1].lower() in ("off", "false", "disable", "0"):
                             AUTO_TRADE_LIVE = False
                             send_message(token, sender_id, "⚪ *LIVE AUTO-EXECUTION DISABLED.*\nThe bot will send notifications and charts for alerts, but will require manual /buy or /sell command to execute.")
                         else:
                             status_str = "ENABLED 🟢" if AUTO_TRADE_LIVE else "DISABLED ⚪"
-                            send_message(token, sender_id, f"ℹ️ *Auto-Trade Status:* `{status_str}`\nUsage: `/auto_trade on` or `/auto_trade off`")
+                            send_message(token, sender_id, f"ℹ️ *1M Auto-Trade Status:* `{status_str}`\nUsage: `/auto_trade on` or `/auto_trade off`")
+
+                    elif msg_text.startswith("/status"):
+                        acc_data = live_broker.get_live_account_data() if (MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected) else None
+                        broker_line = f"🟢 Connected (#{acc_data['login']} on {acc_data['broker']})" if acc_data else "⚪ Disconnected (Open MT5 on VPS)"
+                        eq_line = f"${acc_data['equity']:,.2f} {acc_data['currency']}" if acc_data else "N/A"
+                        status_msg = (
+                            f"🤖 *SYSTEM & ENGINE HEALTH*\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"• 1-Minute Candle Scanner: `ACTIVE (Every 60s)` 🟢\n"
+                            f"• MT5 Broker Connection: `{broker_line}`\n"
+                            f"• Live Account Equity: `{eq_line}`\n"
+                            f"• 1M Auto-Trade Execution: `{'ENABLED 🟢' if AUTO_TRADE_LIVE else 'DISABLED ⚪'}`\n"
+                            f"• Visual MT5 Charts: `{'ONLINE 🟢' if CHARTS_AVAILABLE else 'OFFLINE ⚪'}`\n"
+                            f"• Bayesian Self-Learning: `{'ONLINE 🟢' if LEARNING_AVAILABLE else 'OFFLINE ⚪'}`\n"
+                            f"• Server Time: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"Send `/menu` to see all organized commands."
+                        )
+                        send_message(token, sender_id, status_msg)
 
                     elif msg_text.startswith("/levels"):
                         data = run_full_pipeline()

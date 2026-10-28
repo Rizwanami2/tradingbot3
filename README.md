@@ -13,7 +13,7 @@ An institutional-grade algorithmic trading and risk management platform designed
 - **High Win-Rate Sniper Mode:** Small Stop-Loss (0.4–0.6x ATR), Small Take-Profit (1.2R quick scalp with ~75% target hit rate), and conservative micro-lot position sizing.
 - **Auto Real-Time Balance Risk:** Position sizing is dynamically calculated from your live MT5 equity. Zero hardcoded balances.
 - **Default Visual MT5 Candlestick Charts:** Institutional dark-themed charts with 50/200 SMA, S/R, and Golden Pocket (0.618-0.650) automatically generated and sent with `/scan`, `/btc`, `/gold`, and alerts.
-- **Automated 30-Minute Market Scanner:** Continuously audits the markets in the background and sends push notifications to your phone whenever an A+ setup ($\ge 8/10$) appears with attached MT5 charts (with optional auto-execution via `/auto_trade on`).
+- **Automated 1-Minute Live Candle Scanner:** Continuously audits the markets in the background on every 1-minute candle close (every 60s) and sends push notifications to your phone whenever an A+ setup ($\ge 8/10$) appears with attached MT5 charts (with optional auto-execution via `/auto_trade on`).
 - **Autonomous Self-Learning (`self_learning.py`):** Automatically evaluates trade setups and tunes confluence factor weights based on historical win rates.
 - **Emergency Circuit Breaker:** Instant `/close_all` command to liquidate all open live positions immediately.
 
@@ -43,29 +43,44 @@ Open Telegram, search for your bot, and send **`/start`**!
 
 ---
 
-## 📱 Telegram Commands
+## 📱 Organized Telegram Commands
 
+### 💼 1. Live MT5 Broker & Trading
 | Command | Action |
 |---|---|
-| `/start` | Connects your session and displays menu |
 | `/account` | Live MT5 account equity, balance, free margin, broker name & status |
 | `/positions` | Live MT5 open trades with real-time floating PnL |
 | `/buy_gold` | Instant Live MT5 Buy on Gold with small SL & small TP (High Win Rate) |
 | `/sell_gold` | Instant Live MT5 Sell on Gold with small SL & small TP (High Win Rate) |
 | `/buy_btc` | Instant Live MT5 Buy on Bitcoin with small SL & small TP (High Win Rate) |
 | `/sell_btc` | Instant Live MT5 Sell on Bitcoin with small SL & small TP (High Win Rate) |
-| `/close_all` | Emergency circuit breaker: Instantly closes all live open positions |
-| `/auto_trade on\|off` | Toggle automatic execution of A+ setups ($\ge 8/10$) |
+| `/close_all` | 🚨 Emergency circuit breaker: Instantly closes all live open positions |
+| `/auto_trade on\|off` | Toggle automatic execution of 1-minute A+ setups ($\ge 8/10$) |
+
+### 📊 2. Market Audit & MT5 Charts
+| Command | Action |
+|---|---|
 | `/scan` | Full market scan for Gold & BTC with dual confluence scores & default MT5 charts |
-| `/btc` | Detailed Bitcoin structure, 50/200 SMA, Golden Pocket, MT5 chart & trade ticket |
-| `/gold` | Detailed Gold structure, 50/200 SMA, Golden Pocket, MT5 chart & trade ticket |
-| `/risk [balance]` | Institutional risk audit, equity budget, dynamic lot sizes & Kelly sizing |
+| `/btc` | Detailed Bitcoin structure, 50/200 SMA, Golden Pocket, MT5 chart & sniper ticket |
+| `/gold` | Detailed Gold structure, 50/200 SMA, Golden Pocket, MT5 chart & sniper ticket |
 | `/levels` | Institutional S/R levels, Daily Pivots & Fibonacci Golden Pocket (0.618-0.650) |
 | `/traps` | Wyckoff microstructure inspection (Bear Springs & Bull Trap Upthrusts) |
-| `/debate` | Adversarial Bull vs. Bear debate pressure-testing both sides |
 | `/macro` | Real-time DXY, US 10-Year Real Yields, GSR, and Crypto Fear & Greed |
+| `/debate` | Adversarial Bull vs. Bear debate pressure-testing both sides |
+
+### 🛡️ 3. Risk Management & Dynamic Sizing
+| Command | Action |
+|---|---|
+| `/risk` | Institutional risk audit & small lot sizing on live MT5 equity |
+| `/risk [balance]` | Simulate custom equity and calculate exact lot sizes (e.g. `/risk 25000`) |
+
+### 🧠 4. Autonomous Self-Learning & System
+| Command | Action |
+|---|---|
 | `/learn` | Displays self-learning factor rankings and win-rate attribution |
 | `/train` | Triggers walk-forward historical training on past price action |
+| `/status` | Live bot health, MT5 connection status & 1-minute scanner uptime |
+| `/menu` | Redisplay organized command directory |
 
 ---
 
