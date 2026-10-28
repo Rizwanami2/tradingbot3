@@ -60,6 +60,13 @@ except Exception:
     learning_engine = None
     LEARNING_AVAILABLE = False
 
+# Import MT5-Style Visual Chart Generator
+try:
+    from chart_generator import generate_mt5_chart, send_telegram_chart
+    CHARTS_AVAILABLE = True
+except Exception:
+    CHARTS_AVAILABLE = False
+
 
 ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config_telegram.json")
@@ -714,6 +721,8 @@ def start_bot():
                             f"Welcome {sender_name}! All 12 trading skills are actively combined and monitoring Gold & Bitcoin.\n\n"
                             f"Commands:\n"
                             f"• `/scan` - Full multi-skill audit for Gold & BTC\n"
+                            f"• `/chart` - Visual MT5 Candlestick Chart for Bitcoin\n"
+                            f"• `/chart_gold` - Visual MT5 Candlestick Chart for Gold\n"
                             f"• `/btc` - Deep Bitcoin audit (Levels, Mayer, FVG, Risk)\n"
                             f"• `/gold` - Deep Gold audit (GSR, Yields, Levels, Risk)\n"
                             f"• `/levels` - Institutional S/R, Pivots & Golden Pocket\n"
@@ -730,6 +739,28 @@ def start_bot():
                         send_message(token, sender_id, "⏳ Running multi-skill quantitative scan...")
                         data = run_full_pipeline()
                         send_message(token, sender_id, format_scan_summary(data))
+
+                    elif msg_text.startswith("/chart_btc") or msg_text.strip() == "/chart":
+                        if CHARTS_AVAILABLE:
+                            send_message(token, sender_id, "📈 Rendering MT5-style Candlestick Chart for Bitcoin...")
+                            buf = generate_mt5_chart("BTC-USD", "BITCOIN (BTC-USD)")
+                            if buf:
+                                send_telegram_chart(token, sender_id, buf, "📊 MT5 Chart Scan: Bitcoin (BTC-USD) | 50/200 SMA | Golden Pocket (0.618-0.65)")
+                            else:
+                                send_message(token, sender_id, "⚠️ Failed to render Bitcoin chart.")
+                        else:
+                            send_message(token, sender_id, "⚠️ Matplotlib not installed for chart rendering. Run: pip install matplotlib")
+
+                    elif msg_text.startswith("/chart_gold"):
+                        if CHARTS_AVAILABLE:
+                            send_message(token, sender_id, "📈 Rendering MT5-style Candlestick Chart for Gold...")
+                            buf = generate_mt5_chart("GC=F", "GOLD (XAU/USD)")
+                            if buf:
+                                send_telegram_chart(token, sender_id, buf, "📊 MT5 Chart Scan: Gold (XAU/USD) | 50/200 SMA | Golden Pocket (0.618-0.65)")
+                            else:
+                                send_message(token, sender_id, "⚠️ Failed to render Gold chart.")
+                        else:
+                            send_message(token, sender_id, "⚠️ Matplotlib not installed for chart rendering. Run: pip install matplotlib")
 
                     elif msg_text.startswith("/btc"):
                         data = run_full_pipeline()
