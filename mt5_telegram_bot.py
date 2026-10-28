@@ -2,17 +2,13 @@
 """
 trader-gold-btc: mt5_telegram_bot.py
 Unified Institutional Telegram Remote Control & MetaTrader 5 (MT5) Execution Engine
-with Autonomous Self-Learning & Adaptive Weight Optimization.
+with Autonomous Self-Learning & Built-in Paper Trading Fallback.
 Compatible with Python 3.11+.
 
-Commands supported in Telegram:
-  /start   - Initialize session, display MT5 account balance & equity
-  /scan    - Run the 4-stage confluence scan on Gold & BTC (Base + Learned Adaptive Scores)
-  /status  - Display MT5 open positions & macro indicators (DXY, 10Y Yield, F&G)
-  /learn   - Display current learned factor weights, trade stats & win-rate attribution
-  /train   - Trigger walk-forward self-training across historical price action
-  /sync    - Sync and learn from closed MT5 trade history
-  /help    - Command reference
+Modes:
+  1. LIVE MT5 MODE: When MetaTrader 5 terminal is installed, open, and logged in.
+  2. PAPER TRADING MODE: Automatic fallback if MT5 is not yet installed or closed.
+     Simulates full account execution, 1% risk calculations, and bracket orders.
 """
 
 import warnings
@@ -31,9 +27,9 @@ import numpy as np
 
 try:
     import MetaTrader5 as mt5
-    MT5_AVAILABLE = True
+    MT5_PACKAGE_INSTALLED = True
 except ImportError:
-    MT5_AVAILABLE = False
+    MT5_PACKAGE_INSTALLED = False
 
 try:
     import yfinance as yf
@@ -52,13 +48,40 @@ except Exception:
 
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config_telegram.json")
+PAPER_STATE_PATH = os.path.join(os.path.dirname(__file__), "paper_trading_state.json")
+
+# Runtime Mode Tracker
+IS_LIVE_MT5 = False
+PAPER_ACCOUNT = {
+    "balance": 10000.0,
+    "equity": 10000.0,
+    "positions": []
+}
 
 
 def load_config():
     if not os.path.exists(CONFIG_PATH):
         return None
-    with open(CONFIG_PATH, "r") as f:
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def load_paper_state():
+    global PAPER_ACCOUNT
+    if os.path.exists(PAPER_STATE_PATH):
+        try:
+            with open(PAPER_STATE_PATH, "r", encoding="utf-8") as f:
+                PAPER_ACCOUNT = json.load(f)
+        except Exception:
+            pass
+
+
+def save_paper_state():
+    try:
+        with open(PAPER_STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump(PAPER_ACCOUNT, f, indent=2)
+    except Exception:
+        pass
 
 
 def send_telegram(token: str, chat_id: str, text: str, reply_markup: dict = None):
@@ -81,132 +104,172 @@ def send_telegram(token: str, chat_id: str, text: str, reply_markup: dict = None
         return None
 
 
-def init_mt5():
-    if not MT5_AVAILABLE:
-        return False, "MetaTrader5 module not installed"
-    
-    if not mt5.initialize():
+def init_mt5(config=None):
+    global IS_LIVE_MT5
+    if not MT5_PACKAGE_INSTALLED:
+        IS_LIVE_MT5 = False
+        return False, "MetaTrader5 Python library not available. Running in 📝 PAPER TRADING MODE."
+
+    custom_path = None
+    if config and "mt5" in config and "path" in config["mt5"]:
+        custom_path = config["mt5"]["path"]
+
+    # Try initializing MT5
+    init_ok = False
+    if custom_path and os.path.exists(custom_path):
+        init_ok = mt5.initialize(path=custom_path)
+    else:
+        init_ok = mt5.initialize()
+
+    if not init_ok:
         err = mt5.last_error()
-        return False, f"MT5 initialize() failed: {err}"
-    
+        IS_LIVE_MT5 = False
+        return False, f"MT5 Terminal not running ({err}). Activated 📝 PAPER TRADING MODE (Simulation)."
+
     terminal_info = mt5.terminal_info()
     account_info = mt5.account_info()
-    
+
     if not terminal_info.trade_allowed:
-        return False, "MT5 Trade is disabled! Please enable 'Allow Algo Trading' in MT5 Tools -> Options -> Expert Advisors"
-    
+        IS_LIVE_MT5 = False
+        return False, "MT5 connected, but 'Allow Algo Trading' is OFF in MT5. Running in 📝 PAPER TRADING MODE."
+
     acc_id = account_info.login if account_info else "Unknown"
     balance = account_info.balance if account_info else 0.0
-    return True, f"Connected to MT5 Account #{acc_id} | Balance: ${balance:,.2f}"
+    IS_LIVE_MT5 = True
+    return True, f"🟢 LIVE MT5 Connected | Account #{acc_id} | Balance: ${balance:,.2f}"
 
 
-def get_mt5_account_summary():
-    if not MT5_AVAILABLE or not mt5.initialize():
-        return "⚠️ MT5 not connected or Algo Trading disabled."
-    
-    acc = mt5.account_info()
-    if not acc:
-        return "⚠️ Could not retrieve account details."
+def get_account_summary():
+    global IS_LIVE_MT5, PAPER_ACCOUNT
+    if IS_LIVE_MT5 and MT5_PACKAGE_INSTALLED:
+        acc = mt5.account_info()
+        if acc:
+            positions = mt5.positions_get()
+            pos_count = len(positions) if positions else 0
+            text = (
+                f"🏦 *LIVE MT5 Account:*\n"
+                f"• Status: 🟢 *LIVE BROKER EXECUTION*\n"
+                f"• Account ID: `{acc.login}`\n"
+                f"• Broker: `{acc.company}`\n"
+                f"• Balance: `${acc.balance:,.2f}`\n"
+                f"• Equity: `${acc.equity:,.2f}`\n"
+                f"• Open Positions: `{pos_count}`"
+            )
+            if pos_count > 0:
+                text += "\n\n📋 *Active Trades:*"
+                for p in positions:
+                    p_type = "BUY" if p.type == mt5.ORDER_TYPE_BUY else "SELL"
+                    text += f"\n• `{p.symbol}` {p_type} `{p.volume}` lots @ `${p.price_open:,.2f}` | PnL: `${p.profit:+,.2f}`"
+            return text
 
-    positions = mt5.positions_get()
-    pos_count = len(positions) if positions else 0
-
+    # Paper Trading Summary
+    load_paper_state()
+    pos_count = len(PAPER_ACCOUNT.get("positions", []))
     text = (
-        f"🏦 *MT5 Account Summary:*\n"
-        f"• Account ID: `{acc.login}`\n"
-        f"• Broker: `{acc.company}`\n"
-        f"• Balance: `${acc.balance:,.2f}`\n"
-        f"• Equity: `${acc.equity:,.2f}`\n"
-        f"• Free Margin: `${acc.margin_free:,.2f}`\n"
-        f"• Open Positions: `{pos_count}`"
+        f"📝 *PAPER TRADING (SIMULATION MODE):*\n"
+        f"• Status: 🟡 *Virtual Simulation (No real funds at risk)*\n"
+        f"• Virtual Balance: `${PAPER_ACCOUNT['balance']:,.2f}`\n"
+        f"• Virtual Equity: `${PAPER_ACCOUNT['equity']:,.2f}`\n"
+        f"• Open Paper Positions: `{pos_count}`"
     )
     if pos_count > 0:
-        text += "\n\n📋 *Active Trades:*"
-        for p in positions:
-            p_type = "BUY" if p.type == mt5.ORDER_TYPE_BUY else "SELL"
-            text += f"\n• `{p.symbol}` {p_type} `{p.volume}` lots @ `${p.price_open:,.2f}` | PnL: `${p.profit:+,.2f}`"
-
+        text += "\n\n📋 *Paper Trades:*"
+        for p in PAPER_ACCOUNT["positions"]:
+            text += f"\n• `{p['symbol']}` BUY `{p['lots']}` lots @ `${p['entry']:,.2f}` | SL: `${p['sl']:,.2f}` | TP: `${p['tp']:,.2f}`"
     return text
 
 
-def calculate_lot_size(symbol: str, risk_amount: float, entry: float, stop_loss: float) -> float:
-    if not MT5_AVAILABLE:
-        return 0.01
+def execute_order(symbol: str, action: str, entry: float, sl: float, tp: float, risk_pct: float = 1.0):
+    global IS_LIVE_MT5, PAPER_ACCOUNT
 
-    sym_info = mt5.symbol_info(symbol)
-    if not sym_info:
-        return 0.01
+    # 1. LIVE MT5 EXECUTION
+    if IS_LIVE_MT5 and MT5_PACKAGE_INSTALLED:
+        sym_info = mt5.symbol_info(symbol)
+        if not sym_info:
+            return False, f"Symbol '{symbol}' not found in MT5."
+        if not sym_info.visible:
+            mt5.symbol_select(symbol, True)
 
-    sl_dist = abs(entry - stop_loss)
-    if sl_dist == 0:
-        return sym_info.volume_min
+        acc = mt5.account_info()
+        balance = acc.balance if acc else 10000.0
+        risk_amount = balance * (risk_pct / 100.0)
 
-    tick_size = sym_info.trade_tick_size or 0.01
-    tick_val = sym_info.trade_tick_value or 1.0
+        sl_dist = abs(entry - sl)
+        tick_size = sym_info.trade_tick_size or 0.01
+        tick_val = sym_info.trade_tick_value or 1.0
+        risk_per_lot = (sl_dist / tick_size) * tick_val if sl_dist > 0 else 1.0
+        lots = round(risk_amount / risk_per_lot, 2) if risk_per_lot > 0 else 0.01
+        lots = max(sym_info.volume_min, min(lots, sym_info.volume_max))
 
-    risk_per_lot = (sl_dist / tick_size) * tick_val
-    if risk_per_lot <= 0:
-        return sym_info.volume_min
+        order_type = mt5.ORDER_TYPE_BUY if action.upper() == "BUY" else mt5.ORDER_TYPE_SELL
+        price = mt5.symbol_info_tick(symbol).ask if action.upper() == "BUY" else mt5.symbol_info_tick(symbol).bid
 
-    lots = risk_amount / risk_per_lot
-    
-    step = sym_info.volume_step or 0.01
-    lots = round(lots / step) * step
-    lots = max(sym_info.volume_min, min(lots, sym_info.volume_max))
-    return round(lots, 2)
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": symbol,
+            "volume": lots,
+            "type": order_type,
+            "price": price,
+            "sl": round(sl, sym_info.digits),
+            "tp": round(tp, sym_info.digits),
+            "deviation": 20,
+            "magic": 888101,
+            "comment": "GoldBTC-AutoTrader",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_IOC,
+        }
+        res = mt5.order_send(request)
+        if res.retcode != mt5.TRADE_RETCODE_DONE:
+            return False, f"MT5 Order Failed ({res.retcode}): {res.comment}"
 
+        if LEARNING_AVAILABLE and learning_engine:
+            asset = "BTC" if "BTC" in symbol.upper() else "GOLD"
+            feat = {"in_golden_pocket": True, "no_trap": True, "macro_dxy_tailwind": True,
+                    "macro_yield_tailwind": True, "trend_ma200": True, "trend_ma50": True,
+                    "rsi_sweet_spot": True, "volatility_orderly": True, "near_swing_support": True}
+            learning_engine.log_signal(asset, symbol, price, sl, tp, tp * 1.05, 8.5, feat)
 
-def place_mt5_order(symbol: str, action: str, entry: float, sl: float, tp: float, risk_pct: float = 1.0):
-    if not MT5_AVAILABLE or not mt5.initialize():
-        return False, "MT5 not connected."
+        return True, f"🟢 *LIVE MT5 ORDER EXECUTED!*\n• {action} `{lots}` lots `{symbol}` @ `${price:,.2f}`\n• Ticket: `#{res.order}`"
 
-    sym_info = mt5.symbol_info(symbol)
-    if not sym_info:
-        return False, f"Symbol '{symbol}' not found in MT5."
-
-    if not sym_info.visible:
-        mt5.symbol_select(symbol, True)
-
-    acc = mt5.account_info()
-    balance = acc.balance if acc else 10000.0
+    # 2. PAPER TRADING SIMULATION
+    load_paper_state()
+    balance = PAPER_ACCOUNT["balance"]
     risk_amount = balance * (risk_pct / 100.0)
+    sl_dist = abs(entry - sl)
+    lots = round((risk_amount / sl_dist) * 0.01, 2) if sl_dist > 0 else 0.10
+    lots = max(0.01, min(lots, 5.0))
 
-    lot_size = calculate_lot_size(symbol, risk_amount, entry, sl)
-    order_type = mt5.ORDER_TYPE_BUY if action.upper() == "BUY" else mt5.ORDER_TYPE_SELL
-    price = mt5.symbol_info_tick(symbol).ask if action.upper() == "BUY" else mt5.symbol_info_tick(symbol).bid
-
-    request = {
-        "action": mt5.TRADE_ACTION_DEAL,
+    ticket_id = int(time.time() * 1000) % 1000000
+    pos = {
+        "ticket": ticket_id,
         "symbol": symbol,
-        "volume": lot_size,
-        "type": order_type,
-        "price": price,
-        "sl": round(sl, sym_info.digits),
-        "tp": round(tp, sym_info.digits),
-        "deviation": 20,
-        "magic": 888101,
-        "comment": "GoldBTC-AutoTrader",
-        "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,
+        "action": action,
+        "entry": entry,
+        "sl": sl,
+        "tp": tp,
+        "lots": lots,
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
+    PAPER_ACCOUNT["positions"].append(pos)
+    save_paper_state()
 
-    result = mt5.order_send(request)
-    if result.retcode != mt5.TRADE_RETCODE_DONE:
-        return False, f"Order failed (Code {result.retcode}): {result.comment}"
-
-    # Log to Self-Learning journal
     if LEARNING_AVAILABLE and learning_engine:
         asset = "BTC" if "BTC" in symbol.upper() else "GOLD"
-        feat = {
-            "in_golden_pocket": True, "no_trap": True, "macro_dxy_tailwind": True,
-            "macro_yield_tailwind": True, "trend_ma200": True, "trend_ma50": True,
-            "rsi_sweet_spot": True, "mayer_sweet_spot": True if asset == "BTC" else False,
-            "gsr_undervalued": True if asset == "GOLD" else False, "volatility_orderly": True,
-            "near_swing_support": True
-        }
-        learning_engine.log_signal(asset, symbol, price, sl, tp, tp * 1.05, 8.5, feat)
+        feat = {"in_golden_pocket": True, "no_trap": True, "macro_dxy_tailwind": True,
+                "macro_yield_tailwind": True, "trend_ma200": True, "trend_ma50": True,
+                "rsi_sweet_spot": True, "volatility_orderly": True, "near_swing_support": True}
+        learning_engine.log_signal(asset, symbol, entry, sl, tp, tp * 1.05, 8.5, feat)
 
-    return True, f"✅ Order Executed: {action} {lot_size} lots {symbol} @ ${price:,.2f} | Ticket: #{result.order}"
+    return True, (
+        f"📝 *PAPER ORDER EXECUTED (SIMULATION)*\n"
+        f"• Asset: `{symbol}` ({action})\n"
+        f"• Virtual Lots: `{lots}`\n"
+        f"• Entry Price: `${entry:,.2f}`\n"
+        f"• Stop-Loss: `${sl:,.2f}`\n"
+        f"• Take-Profit: `${tp:,.2f}`\n"
+        f"• Ticket: `#{ticket_id}`\n\n"
+        f"*(No real money was risked)*"
+    )
 
 
 def compute_rsi(series, period: int = 14) -> float:
@@ -317,12 +380,22 @@ def run_pipeline_scan():
 
 
 def handle_telegram_updates(config):
-    token = config["telegram"]["bot_token"]
-    chat_id = config["telegram"]["chat_id"]
+    token = config["telegram"].get("bot_token", "")
+    chat_id = config["telegram"].get("chat_id", "")
 
-    if token == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
-        print("\n⚠️ Please configure your bot token and chat_id in 'config_telegram.json' first.")
-        print(f"File location: {CONFIG_PATH}\n")
+    if not token or token == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
+        print("\n" + "=" * 70)
+        print("  ⚠️ TELEGRAM BOT TOKEN REQUIRED")
+        print("=" * 70)
+        print("  To connect your Telegram bot, follow these 2 quick steps:")
+        print("  1. Open Telegram, search '@BotFather' and send: /newbot")
+        print("  2. Copy the token and paste it into:")
+        print(f"     {CONFIG_PATH}")
+        print("  3. Send any message to your bot, then put your numeric chat ID in.")
+        print("=" * 70)
+        print("\n  💡 NOTE: You can run the deterministic pipeline directly in your console")
+        print("  without Telegram by running:")
+        print("     py -3.11 autotrader_pipeline.py\n")
         return
 
     print("🤖 Telegram Bot Polling Active... Waiting for commands.")
@@ -331,10 +404,9 @@ def handle_telegram_updates(config):
 
     while True:
         try:
-            # Auto-sync MT5 closed trade history every 10 minutes
             if time.time() - last_sync_time > 600:
                 last_sync_time = time.time()
-                if LEARNING_AVAILABLE and learning_engine:
+                if IS_LIVE_MT5 and LEARNING_AVAILABLE and learning_engine:
                     learning_engine.sync_mt5_history()
 
             url = f"https://api.telegram.org/bot{token}/getUpdates?timeout=20"
@@ -347,59 +419,60 @@ def handle_telegram_updates(config):
             for u in updates.get("result", []):
                 offset = u["update_id"] + 1
 
-                # Handle Text Messages
                 if "message" in u and "text" in u["message"]:
                     msg_text = u["message"]["text"].strip()
                     sender_id = str(u["message"]["chat"]["id"])
 
-                    if sender_id != str(chat_id):
+                    # Security verification
+                    if chat_id != "YOUR_TELEGRAM_CHAT_ID_HERE" and sender_id != str(chat_id):
                         continue
 
                     if msg_text.startswith("/start") or msg_text.startswith("/help"):
-                        acc_text = get_mt5_account_summary()
+                        acc_text = get_account_summary()
+                        mode_label = "🟢 LIVE MT5" if IS_LIVE_MT5 else "📝 PAPER TRADING"
                         welcome = (
-                            f"🚀 *Hard-Asset Autotrader & Self-Learning Engine*\n\n"
+                            f"🚀 *Hard-Asset Autotrader Engine ({mode_label})*\n\n"
                             f"{acc_text}\n\n"
                             f"Commands:\n"
                             f"• `/scan` - Run 4-stage confluence scan on Gold & BTC\n"
-                            f"• `/status` - Check MT5 account balance & open orders\n"
+                            f"• `/status` - Check account balance & open positions\n"
                             f"• `/learn` - View adaptive weights & win-rate attribution\n"
-                            f"• `/train` - Run walk-forward historical self-calibration\n"
+                            f"• `/train` - Run walk-forward self-calibration\n"
                             f"• `/sync` - Synchronize and learn from closed MT5 trades\n"
-                            f"• `/execute_btc` - Submit BTC market buy with brackets\n"
-                            f"• `/execute_gold` - Submit Gold market buy with brackets\n"
+                            f"• `/execute_btc` - Submit BTC buy order\n"
+                            f"• `/execute_gold` - Submit Gold buy order\n"
                         )
-                        send_telegram(token, chat_id, welcome)
+                        send_telegram(token, sender_id, welcome)
 
                     elif msg_text.startswith("/status"):
-                        acc_text = get_mt5_account_summary()
-                        send_telegram(token, chat_id, acc_text)
+                        acc_text = get_account_summary()
+                        send_telegram(token, sender_id, acc_text)
 
                     elif msg_text.startswith("/learn") or msg_text.startswith("/weights"):
                         if LEARNING_AVAILABLE and learning_engine:
                             summary = learning_engine.get_summary_text()
-                            send_telegram(token, chat_id, f"```\n{summary}\n```")
+                            send_telegram(token, sender_id, f"```\n{summary}\n```")
                         else:
-                            send_telegram(token, chat_id, "⚠️ Self-Learning module not available.")
+                            send_telegram(token, sender_id, "⚠️ Self-Learning module not available.")
 
                     elif msg_text.startswith("/train"):
-                        send_telegram(token, chat_id, "🧠 Initiating walk-forward self-training across past 180 days...")
+                        send_telegram(token, sender_id, "🧠 Running walk-forward self-training across past 180 days...")
                         if LEARNING_AVAILABLE and learning_engine:
                             trades, wins = learning_engine.train_on_historical_data(lookback_days=180, verbose=False)
                             win_pct = (wins / trades * 100) if trades > 0 else 0
-                            send_telegram(token, chat_id, f"✅ Self-Training complete!\n• Trades Evaluated: `{trades}`\n• Win Rate: `{win_pct:.1f}%`\n• Weights updated in `learning_memory.json`.\nType `/learn` to see new rankings.")
+                            send_telegram(token, sender_id, f"✅ Self-Training complete!\n• Trades: `{trades}` | Win Rate: `{win_pct:.1f}%`\nType `/learn` to see updated rankings.")
                         else:
-                            send_telegram(token, chat_id, "⚠️ Self-Learning engine not available.")
+                            send_telegram(token, sender_id, "⚠️ Self-Learning engine not available.")
 
                     elif msg_text.startswith("/sync"):
-                        if LEARNING_AVAILABLE and learning_engine:
+                        if IS_LIVE_MT5 and LEARNING_AVAILABLE and learning_engine:
                             cnt, msg = learning_engine.sync_mt5_history()
-                            send_telegram(token, chat_id, f"🔄 MT5 History Sync: {msg}")
+                            send_telegram(token, sender_id, f"🔄 MT5 History Sync: {msg}")
                         else:
-                            send_telegram(token, chat_id, "⚠️ Self-Learning module not available.")
+                            send_telegram(token, sender_id, "📝 Running in Paper Mode. No broker history to sync.")
 
                     elif msg_text.startswith("/scan"):
-                        send_telegram(token, chat_id, "⏳ Running multi-factor pipeline scan on Gold & BTC...")
+                        send_telegram(token, sender_id, "⏳ Running multi-factor pipeline scan on Gold & BTC...")
                         data = run_pipeline_scan()
                         m = data["macro"]
                         b = data["btc"]
@@ -411,8 +484,9 @@ def handle_telegram_updates(config):
                         btc_status = "🟢 *A+ SETUP (READY)*" if btc_ready else "🔴 *WAIT / VETOED*"
                         gold_status = "🟢 *A+ SETUP (READY)*" if gold_ready else "🔴 *WAIT / VETOED*"
 
+                        mode_tag = "[LIVE MT5]" if IS_LIVE_MT5 else "[PAPER TRADING]"
                         report = (
-                            f"📊 *HARD-ASSET CONFLUENCE SCAN*\n\n"
+                            f"📊 *HARD-ASSET CONFLUENCE SCAN {mode_tag}*\n\n"
                             f"🌐 *Macro:* DXY `{m['dxy']:.2f}` ({m['dxy_chg']:+.2f}%) | 10Y `{m['tnx']:.2f}%` | GSR `{m['gsr']:.1f}x`\n\n"
                             f"₿ *Bitcoin:* `${b['price']:,.2f}`\n"
                             f"• Base Score: `{b['score']}/10` | Adaptive: `{b['adaptive_score']:.1f}/10`\n"
@@ -422,47 +496,47 @@ def handle_telegram_updates(config):
                             f"• Base Score: `{g['score']}/10` | Adaptive: `{g['adaptive_score']:.1f}/10`\n"
                             f"• Verdict: {gold_status}\n"
                             f"• RSI: `{g['rsi']:.1f}`\n\n"
-                            f"Tap below to execute directly in MT5:"
+                            f"Tap below to execute:"
                         )
 
                         markup = {
                             "inline_keyboard": [
-                                [{"text": "⚡ Buy BTCUSD (MT5)", "callback_data": "BUY_BTC"}],
-                                [{"text": "⚡ Buy XAUUSD (MT5)", "callback_data": "BUY_GOLD"}]
+                                [{"text": f"⚡ Buy BTCUSD ({'MT5' if IS_LIVE_MT5 else 'Paper'})", "callback_data": "BUY_BTC"}],
+                                [{"text": f"⚡ Buy XAUUSD ({'MT5' if IS_LIVE_MT5 else 'Paper'})", "callback_data": "BUY_GOLD"}]
                             ]
                         }
-                        send_telegram(token, chat_id, report, markup)
+                        send_telegram(token, sender_id, report, markup)
 
                     elif msg_text.startswith("/execute_btc"):
                         data = run_pipeline_scan()
                         b = data["btc"]
                         sym = config["mt5"]["symbols"]["BTC"]
-                        ok, res = place_mt5_order(sym, "BUY", b["price"], b["sl"], b["tp"], config["mt5"]["risk_pct_per_trade"])
-                        send_telegram(token, chat_id, res)
+                        ok, res = execute_order(sym, "BUY", b["price"], b["sl"], b["tp"], config["mt5"]["risk_pct_per_trade"])
+                        send_telegram(token, sender_id, res)
 
                     elif msg_text.startswith("/execute_gold"):
                         data = run_pipeline_scan()
                         g = data["gold"]
                         sym = config["mt5"]["symbols"]["GOLD"]
-                        ok, res = place_mt5_order(sym, "BUY", g["price"], g["sl"], g["tp"], config["mt5"]["risk_pct_per_trade"])
-                        send_telegram(token, chat_id, res)
+                        ok, res = execute_order(sym, "BUY", g["price"], g["sl"], g["tp"], config["mt5"]["risk_pct_per_trade"])
+                        send_telegram(token, sender_id, res)
 
-                # Handle Callback Queries (Button Taps)
                 elif "callback_query" in u:
                     cb = u["callback_query"]
                     cb_data = cb.get("data")
+                    sender_id = str(cb["from"]["id"])
                     data = run_pipeline_scan()
 
                     if cb_data == "BUY_BTC":
                         b = data["btc"]
                         sym = config["mt5"]["symbols"]["BTC"]
-                        ok, res = place_mt5_order(sym, "BUY", b["price"], b["sl"], b["tp"], config["mt5"]["risk_pct_per_trade"])
-                        send_telegram(token, chat_id, res)
+                        ok, res = execute_order(sym, "BUY", b["price"], b["sl"], b["tp"], config["mt5"]["risk_pct_per_trade"])
+                        send_telegram(token, sender_id, res)
                     elif cb_data == "BUY_GOLD":
                         g = data["gold"]
                         sym = config["mt5"]["symbols"]["GOLD"]
-                        ok, res = place_mt5_order(sym, "BUY", g["price"], g["sl"], g["tp"], config["mt5"]["risk_pct_per_trade"])
-                        send_telegram(token, chat_id, res)
+                        ok, res = execute_order(sym, "BUY", g["price"], g["sl"], g["tp"], config["mt5"]["risk_pct_per_trade"])
+                        send_telegram(token, sender_id, res)
 
         except Exception:
             time.sleep(2)
@@ -477,7 +551,7 @@ if __name__ == "__main__":
     print("==================================================================")
     print("  MT5 TELEGRAM REMOTE CONTROL & SELF-LEARNING BOT (PYTHON 3.11)")
     print("==================================================================")
-    ok, status = init_mt5()
+    ok, status = init_mt5(cfg)
     print(f"  * {status}")
     if LEARNING_AVAILABLE:
         print("  * Self-Learning Engine: Online & Connected (learning_memory.json)")

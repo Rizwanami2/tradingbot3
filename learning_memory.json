@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "last_updated": "2026-10-28 21:44:05",
+  "last_updated": "2026-10-28 23:00:12",
   "training_cycles": 3,
   "weights": {
     "BTC": {
@@ -289,6 +289,37 @@
       "tp2": 87363.7578125,
       "risk_pct": 2.9325150482048445,
       "reward_pct": 6.406800265150174,
+      "score": 7.3,
+      "active_features": {
+        "in_golden_pocket": true,
+        "no_trap": true,
+        "macro_dxy_tailwind": true,
+        "macro_yield_tailwind": true,
+        "trend_ma200": true,
+        "trend_ma50": false,
+        "rsi_sweet_spot": true,
+        "mayer_sweet_spot": true,
+        "gsr_undervalued": false,
+        "volatility_orderly": true,
+        "near_swing_support": false
+      },
+      "status": "PENDING",
+      "outcome": null,
+      "r_multiple": 0.0,
+      "exit_price": null,
+      "exit_time": null
+    },
+    {
+      "trade_id": "BTC_1793208612521",
+      "timestamp": "2026-10-28 23:00:12",
+      "asset": "BTC",
+      "symbol": "BTC-USD",
+      "entry": 80464.609375,
+      "stop_loss": 78101.93165429687,
+      "tp1": 85616.48265625,
+      "tp2": 87363.7578125,
+      "risk_pct": 2.936294277763809,
+      "reward_pct": 6.402657418294333,
       "score": 7.3,
       "active_features": {
         "in_golden_pocket": true,
