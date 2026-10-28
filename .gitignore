@@ -1,0 +1,22 @@
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Configuration overrides (protect personal tokens)
+config_telegram.local.json
+.env
+
+# Logs & temp files
+*.log
+*.tmp
+.DS_Store
+Thumbs.db

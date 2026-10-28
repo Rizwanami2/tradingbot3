@@ -1,0 +1,14 @@
+{
+  "GOLD": [
+    { "metric": "rsi_14",         "op": "<",  "value": 45,        "label": "RSI not overbought (< 45)" },
+    { "metric": "price_vs_ma200", "op": ">",  "value": 0,         "label": "Price above 200D MA" },
+    { "metric": "real_yield",     "op": "<",  "value": 1.5,       "label": "Real yield below 1.5%" },
+    { "metric": "dxy_trend",      "op": "==", "value": "falling", "label": "USD weakening (DXY falling)" }
+  ],
+  "BTC": [
+    { "metric": "rsi_14",          "op": "<", "value": 60, "label": "RSI not overbought (< 60)" },
+    { "metric": "price_vs_ma200",  "op": ">", "value": 0,  "label": "Price above 200D MA" },
+    { "metric": "fear_greed",      "op": "<", "value": 75, "label": "Fear & Greed not extreme greed (< 75)" },
+    { "metric": "etf_flow_7d",     "op": ">", "value": 0,  "label": "Positive BTC ETF net inflows (7D)" }
+  ]
+}
