@@ -28,6 +28,15 @@ import argparse
 import json
 import time
 import urllib.request
+import ssl
+
+# Fix for Windows VPS missing root CA certificates or hosting provider SSL inspection
+try:
+    _create_unverified_https_context = ssl._create_unverified_context
+except AttributeError:
+    pass
+else:
+    ssl._create_default_https_context = _create_unverified_https_context
 from datetime import datetime
 import numpy as np
 
