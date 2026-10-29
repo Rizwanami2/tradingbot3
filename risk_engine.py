@@ -20,6 +20,8 @@ if hasattr(sys.stdout, "reconfigure"):
 
 import os
 import math
+import json
+import time
 from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
@@ -53,6 +55,404 @@ DEFAULT_ACCOUNT_BALANCE = 10_000.0   # Standard default balance in USD
 DEFAULT_MAX_RISK_PCT = 1.0          # Max 1.0% risk per trade
 DAILY_DRAWDOWN_HALT_PCT = 2.0       # Halt new trades if daily loss reaches 2.0%
 MAX_TOTAL_DRAWDOWN_PCT = 6.0        # Portfolio halt at 6.0% drawdown
+
+# ── Priority 1: Safety & Multi-Layer Circuit Breaker Parameters ──
+TRADING_MODES = ("PAPER", "DEMO", "LIVE")
+DEFAULT_TRADING_MODE = "PAPER"
+MAX_CONCURRENT_POSITIONS = 2         # Max 2 concurrent open positions across Gold & BTC
+MAX_TOTAL_OPEN_RISK_PCT = 2.5        # Max 2.5% combined open risk across all positions
+DAILY_LOSS_LIMIT_PCT = 2.0           # 2% hard daily loss circuit breaker
+MAX_DATA_STALENESS_SECONDS = 900     # 15 minutes max quote staleness
+MAX_ALLOWED_SLIPPAGE = {
+    "GOLD": 0.80,                    # Max $0.80 fill slippage for Gold
+    "BTC": 50.00                     # Max $50.00 fill slippage for Bitcoin
+}
+MAX_ALLOWED_SPREAD = {
+    "GOLD": 0.60,                    # Max $0.60 spread for Gold
+    "BTC": 35.00                     # Max $35.00 spread for Bitcoin
+}
+SAFETY_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "safety_state.json")
+AUDIT_LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trade_audit.jsonl")
+
+
+class SafetyManager:
+    """
+    Priority 1 Institutional Risk & Safety Architecture:
+      1. Trading Modes: Strict PAPER | DEMO | LIVE separation.
+      2. Double Confirmation for Live Capital:
+         - /enable_live CONFIRM required to switch to LIVE mode.
+         - Second confirmation required for first trade of the day.
+      3. Multi-Layer Circuit Breakers:
+         - Daily loss limit (2.0% halt).
+         - Max concurrent open positions (2 positions max).
+         - Max total portfolio open risk (2.5% combined).
+         - Hard emergency kill-switch with manual reset (/kill_reset CONFIRM).
+      4. Stale Data Protection: Rejects signals with quotes >15m old.
+      5. Pre-Order Spread & Post-Order Slippage Guards.
+      6. Institutional Order Audit Logging: Full details persisted in trade_audit.jsonl.
+    """
+    def __init__(self, state_file: str = SAFETY_STATE_FILE, audit_file: str = AUDIT_LOG_FILE):
+        self.state_file = state_file
+        self.audit_file = audit_file
+        self.state = self._load_state()
+
+    def _load_state(self) -> dict:
+        today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        default_state = {
+            "trading_mode": DEFAULT_TRADING_MODE,
+            "live_mode_confirmed": False,
+            "first_trade_confirmed_date": "",
+            "kill_switch_active": False,
+            "kill_switch_reason": "",
+            "daily_date": today_utc,
+            "starting_daily_equity": DEFAULT_ACCOUNT_BALANCE,
+            "realized_daily_pnl": 0.0,
+            "daily_circuit_breaker_tripped": False,
+            "paper_account": {
+                "balance": DEFAULT_ACCOUNT_BALANCE,
+                "equity": DEFAULT_ACCOUNT_BALANCE,
+                "positions": []
+            }
+        }
+        if os.path.exists(self.state_file):
+            try:
+                with open(self.state_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if data.get("daily_date") != today_utc:
+                        data["daily_date"] = today_utc
+                        data["realized_daily_pnl"] = 0.0
+                        data["daily_circuit_breaker_tripped"] = False
+                        data["first_trade_confirmed_date"] = ""
+                    for k, v in default_state.items():
+                        if k not in data:
+                            data[k] = v
+                    return data
+            except Exception:
+                pass
+        return default_state
+
+    def save_state(self):
+        try:
+            with open(self.state_file, "w", encoding="utf-8") as f:
+                json.dump(self.state, f, indent=2)
+        except Exception as e:
+            print(f"[!] Warning: Could not save safety state: {e}")
+
+    # ── 1. Trading Modes ──────────────────────────────────────────
+    def get_trading_mode(self) -> str:
+        return self.state.get("trading_mode", DEFAULT_TRADING_MODE)
+
+    def set_trading_mode(self, mode: str, confirmation: str = "") -> tuple:
+        target = mode.strip().upper()
+        if target not in TRADING_MODES:
+            return False, f"Invalid mode '{mode}'. Supported modes: {', '.join(TRADING_MODES)}"
+
+        if target == "LIVE":
+            if confirmation.strip().upper() != "CONFIRM":
+                return False, "⚠️ LIVE trading with real capital requires explicit confirmation.\nRun: `/enable_live CONFIRM` or `/mode live CONFIRM`"
+            self.state["trading_mode"] = "LIVE"
+            self.state["live_mode_confirmed"] = True
+            self.save_state()
+            return True, "🔴 *LIVE TRADING MODE ENABLED*\nReal capital execution is now active on your live MT5 account.\nFirst trade of the day will require a second one-time confirmation."
+
+        elif target == "DEMO":
+            self.state["trading_mode"] = "DEMO"
+            self.state["live_mode_confirmed"] = False
+            self.save_state()
+            return True, "🟡 *DEMO TRADING MODE ACTIVE*\nOrders are sent to your connected MT5 Demo account."
+
+        else:  # PAPER
+            self.state["trading_mode"] = "PAPER"
+            self.state["live_mode_confirmed"] = False
+            self.save_state()
+            return True, "⚪ *PAPER TRADING MODE ACTIVE*\nAll trades are simulated risk-free in memory with realistic fills & slippage."
+
+    def is_first_trade_confirmed_today(self) -> bool:
+        today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        return self.state.get("first_trade_confirmed_date") == today_utc
+
+    def confirm_first_trade_today(self) -> tuple:
+        today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        self.state["first_trade_confirmed_date"] = today_utc
+        self.save_state()
+        return True, "✅ First live trade of the day confirmed. Live auto-execution authorized for today."
+
+    # ── 2. Emergency Kill-Switch ──────────────────────────────────
+    def is_kill_switch_active(self) -> tuple:
+        return bool(self.state.get("kill_switch_active", False)), self.state.get("kill_switch_reason", "")
+
+    def trigger_kill_switch(self, reason: str = "Emergency Kill-Switch Triggered") -> dict:
+        self.state["kill_switch_active"] = True
+        self.state["kill_switch_reason"] = reason
+        closed_paper = len(self.state["paper_account"]["positions"])
+        self.state["paper_account"]["positions"] = []
+        self.save_state()
+        return {
+            "kill_switch_active": True,
+            "reason": reason,
+            "closed_paper_positions": closed_paper
+        }
+
+    def reset_kill_switch(self, confirmation: str = "") -> tuple:
+        if confirmation.strip().upper() != "CONFIRM":
+            return False, "⚠️ Resetting the emergency kill-switch requires confirmation.\nRun: `/kill_reset CONFIRM`"
+        self.state["kill_switch_active"] = False
+        self.state["kill_switch_reason"] = ""
+        self.save_state()
+        return True, "✅ *EMERGENCY KILL-SWITCH RESET*\nTrading permissions restored. Normal execution resumed."
+
+    # ── 3. Daily Loss & Circuit Breaker Tracking ──────────────────
+    def record_pnl(self, pnl: float, equity: float = None):
+        today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if self.state.get("daily_date") != today_utc:
+            self.state["daily_date"] = today_utc
+            self.state["realized_daily_pnl"] = 0.0
+            self.state["daily_circuit_breaker_tripped"] = False
+            if equity:
+                self.state["starting_daily_equity"] = equity
+
+        self.state["realized_daily_pnl"] += pnl
+        starting_eq = self.state.get("starting_daily_equity", DEFAULT_ACCOUNT_BALANCE)
+        daily_loss_pct = (self.state["realized_daily_pnl"] / starting_eq) * 100.0
+
+        if daily_loss_pct <= -DAILY_LOSS_LIMIT_PCT:
+            self.state["daily_circuit_breaker_tripped"] = True
+
+        self.save_state()
+
+    def set_starting_equity(self, equity: float):
+        if equity and equity > 0:
+            self.state["starting_daily_equity"] = equity
+            self.save_state()
+
+    # ── 4. Comprehensive Safety & Guardrail Evaluator ────────────
+    def check_trade_safety(self, asset: str, proposed_risk_pct: float,
+                           open_positions: list = None,
+                           current_equity: float = None,
+                           data_timestamp: float = None,
+                           spread_val: float = None,
+                           sl_dist: float = None) -> tuple:
+        """
+        Multi-Layer Safety Verification Gauntlet:
+          1. Kill-Switch verification
+          2. Daily loss circuit breaker (-2.0% halt)
+          3. Max concurrent open positions (2 positions limit)
+          4. Max combined open portfolio risk (2.5% limit)
+          5. Stale data protection (<15m quote freshness)
+          6. Pre-order spread guard (spread < max absolute & <15% of SL)
+        """
+        open_positions = open_positions or []
+        asset_key = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
+
+        # Check 1: Kill-Switch
+        if self.state.get("kill_switch_active"):
+            reason = self.state.get("kill_switch_reason", "Emergency Halt Active")
+            return False, f"🚨 Kill-Switch is ACTIVE ({reason}). All trading blocked."
+
+        # Check 2: Daily Loss Circuit Breaker
+        starting_eq = self.state.get("starting_daily_equity", current_equity or DEFAULT_ACCOUNT_BALANCE)
+        daily_pnl = self.state.get("realized_daily_pnl", 0.0)
+        daily_loss_pct = (daily_pnl / starting_eq) * 100.0 if starting_eq > 0 else 0.0
+
+        if self.state.get("daily_circuit_breaker_tripped") or daily_loss_pct <= -DAILY_LOSS_LIMIT_PCT:
+            return False, f"🛑 Daily Loss Circuit Breaker TRIPPED: Realized daily loss is {daily_loss_pct:.2f}% (Limit: -{DAILY_LOSS_LIMIT_PCT:.1f}% = -${starting_eq * (DAILY_LOSS_LIMIT_PCT/100):,.2f}). Trading locked until daily reset."
+
+        # Check 3: Max Concurrent Open Positions
+        if len(open_positions) >= MAX_CONCURRENT_POSITIONS:
+            return False, f"⛔ Max Concurrent Open Positions Reached ({len(open_positions)}/{MAX_CONCURRENT_POSITIONS} active). Cannot open additional positions."
+
+        # Check 4: Max Combined Open Risk
+        current_open_risk = sum(p.get("risk_pct", 1.0) for p in open_positions)
+        if (current_open_risk + proposed_risk_pct) > MAX_TOTAL_OPEN_RISK_PCT:
+            return False, f"⛔ Max Combined Portfolio Risk Exceeded: Current open risk ({current_open_risk:.2f}%) + proposed risk ({proposed_risk_pct:.2f}%) = {(current_open_risk + proposed_risk_pct):.2f}% > {MAX_TOTAL_OPEN_RISK_PCT:.1f}% limit."
+
+        # Check 5: Stale Data Protection
+        if data_timestamp:
+            age_sec = time.time() - data_timestamp
+            if age_sec > MAX_DATA_STALENESS_SECONDS:
+                return False, f"⏱️ Stale Market Data: Quote is {age_sec/60.0:.1f} minutes old (limit: {MAX_DATA_STALENESS_SECONDS/60:.0f}m). Order blocked to prevent trading on expired ticks."
+
+        # Check 6: Pre-Order Spread Guard
+        if spread_val is not None and spread_val > 0:
+            max_spread = MAX_ALLOWED_SPREAD.get(asset_key, 0.60)
+            if spread_val > max_spread:
+                return False, f"⚠️ Excessive Broker Spread: Current spread ${spread_val:.2f} exceeds institutional threshold (${max_spread:.2f})."
+            if sl_dist and sl_dist > 0 and (spread_val / sl_dist) > 0.15:
+                return False, f"⚠️ High Spread-to-Risk: Spread ${spread_val:.2f} consumes {(spread_val/sl_dist*100):.1f}% of SL distance (${sl_dist:.2f}) > 15% limit."
+
+        return True, "Safety Verification Passed: All Circuit Breakers Armed ✅"
+
+    # ── 5. Post-Order Slippage Verification ────────────────────────
+    def verify_fill_slippage(self, asset: str, requested_price: float, fill_price: float) -> tuple:
+        asset_key = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
+        slippage = round(abs(fill_price - requested_price), 2)
+        max_slip = MAX_ALLOWED_SLIPPAGE.get(asset_key, 0.80)
+        is_acceptable = slippage <= max_slip
+        msg = f"Slippage ${slippage:.2f} within limit (${max_slip:.2f})" if is_acceptable else f"Slippage ${slippage:.2f} EXCEEDS limit (${max_slip:.2f})!"
+        return is_acceptable, slippage, msg
+
+    # ── 6. Institutional Order Audit Logger ───────────────────────
+    def log_order_audit(self, order_data: dict):
+        record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "mode": self.get_trading_mode(),
+            **order_data
+        }
+        try:
+            with open(self.audit_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record) + "\n")
+        except Exception as e:
+            print(f"[!] Warning: Could not write order audit log: {e}")
+
+    # ── 7. Paper Trading Simulator ────────────────────────────────
+    def execute_paper_order(self, asset: str, action: str, price: float,
+                            stop_loss: float, tp1: float, tp2: float,
+                            lots: float, risk_usd: float, risk_pct: float,
+                            strategy: str = "SCALP", score: int = 8,
+                            features: dict = None, comment: str = "PaperTrade") -> dict:
+        ticket = f"PAPER-{int(time.time()*1000) % 10000000}"
+        asset_key = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
+
+        sim_spread = 0.15 if asset_key == "GOLD" else 8.0
+        fill_price = round(price + (sim_spread / 2.0) if action.upper() == "BUY" else price - (sim_spread / 2.0), 2)
+
+        position = {
+            "ticket": ticket,
+            "asset": asset_key,
+            "symbol": "XAUUSD" if asset_key == "GOLD" else "BTCUSD",
+            "action": action.upper(),
+            "lots": lots,
+            "open_price": fill_price,
+            "requested_price": price,
+            "slippage": round(abs(fill_price - price), 2),
+            "sl": stop_loss,
+            "tp1": tp1,
+            "tp2": tp2,
+            "risk_usd": risk_usd,
+            "risk_pct": risk_pct,
+            "strategy": strategy,
+            "score": score,
+            "open_time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "comment": comment
+        }
+        self.state["paper_account"]["positions"].append(position)
+        self.save_state()
+
+        self.log_order_audit({
+            "event": "ORDER_PLACED",
+            "ticket": ticket,
+            "asset": asset_key,
+            "symbol": position["symbol"],
+            "action": position["action"],
+            "strategy": strategy,
+            "score": score,
+            "entry_requested": price,
+            "fill_price": fill_price,
+            "slippage": position["slippage"],
+            "stop_loss": stop_loss,
+            "tp1": tp1,
+            "tp2": tp2,
+            "lots": lots,
+            "risk_usd": risk_usd,
+            "risk_pct": risk_pct,
+            "status": "FILLED_PAPER"
+        })
+
+        return {
+            "success": True,
+            "ticket": ticket,
+            "symbol": position["symbol"],
+            "action": position["action"],
+            "lots": lots,
+            "price": fill_price,
+            "sl": stop_loss,
+            "tp": tp1,
+            "mode": "PAPER",
+            "time": position["open_time"]
+        }
+
+    def get_paper_positions(self) -> list:
+        return self.state.get("paper_account", {}).get("positions", [])
+
+    def close_paper_position(self, ticket: str, exit_price: float, reason: str = "MANUAL_CLOSE") -> dict:
+        positions = self.state["paper_account"]["positions"]
+        target = None
+        idx = -1
+        for i, p in enumerate(positions):
+            if str(p["ticket"]) == str(ticket):
+                target = p
+                idx = i
+                break
+        if not target:
+            return {"success": False, "error": f"Paper position #{ticket} not found."}
+
+        positions.pop(idx)
+        asset_key = target["asset"]
+        mult = 100.0 if asset_key == "GOLD" else 1.0
+        is_buy = target["action"] == "BUY"
+        pnl = (exit_price - target["open_price"]) * target["lots"] * mult if is_buy else (target["open_price"] - exit_price) * target["lots"] * mult
+        pnl = round(pnl, 2)
+
+        self.state["paper_account"]["balance"] += pnl
+        self.state["paper_account"]["equity"] = self.state["paper_account"]["balance"]
+        self.record_pnl(pnl, self.state["paper_account"]["balance"])
+        self.save_state()
+
+        self.log_order_audit({
+            "event": "POSITION_CLOSED",
+            "ticket": ticket,
+            "asset": asset_key,
+            "exit_price": exit_price,
+            "pnl_usd": pnl,
+            "reason": reason
+        })
+
+        return {
+            "success": True,
+            "ticket": ticket,
+            "closed_pnl": pnl,
+            "balance": self.state["paper_account"]["balance"],
+            "reason": reason
+        }
+
+    # ── 8. Safety Dashboard Rendering ─────────────────────────────
+    def get_safety_dashboard_text(self, current_equity: float = None) -> str:
+        mode = self.get_trading_mode()
+        kill_active, kill_reason = self.is_kill_switch_active()
+        starting_eq = self.state.get("starting_daily_equity", current_equity or DEFAULT_ACCOUNT_BALANCE)
+        daily_pnl = self.state.get("realized_daily_pnl", 0.0)
+        daily_loss_pct = (daily_pnl / starting_eq) * 100.0 if starting_eq > 0 else 0.0
+        breaker_tripped = self.state.get("daily_circuit_breaker_tripped") or daily_loss_pct <= -DAILY_LOSS_LIMIT_PCT
+
+        mode_badge = "⚪ PAPER (Simulation)" if mode == "PAPER" else "🟡 DEMO (MT5 Test Account)" if mode == "DEMO" else "🔴 LIVE (Real Capital)"
+        kill_status = f"🚨 ACTIVE ({kill_reason}) — Reset via `/kill_reset CONFIRM`" if kill_active else "ARMED ✅ (Normal Execution)"
+        breaker_status = f"🛑 TRIPPED ({daily_loss_pct:.2f}%) — Locked for today" if breaker_tripped else f"ARMED ✅ (Current: {daily_pnl:+,.2f} / -${starting_eq * (DAILY_LOSS_LIMIT_PCT/100):,.2f} halt)"
+
+        first_trade_st = "NOT REQUIRED (Simulation)" if mode != "LIVE" else ("CONFIRMED ✅ (Authorized Today)" if self.is_first_trade_confirmed_today() else "PENDING ⚠️ (Requires `/confirm_trade YES`)")
+
+        lines = [
+            "🛡️ *SAFETY & RISK CONTROLLER DASHBOARD*",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            f"• *Trading Mode:* `{mode_badge}`",
+            f"• *Kill-Switch Status:* `{kill_status}`",
+            f"• *Daily Loss Circuit Breaker:* `{breaker_status}`",
+            f"• *Max Concurrent Open Positions:* `2 Positions Max`",
+            f"• *Max Total Open Risk:* `2.50% Combined Portfolio Risk`",
+            f"• *Stale Data Protection:* `Active (<15m Freshness Guard)`",
+            f"• *Spread & Slippage Guard:* `Active (Gold: $0.60/$0.80 | BTC: $35/$50)`",
+            f"• *First Live Trade of the Day:* `{first_trade_st}`",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "⚙️ *Safety Controls:*",
+            "• Switch Mode: `/mode paper` | `/mode demo` | `/enable_live CONFIRM`",
+            "• Emergency Stop: `/kill` (Immediate liquidation & halt)",
+            "• Reset Kill-Switch: `/kill_reset CONFIRM`",
+            "• Confirm 1st Live Trade: `/confirm_trade YES`"
+        ]
+        return "\n".join(lines)
+
+
+# Singleton Instance
+safety_manager = SafetyManager()
 
 # ── Institutional Strategy Framework ──────────────────────────────────────────
 STRATEGIES = {

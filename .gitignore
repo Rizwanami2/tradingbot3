@@ -22,6 +22,8 @@ config_telegram.local.json
 .DS_Store
 Thumbs.db
 learning_memory.json
+safety_state.json
+*.jsonl
 
 # Never create or track README files
 README*

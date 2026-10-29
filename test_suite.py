@@ -153,6 +153,8 @@ class TestHardAssetProject(unittest.TestCase):
     def test_02_mt5_executor_and_trailing(self):
         """Verify MT5 executor handles disconnected state gracefully and trailing methods exist."""
         print("\n[*] 2. Testing MT5 Executor (Disconnected Handling & Trailing Protection)...")
+        orig_mode = risk_engine.safety_manager.get_trading_mode()
+        risk_engine.safety_manager.set_trading_mode("DEMO")  # Routes to MT5 to verify broker disconnected behavior
         broker = mt5_executor.MT5LiveBroker()
         self.assertFalse(broker.is_connected)
 
@@ -189,6 +191,7 @@ class TestHardAssetProject(unittest.TestCase):
         swaps = broker.get_swap_rates("GOLD")
         self.assertFalse(swaps["available"])
 
+        risk_engine.safety_manager.set_trading_mode(orig_mode)
         print("    ✅ MT5 Executor Disconnected Handling & Trailing: ALL TESTS PASSED")
 
     def test_03_chart_generation(self):
@@ -310,6 +313,17 @@ class TestHardAssetProject(unittest.TestCase):
             "/backtest",
             "/backtest gold scalp 90",
 
+            # Priority 1 Safety & Trading Mode Hubs
+            "/mode",
+            "/mode paper",
+            "/mode demo",
+            "/mode live",
+            "/enable_live CONFIRM",
+            "/confirm_trade YES",
+            "/safety",
+            "/kill",
+            "/kill_reset CONFIRM",
+
             # Status Hub
             "/status"
         ]
@@ -357,6 +371,156 @@ class TestHardAssetProject(unittest.TestCase):
         self.assertEqual(risk_engine.get_active_strategy()["code"], "SCALP")
 
         print("    ✅ All Modern Hubs, Subcommands, Shortcuts & State Transitions Verified!")
+
+    def test_06_safety_modes_and_confirmations(self):
+        """Verify strict PAPER | DEMO | LIVE modes and double confirmation."""
+        print("\n[*] 6. Testing Strict Trading Modes & Confirmations...")
+        sm = risk_engine.safety_manager
+
+        # Mode switching
+        ok, msg = sm.set_trading_mode("PAPER")
+        self.assertTrue(ok)
+        self.assertEqual(sm.get_trading_mode(), "PAPER")
+
+        ok, msg = sm.set_trading_mode("DEMO")
+        self.assertTrue(ok)
+        self.assertEqual(sm.get_trading_mode(), "DEMO")
+
+        # LIVE without confirmation MUST fail
+        ok, msg = sm.set_trading_mode("LIVE", "")
+        self.assertFalse(ok)
+        self.assertIn("confirmation", msg.lower())
+
+        # LIVE with CONFIRM succeeds
+        ok, msg = sm.set_trading_mode("LIVE", "CONFIRM")
+        self.assertTrue(ok)
+        self.assertEqual(sm.get_trading_mode(), "LIVE")
+
+        # In LIVE mode, first trade of day requires confirmation
+        sm.state["first_trade_confirmed_date"] = ""
+        self.assertFalse(sm.is_first_trade_confirmed_today())
+        ok, msg = sm.confirm_first_trade_today()
+        self.assertTrue(ok)
+        self.assertTrue(sm.is_first_trade_confirmed_today())
+
+        # Reset back to PAPER mode for test safety
+        sm.set_trading_mode("PAPER")
+        print("    ✅ Strict Trading Modes & Confirmations: ALL PASSED")
+
+    def test_07_circuit_breakers_and_kill_switch(self):
+        """Verify daily loss limit, max concurrent positions, max risk, and hard kill-switch."""
+        print("\n[*] 7. Testing Multi-Layer Circuit Breakers & Kill-Switch...")
+        sm = risk_engine.safety_manager
+
+        # 1. Kill-Switch
+        sm.trigger_kill_switch("Test Kill Switch")
+        is_active, reason = sm.is_kill_switch_active()
+        self.assertTrue(is_active)
+        self.assertIn("Test Kill Switch", reason)
+
+        # Trade check while kill-switch is active MUST fail
+        safe, msg = sm.check_trade_safety("GOLD", proposed_risk_pct=0.5)
+        self.assertFalse(safe)
+        self.assertIn("Kill-Switch", msg)
+
+        # Reset kill-switch without CONFIRM fails
+        ok, msg = sm.reset_kill_switch("")
+        self.assertFalse(ok)
+        ok, msg = sm.reset_kill_switch("CONFIRM")
+        self.assertTrue(ok)
+        is_active, _ = sm.is_kill_switch_active()
+        self.assertFalse(is_active)
+
+        # 2. Max Concurrent Open Positions (limit: 2)
+        mock_positions = [{"symbol": "XAUUSD", "risk_pct": 0.5}, {"symbol": "BTCUSD", "risk_pct": 0.5}]
+        safe, msg = sm.check_trade_safety("GOLD", proposed_risk_pct=0.5, open_positions=mock_positions)
+        self.assertFalse(safe)
+        self.assertIn("Max Concurrent Open Positions", msg)
+
+        # 3. Max Total Open Risk (limit: 2.5%)
+        mock_heavy_risk = [{"symbol": "XAUUSD", "risk_pct": 2.2}]
+        safe, msg = sm.check_trade_safety("BTC", proposed_risk_pct=0.5, open_positions=mock_heavy_risk)
+        self.assertFalse(safe)
+        self.assertIn("Max Combined Portfolio Risk", msg)
+
+        # 4. Daily Loss Circuit Breaker (-2.0% halt)
+        sm.state["daily_circuit_breaker_tripped"] = False
+        sm.state["realized_daily_pnl"] = 0.0
+        sm.state["starting_daily_equity"] = 10000.0
+        sm.record_pnl(-250.0)  # -2.5% loss > 2.0% limit
+        self.assertTrue(sm.state["daily_circuit_breaker_tripped"])
+        safe, msg = sm.check_trade_safety("GOLD", proposed_risk_pct=0.5, open_positions=[])
+        self.assertFalse(safe)
+        self.assertIn("Daily Loss Circuit Breaker", msg)
+
+        # Reset for subsequent tests
+        sm.state["daily_circuit_breaker_tripped"] = False
+        sm.state["realized_daily_pnl"] = 0.0
+        print("    ✅ Multi-Layer Circuit Breakers & Kill-Switch: ALL PASSED")
+
+    def test_08_stale_data_spread_slippage_and_audit(self):
+        """Verify stale data protection, spread/slippage guards, paper execution, and audit logger."""
+        print("\n[*] 8. Testing Stale Data, Spread/Slippage Guards & Paper Trading...")
+        sm = risk_engine.safety_manager
+        import time
+
+        # 1. Stale Data Guard (>15 minutes old quote)
+        stale_time = time.time() - 1000  # >900s
+        safe, msg = sm.check_trade_safety("GOLD", proposed_risk_pct=0.5, open_positions=[], data_timestamp=stale_time)
+        self.assertFalse(safe)
+        self.assertIn("Stale Market Data", msg)
+
+        # Fresh data succeeds
+        fresh_time = time.time() - 30
+        safe, msg = sm.check_trade_safety("GOLD", proposed_risk_pct=0.5, open_positions=[], data_timestamp=fresh_time)
+        self.assertTrue(safe)
+
+        # 2. Spread Guard: excessive spread (e.g. $1.50 for Gold > $0.60 limit)
+        safe, msg = sm.check_trade_safety("GOLD", proposed_risk_pct=0.5, open_positions=[], spread_val=1.50, sl_dist=4.0)
+        self.assertFalse(safe)
+        self.assertIn("Excessive Broker Spread", msg)
+
+        # 3. Slippage Guard:
+        is_ok, slip, msg = sm.verify_fill_slippage("GOLD", requested_price=2740.0, fill_price=2740.20)
+        self.assertTrue(is_ok)
+        self.assertEqual(slip, 0.20)
+
+        is_ok, slip, msg = sm.verify_fill_slippage("GOLD", requested_price=2740.0, fill_price=2742.00)  # $2.00 > $0.80
+        self.assertFalse(is_ok)
+        self.assertEqual(slip, 2.00)
+
+        # 4. Paper Trading Execution & Audit Logging
+        paper_order = sm.execute_paper_order(
+            asset="GOLD", action="BUY", price=2740.0,
+            stop_loss=2736.0, tp1=2745.0, tp2=2748.0,
+            lots=0.10, risk_usd=40.0, risk_pct=0.50,
+            strategy="SCALP", score=8
+        )
+        self.assertTrue(paper_order["success"])
+        self.assertIn("PAPER-", paper_order["ticket"])
+
+        # Check paper positions
+        paper_positions = sm.get_paper_positions()
+        self.assertGreaterEqual(len(paper_positions), 1)
+
+        # Close paper position
+        close_res = sm.close_paper_position(paper_order["ticket"], exit_price=2744.0)
+        self.assertTrue(close_res["success"])
+        self.assertGreater(close_res["closed_pnl"], 0.0)
+
+        # Check audit log file exists and has records
+        self.assertTrue(os.path.exists(sm.audit_file))
+        with open(sm.audit_file, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        self.assertGreater(len(lines), 0)
+        self.assertIn("ORDER_PLACED", lines[-2] if len(lines) >= 2 else lines[-1])
+
+        # 5. Dashboard text
+        dash = sm.get_safety_dashboard_text()
+        self.assertIn("SAFETY & RISK CONTROLLER DASHBOARD", dash)
+        self.assertIn("Trading Mode", dash)
+        self.assertIn("Kill-Switch", dash)
+        print("    ✅ Stale Data, Spread/Slippage Guards & Paper Audit: ALL PASSED")
 
 
 if __name__ == "__main__":

@@ -31,6 +31,11 @@ try:
 except ImportError:
     MT5_AVAILABLE = False
 
+try:
+    from risk_engine import safety_manager
+except Exception:
+    safety_manager = None
+
 
 # Common symbol variations used across institutional and retail brokers
 GOLD_SYMBOL_CANDIDATES = ["XAUUSD", "XAUUSDm", "GOLD", "XAUUSD.a", "XAUUSD.raw", "XAUUSD.ecn", "XAUUSD.s", "XAUUSD.", "GC=F"]
@@ -224,10 +229,33 @@ class MT5LiveBroker:
                                   take_profit: float, lot_size: float,
                                   comment: str = "GoldBTC-Sniper") -> dict:
         """
-        Executes an instant market order directly on the live MT5 broker.
-        Enforces small lot sizes, small SL, and small TP anchored to live fill price.
-        Automatically verifies margin requirement against broker leverage.
+        Executes an instant market order directly on the live MT5 broker or in Paper mode.
+        Enforces strict PAPER | DEMO | LIVE trading modes, multi-layer circuit breakers,
+        pre-order spread guard, post-order slippage verification, and audit logging.
         """
+        current_mode = safety_manager.get_trading_mode() if safety_manager else "LIVE"
+
+        # ── 1. PAPER TRADING SIMULATION (Zero Real Capital Risk) ──
+        if current_mode == "PAPER" and safety_manager:
+            open_pos = safety_manager.get_paper_positions()
+            paper_bal = safety_manager.state.get("paper_account", {}).get("balance", 10000.0)
+            sl_dist = abs(entry_price - stop_loss) if (entry_price > 0 and stop_loss > 0) else 4.0
+
+            safe_ok, safe_msg = safety_manager.check_trade_safety(
+                asset, proposed_risk_pct=0.50, open_positions=open_pos,
+                current_equity=paper_bal, sl_dist=sl_dist
+            )
+            if not safe_ok:
+                return {"success": False, "error": safe_msg, "mode": "PAPER"}
+
+            return safety_manager.execute_paper_order(
+                asset=asset, action=action, price=entry_price,
+                stop_loss=stop_loss, tp1=take_profit, tp2=take_profit,
+                lots=lot_size, risk_usd=50.0, risk_pct=0.50,
+                strategy="SCALP", score=8, comment=comment
+            )
+
+        # ── 2. LIVE / DEMO BROKER EXECUTION ──
         if not self.ensure_connected():
             return {"success": False, "error": "MT5 is disconnected. Please ensure MT5 terminal is running on your VPS."}
 
@@ -238,6 +266,16 @@ class MT5LiveBroker:
 
         if not term.trade_allowed:
             return {"success": False, "error": "Algo Trading is DISABLED in MT5. Go to Tools -> Options -> Expert Advisors -> Allow algorithmic trading."}
+
+        # LIVE Mode Double Confirmation: First trade of the day check
+        if current_mode == "LIVE" and safety_manager:
+            if not safety_manager.is_first_trade_confirmed_today():
+                return {
+                    "success": False,
+                    "error": "First live trade of the day requires confirmation! Run: /confirm_trade YES",
+                    "requires_confirmation": True,
+                    "mode": "LIVE"
+                }
 
         symbol = self.resolve_symbol(asset)
         sym_info = mt5.symbol_info(symbol)
@@ -270,14 +308,20 @@ class MT5LiveBroker:
         digits = sym_info.digits
         point = sym_info.point or (10 ** -digits)
 
-        # Spread-to-Risk Win-Rate Protection Guardrail
+        # Multi-Layer Safety & Pre-Order Spread Guard
         spread_cost = sym_info.spread * point
         sl_distance = abs(fill_price - stop_loss)
-        if sl_distance > 0 and (spread_cost / sl_distance) > 0.18:
-            return {
-                "success": False,
-                "error": f"Broker spread too wide ({sym_info.spread} pts = ${spread_cost:.2f}) taking >18% of SL distance (${sl_distance:.2f}). Order blocked to protect win-rate."
-            }
+
+        if safety_manager:
+            open_pos = self.get_open_positions()
+            current_eq = self.account_info.equity if self.account_info else 10000.0
+            safe_ok, safe_msg = safety_manager.check_trade_safety(
+                asset, proposed_risk_pct=0.50, open_positions=open_pos,
+                current_equity=current_eq, data_timestamp=tick.time,
+                spread_val=spread_cost, sl_dist=sl_distance
+            )
+            if not safe_ok:
+                return {"success": False, "error": safe_msg, "mode": current_mode}
 
         # Auto-calculate margin with broker leverage
         acc = self.account_info
@@ -346,15 +390,39 @@ class MT5LiveBroker:
                 "error": f"MT5 Broker Rejected ({retcode_val}): {comment_str}"
             }
 
+        actual_fill = res.price or fill_price
+        slip_ok, slip_val, slip_msg = True, 0.0, "OK"
+        if safety_manager:
+            slip_ok, slip_val, slip_msg = safety_manager.verify_fill_slippage(asset, entry_price, actual_fill)
+            safety_manager.log_order_audit({
+                "event": "ORDER_PLACED_MT5",
+                "ticket": res.order,
+                "asset": asset,
+                "symbol": symbol,
+                "action": action.upper(),
+                "lots": valid_lot,
+                "entry_requested": entry_price,
+                "fill_price": actual_fill,
+                "slippage": slip_val,
+                "slippage_ok": slip_ok,
+                "sl": final_sl,
+                "tp": final_tp,
+                "mode": current_mode,
+                "comment": comment
+            })
+
         return {
             "success": True,
             "ticket": res.order,
             "symbol": symbol,
             "action": action.upper(),
             "lots": valid_lot,
-            "price": res.price or fill_price,
+            "price": actual_fill,
             "sl": final_sl,
             "tp": final_tp,
+            "mode": current_mode,
+            "slippage": slip_val,
+            "slippage_ok": slip_ok,
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
 
@@ -548,15 +616,36 @@ class MT5LiveBroker:
         return events
 
     def get_open_positions(self) -> list:
-        """Fetches all currently open live positions."""
+        """Fetches all currently open positions across live MT5 and Paper Trading."""
+        mode = safety_manager.get_trading_mode() if safety_manager else "LIVE"
+        results = []
+
+        # 1. Paper positions if in PAPER mode
+        if mode == "PAPER" and safety_manager:
+            for p in safety_manager.get_paper_positions():
+                results.append({
+                    "ticket": p["ticket"],
+                    "symbol": p["symbol"],
+                    "type": p["action"],
+                    "lots": p["lots"],
+                    "open_price": p["open_price"],
+                    "current_price": p["open_price"],
+                    "sl": p["sl"],
+                    "tp": p["tp1"],
+                    "profit": 0.0,
+                    "mode": "PAPER",
+                    "time": p["open_time"]
+                })
+            return results
+
+        # 2. Live MT5 positions
         if not self.ensure_connected():
-            return []
+            return results
 
         positions = mt5.positions_get()
         if not positions:
-            return []
+            return results
 
-        results = []
         for p in positions:
             p_type = "BUY" if p.type == mt5.ORDER_TYPE_BUY else "SELL"
             results.append({
@@ -569,65 +658,96 @@ class MT5LiveBroker:
                 "sl": p.sl,
                 "tp": p.tp,
                 "profit": p.profit,
+                "mode": mode,
                 "time": datetime.fromtimestamp(p.time).strftime("%Y-%m-%d %H:%M:%S") if p.time else ""
             })
         return results
 
     def close_all_positions(self) -> dict:
-        """Emergency circuit breaker: Closes all open live positions immediately."""
-        if not self.ensure_connected():
-            return {"success": False, "closed_count": 0, "error": "MT5 Disconnected. Open MT5 on your VPS."}
-
-        positions = mt5.positions_get()
-        if not positions:
-            return {"success": True, "closed_count": 0, "msg": "No open positions to close."}
-
+        """Emergency circuit breaker: Closes all open positions immediately (MT5 & Paper)."""
+        mode = safety_manager.get_trading_mode() if safety_manager else "LIVE"
         closed = 0
         total_pnl = 0.0
 
-        for p in positions:
-            symbol = p.symbol
-            tick = mt5.symbol_info_tick(symbol)
-            if not tick:
-                continue
+        # Close paper positions if any
+        if safety_manager and safety_manager.get_paper_positions():
+            paper_pos = list(safety_manager.get_paper_positions())
+            for p in paper_pos:
+                res = safety_manager.close_paper_position(p["ticket"], p["open_price"], reason="EMERGENCY_KILL_SWITCH")
+                if res.get("success"):
+                    closed += 1
+                    total_pnl += res.get("closed_pnl", 0.0)
 
-            order_type = mt5.ORDER_TYPE_SELL if p.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
-            price = tick.bid if p.type == mt5.ORDER_TYPE_BUY else tick.ask
+        # In DEMO / LIVE mode: MT5 connection is required
+        if mode in ("DEMO", "LIVE") and not self.ensure_connected():
+            return {"success": False, "error": "MT5 is disconnected."}
 
-            req = {
-                "action": mt5.TRADE_ACTION_DEAL,
-                "position": p.ticket,
-                "symbol": symbol,
-                "volume": p.volume,
-                "type": order_type,
-                "price": price,
-                "deviation": 35,
-                "magic": 999888,
-                "comment": "Close-All-Trigger",
-                "type_time": mt5.ORDER_TIME_GTC,
-                "type_filling": mt5.ORDER_FILLING_IOC
-            }
-            res = mt5.order_send(req)
-            if res is None or res.retcode != mt5.TRADE_RETCODE_DONE:
-                for filling in [mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN]:
-                    req["type_filling"] = filling
+        # Close live MT5 positions if connected
+        if self.ensure_connected():
+            positions = mt5.positions_get()
+            if positions:
+                for p in positions:
+                    symbol = p.symbol
+                    tick = mt5.symbol_info_tick(symbol)
+                    if not tick:
+                        continue
+
+                    order_type = mt5.ORDER_TYPE_SELL if p.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
+                    price = tick.bid if p.type == mt5.ORDER_TYPE_BUY else tick.ask
+
+                    req = {
+                        "action": mt5.TRADE_ACTION_DEAL,
+                        "position": p.ticket,
+                        "symbol": symbol,
+                        "volume": p.volume,
+                        "type": order_type,
+                        "price": price,
+                        "deviation": 35,
+                        "magic": 999888,
+                        "comment": "Close-All-Trigger",
+                        "type_time": mt5.ORDER_TIME_GTC,
+                        "type_filling": mt5.ORDER_FILLING_IOC
+                    }
                     res = mt5.order_send(req)
-                    if res is not None and res.retcode == mt5.TRADE_RETCODE_DONE:
-                        break
+                    if res is None or res.retcode != mt5.TRADE_RETCODE_DONE:
+                        for filling in [mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN]:
+                            req["type_filling"] = filling
+                            res = mt5.order_send(req)
+                            if res is not None and res.retcode == mt5.TRADE_RETCODE_DONE:
+                                break
 
-            if res is not None and res.retcode == mt5.TRADE_RETCODE_DONE:
-                closed += 1
-                total_pnl += p.profit
+                    if res is not None and res.retcode == mt5.TRADE_RETCODE_DONE:
+                        closed += 1
+                        total_pnl += p.profit
+                        if safety_manager:
+                            safety_manager.record_pnl(p.profit)
+                            safety_manager.log_order_audit({
+                                "event": "POSITION_CLOSED_MT5",
+                                "ticket": p.ticket,
+                                "symbol": symbol,
+                                "pnl_usd": p.profit,
+                                "reason": "EMERGENCY_KILL_SWITCH"
+                            })
 
         return {
             "success": True,
             "closed_count": closed,
-            "total_pnl": total_pnl,
-            "remaining": len(positions) - closed
+            "total_pnl": total_pnl
         }
 
     def has_open_position(self, asset: str) -> bool:
-        """Returns True if a live position for this asset is already open in MT5."""
+        """Returns True if a position for this asset is open in MT5 or Paper."""
+        mode = safety_manager.get_trading_mode() if safety_manager else "LIVE"
+        asset_key = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
+
+        # Check paper positions
+        if mode == "PAPER" and safety_manager:
+            for p in safety_manager.get_paper_positions():
+                if p.get("asset") == asset_key:
+                    return True
+            return False
+
+        # Check live MT5 positions
         if not self.ensure_connected():
             return False
         symbol = self.resolve_symbol(asset)
