@@ -246,6 +246,10 @@ class TestHardAssetProject(unittest.TestCase):
             "/start",
             "/help",
             "/menu",
+            "/all",
+            "/cockpit",
+            "/omni",
+            "/terminal",
 
             # Modern Market Hub & Subcommands
             "/market",

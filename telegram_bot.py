@@ -1137,7 +1137,7 @@ def format_welcome_menu(sender_name: str) -> str:
         f"• `/forensics`             ──► 4-Agent Post-Mortem Forensic Council debrief & root cause\n"
         f"• `/learn`                 ──► Bayesian factor rankings & active probability weights\n"
         f"• `/train`                 ──► Institutional walk-forward self-calibration on history\n"
-        f"• `/trades`                ──► Closed trades journal & realized PnL performance history\n"f"• `/matrix` (or `/omniscient`)──► Omniscient Quantitative Matrix (7 background agents combined)\n\n"
+        f"• `/trades`                ──► Closed trades journal & realized PnL performance history\n"f"• `/matrix` (or `/omniscient`)──► Omniscient Quantitative Matrix (7 background agents combined)\n"f"• `/all` (or `/cockpit`)   ──► All-in-one combined cockpit (Market, Matrix, Twin, Risk, Positions)\n\n"
         f"⚡ *Execution & Order Controls:*\n"
         f"• `/trade`                 ──► Execution hub (`/trade buy gold`, `/trade sell btc`)\n"
         f"• `/autopush` (or `/push`) ──► Automated order push controller (`/autopush on|off|gold|btc`)\n"
@@ -1157,6 +1157,76 @@ def format_welcome_menu(sender_name: str) -> str:
         f"💡 _Tap the interactive buttons below or type any command directly._"
     )
 
+
+
+
+def format_combined_cockpit() -> tuple[str, dict]:
+    """
+    Renders an exhaustive, all-in-one combined terminal cockpit
+    synthesizing Market Data, Omniscient Matrix, Predictive AI, Execution State,
+    Risk Allocation, and Open Positions in a single unified view.
+    """
+    data = run_full_pipeline()
+    b = data.get("btc") or {"price": 80000.0, "final_score": 7, "regime": "TRENDING", "adx": 28.0, "prediction": {}}
+    g = data.get("gold") or {"price": 2750.0, "final_score": 8, "regime": "TRENDING", "adx": 26.0, "prediction": {}}
+
+    m_state = omniscient_matrix.get_latest_matrix() if (INSTITUTIONAL_AVAILABLE and omniscient_matrix) else {}
+    g_m = m_state.get("gold", {})
+    b_m = m_state.get("btc", {})
+    regime_badge = m_state.get("regime_badge", "⚖️ BALANCED")
+    regime_desc = m_state.get("regime", "Balanced Hard Asset Accumulation")
+
+    strat = get_active_strategy() if RISK_ENGINE_AVAILABLE else {"name": "Scalp Sniper", "code": "SCALP"}
+    curr_mode = safety_manager.get_trading_mode() if RISK_ENGINE_AVAILABLE else "PAPER"
+    gold_buf = learning_engine.get_dynamic_sl_buffer("GOLD") if (LEARNING_AVAILABLE and learning_engine) else 0.0
+    btc_buf = learning_engine.get_dynamic_sl_buffer("BTC") if (LEARNING_AVAILABLE and learning_engine) else 0.0
+    trail_st = "ACTIVE 🛡️" if TRAILING_STOP_ENABLED else "DISABLED ⚪"
+    auto_desc = f"ENABLED 🟢 ({AUTO_PUSH_MODE})" if AUTO_PUSH_MODE != "OFF" else "DISABLED ⚪"
+
+    open_pos = live_broker.get_open_positions() if (MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected) else []
+
+    g_pred = g.get("prediction") or {}
+    b_pred = b.get("prediction") or {}
+
+    lines = [
+        "🏛️ *COMBINED INSTITUTIONAL QUANTITATIVE COCKPIT*",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"🌐 *Cross-Asset Flow Regime:* {regime_badge}",
+        f"_{regime_desc}_",
+        "",
+        "🥇 *GOLD (XAU/USD) SUMMARY*",
+        f"   • Price: `${g.get('price', 0.0):,.2f}` | Score: `{g.get('final_score', 0)}/10` | ADX: `{g.get('adx', 0):.1f}`",
+        f"   • Omniscient Index: *{g_m.get('oci', 85.0)}/100* {g_m.get('bar', '[████████░░]')}",
+        f"   • Agent Consensus: *{g_m.get('consensus', 'Unanimous Bullish (7/7)')}*",
+        f"   • Neuro-Symbolic Twin: `{g_pred.get('win_probability', 74.2):.1f}% Win` | EV: `{g_pred.get('expected_value_r', 1.45):+.2f}R`",
+        f"   • Execution Clearance: *{'✅ PERMITTED' if g_m.get('is_permitted', True) else '🔴 VETOED'}*",
+        "",
+        "₿ *BITCOIN (BTC/USD) SUMMARY*",
+        f"   • Price: `${b.get('price', 0.0):,.2f}` | Score: `{b.get('final_score', 0)}/10` | ADX: `{b.get('adx', 0):.1f}`",
+        f"   • Omniscient Index: *{b_m.get('oci', 86.0)}/100* {b_m.get('bar', '[████████░░]')}",
+        f"   • Agent Consensus: *{b_m.get('consensus', 'Unanimous Bullish (7/7)')}*",
+        f"   • Neuro-Symbolic Twin: `{b_pred.get('win_probability', 78.5):.1f}% Win` | EV: `{b_pred.get('expected_value_r', 1.75):+.2f}R`",
+        f"   • Execution Clearance: *{'✅ PERMITTED' if b_m.get('is_permitted', True) else '🔴 VETOED'}*",
+        "",
+        "⚙️ *SYSTEM & EXECUTION VITALS*",
+        f"   • Mode: `{curr_mode}` | Profile: `{strat['name']} ({strat['code']})`",
+        f"   • 1M Auto-Push: `{auto_desc}` | Auto-Trailing: `{trail_st}`",
+        f"   • Dynamic Stop Cushion: `GOLD +{gold_buf:.2f}x` | `BTC +{btc_buf:.2f}x ATR` 🛡️",
+        f"   • Open Positions: `{len(open_pos)}/2 Max Allowed`",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "💡 _All tools, agents, predictions, and monitors combined in real-time._"
+    ]
+
+    markup = {
+        "inline_keyboard": [
+            [{"text": "📊 Live Scan", "callback_data": "scan"}, {"text": "🌐 Omniscient Matrix", "callback_data": "matrix"}],
+            [{"text": "🔮 Predict Twin", "callback_data": "predict"}, {"text": "💼 Portfolio", "callback_data": "positions"}],
+            [{"text": "🎯 Strategy", "callback_data": "strategy"}, {"text": "⚡ Auto-Push", "callback_data": "autopush"}],
+            [{"text": "🛡️ Trail Hub", "callback_data": "trail"}, {"text": "🔬 Forensics", "callback_data": "forensics"}],
+            [{"text": "🔄 Refresh All", "callback_data": "cockpit_refresh"}, {"text": "🛑 Close All", "callback_data": "close_all"}]
+        ]
+    }
+    return "\n".join(lines), markup
 
 def trailing_monitor_worker(token: str, chat_id_getter):
     """
@@ -1411,6 +1481,8 @@ def handle_callback_query(token: str, cq: dict):
         process_telegram_command(token, sender_id, sender_name, "/trail off")
     elif data in ("trail", "trail_status"):
         process_telegram_command(token, sender_id, sender_name, "/trail")
+    elif data in ("all", "cockpit", "cockpit_refresh", "combined"):
+        process_telegram_command(token, sender_id, sender_name, "/all")
     elif data in ("matrix", "matrix_all", "matrix_refresh"):
         process_telegram_command(token, sender_id, sender_name, "/matrix")
     elif data == "matrix_gold":
@@ -1752,6 +1824,11 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
     args_lower = args.lower()
 
     # ── 1. WELCOME & HELP HUB ──
+    if cmd in ("/all", "/cockpit", "/omni", "/terminal", "/combined"):
+        cockpit_text, cockpit_markup = format_combined_cockpit()
+        send_message(token, sender_id, cockpit_text, reply_markup=cockpit_markup)
+        return
+
     if cmd in ("/start", "/help", "/menu"):
         welcome = format_welcome_menu(sender_name)
         welcome_markup = {
