@@ -237,9 +237,27 @@ class MarketDataFeed:
                 return pd.DataFrame()
 
         # Update latest bar with live tick for real-time responsiveness
-        live_tick = self.get_live_price(asset_norm)
-        if live_tick and live_tick["price"] > 0:
-            df = self._inject_live_tick_into_history(df, live_tick["price"])
+        if self.broker and getattr(self.broker, "is_connected", False):
+            try:
+                mt5_res = self._fetch_mt5_tick(asset_norm)
+                if mt5_res and mt5_res.get("price", 0) > 0:
+                    df = self._inject_live_tick_into_history(df, mt5_res["price"])
+            except Exception:
+                pass
+        else:
+            # Populate tick cache with the freshly fetched bar close without redundant network requests
+            if not df.empty:
+                fresh_p = float(df["Close"].iloc[-1])
+                self._update_cache(asset_norm, {
+                    "asset": asset_norm,
+                    "price": round(fresh_p, 2),
+                    "bid": round(fresh_p, 2),
+                    "ask": round(fresh_p, 2),
+                    "source": "YFINANCE",
+                    "timestamp": now,
+                    "stale": False,
+                    "age_seconds": 0.0
+                })
 
         self._memory_cache[cache_key] = {"df": df.copy(), "timestamp": now}
         return df
@@ -357,6 +375,23 @@ class MarketDataFeed:
         """Extracts fast price from Yahoo Finance."""
         symbol = "GC=F" if asset == "GOLD" else "BTC-USD"
         t = yf.Ticker(symbol)
+        now = time.time()
+        try:
+            fast_p = float(t.fast_info['lastPrice'])
+            if fast_p > 0:
+                return {
+                    "asset": asset,
+                    "price": round(fast_p, 2),
+                    "bid": round(fast_p, 2),
+                    "ask": round(fast_p, 2),
+                    "source": "YFINANCE",
+                    "timestamp": now,
+                    "stale": False,
+                    "age_seconds": 0.0
+                }
+        except Exception:
+            pass
+
         hist = t.history(period="1d", interval="1m")
         if hist.empty:
             hist = t.history(period="5d")
@@ -364,7 +399,6 @@ class MarketDataFeed:
             return None
 
         price = float(hist["Close"].iloc[-1])
-        now = time.time()
         return {
             "asset": asset,
             "price": round(price, 2),

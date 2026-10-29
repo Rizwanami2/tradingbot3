@@ -36,7 +36,7 @@ except ImportError:
     sys.exit(1)
 
 
-def generate_mt5_chart(symbol: str, asset_name: str, lookback_bars: int = 45) -> io.BytesIO:
+def generate_mt5_chart(symbol: str, asset_name: str, lookback_bars: int = 45, df_input=None) -> io.BytesIO:
     """
     Renders an MT5-style institutional dark candlestick chart with:
       - 50 SMA & 200 SMA
@@ -45,9 +45,25 @@ def generate_mt5_chart(symbol: str, asset_name: str, lookback_bars: int = 45) ->
       - Order Entry, Stop-Loss, and Take-Profit Lines
     Returns in-memory BytesIO buffer containing PNG bytes.
     """
-    ticker = yf.Ticker(symbol)
-    hist = ticker.history(period="180d")
-    if hist.empty or len(hist) < 30:
+    hist = None
+    if df_input is not None and hasattr(df_input, "empty") and not df_input.empty and len(df_input) >= 30:
+        hist = df_input.copy()
+    else:
+        try:
+            from market_data import market_data_feed
+            asset_norm = "GOLD" if any(x in symbol.upper() for x in ("GC", "GOLD", "XAU")) else "BTC"
+            hist = market_data_feed.get_historical_bars(asset_norm, period="350d", min_bars=30)
+        except Exception:
+            pass
+
+        if hist is None or hist.empty or len(hist) < 30:
+            try:
+                ticker = yf.Ticker(symbol)
+                hist = ticker.history(period="180d")
+            except Exception:
+                pass
+
+    if hist is None or hist.empty or len(hist) < 30:
         return None
 
     # Slice recent bars for high-clarity viewing

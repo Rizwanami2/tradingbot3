@@ -33,6 +33,7 @@ import ssl
 from datetime import datetime
 import numpy as np
 import pandas as pd
+import concurrent.futures
 
 # Suppress warnings
 import warnings
@@ -898,7 +899,8 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
         "risk_pct": risk_pct,
         "reward_pct": reward_pct,
         "rr": rr,
-        "lot_info": lot_info
+        "lot_info": lot_info,
+        "hist": hist
     }
 
 
@@ -913,8 +915,8 @@ _last_pipeline_cache = {
 def run_full_pipeline():
     global _last_pipeline_cache
     now = time.time()
-    # Cache for up to 10 seconds to avoid provider rate-limits on rapid commands
-    if _last_pipeline_cache["btc"] and _last_pipeline_cache["gold"] and (now - _last_pipeline_cache["timestamp"] < 10):
+    # Cache for up to 15 seconds to avoid provider rate-limits on rapid commands
+    if _last_pipeline_cache["btc"] and _last_pipeline_cache["gold"] and (now - _last_pipeline_cache["timestamp"] < 15):
         return _last_pipeline_cache
 
     try:
@@ -925,15 +927,20 @@ def run_full_pipeline():
             "vix": 18.0, "gsr": 80.0, "fg_val": 50, "fg_label": "Neutral"
         }
 
-    try:
-        btc = analyze_asset_complete("BTC-USD", "BTC", macro)
-    except Exception:
-        btc = None
-
-    try:
-        gold = analyze_asset_complete("GC=F", "GOLD", macro)
-    except Exception:
-        gold = None
+    # Parallelize BTC and Gold analysis concurrently for maximum speed and zero lag
+    btc = None
+    gold = None
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="pipeline_pool") as pool:
+        f_btc = pool.submit(analyze_asset_complete, "BTC-USD", "BTC", macro)
+        f_gold = pool.submit(analyze_asset_complete, "GC=F", "GOLD", macro)
+        try:
+            btc = f_btc.result(timeout=12)
+        except Exception as e:
+            btc = None
+        try:
+            gold = f_gold.result(timeout=12)
+        except Exception as e:
+            gold = None
 
     # Resilient fallback to last known good snapshot if temporary provider failure
     if btc is None and _last_pipeline_cache["btc"]:
@@ -980,6 +987,16 @@ def generate_adversarial_debate(data: dict) -> str:
         f"• Gold: {g['verdict']}"
     ]
     return "\n".join(lines)
+
+
+def _send_chart_async(token: str, chat_id: str, symbol: str, caption: str, df_input=None):
+    """Generates and sends visual candlestick chart asynchronously without stalling alerts."""
+    try:
+        buf = generate_mt5_chart(symbol, symbol, df_input=df_input)
+        if buf:
+            send_telegram_chart(token, chat_id, buf, caption)
+    except Exception as err:
+        print(f"⚠️ Async chart generation skipped for {symbol}: {err}")
 
 
 # ==============================================================================
@@ -1161,24 +1178,6 @@ def execute_setup_order(asset: str, setup_data: dict, token: str, chat_id: str, 
 
     prefix = "AutoPush" if trigger_source == "AUTOPUSH" else ("Auto1M" if trigger_source == "AUTO" else "Approve")
     comment = f"{prefix}-{setup_data.get('strategy', 'SCALP')}"
-    lots = setup_data.get("lots", 0.05)
-    entry = setup_data["entry"]
-    sl = setup_data["sl"]
-    tp1 = setup_data["tp1"]
-
-    res = live_broker.execute_live_sniper_order(
-        asset, "BUY", entry, sl, tp1, lots, comment=comment
-    )
-    return res
-
-    is_paper = (safety_manager.get_trading_mode() == "PAPER") if safety_manager else False
-    if not is_paper and not live_broker.ensure_connected():
-        return {"success": False, "error": "MT5 terminal disconnected on VPS."}
-
-    if live_broker.has_open_position(asset):
-        return {"success": False, "error": f"Open position already exists for {asset}."}
-
-    comment = f"Auto1M-{setup_data.get('strategy', 'SCALP')}" if trigger_source == "AUTO" else f"Approve-{setup_data.get('strategy', 'SCALP')}"
     lots = setup_data.get("lots", 0.05)
     entry = setup_data["entry"]
     sl = setup_data["sl"]
@@ -1463,12 +1462,15 @@ def auto_scanner_worker(token: str, chat_id_getter):
     print("⏰ Automated 1-Minute Live Candle Scanner: ACTIVE (Monitoring Gold & BTC every 60s)")
     global AUTO_TRADE_MODE, AUTO_TRADE_LIVE
 
+    first_run = True
     while True:
         try:
-            # Sync to the next 1-minute candle close (:00 seconds)
-            now = time.time()
-            sleep_sec = max(5, int(60 - (now % 60)))
-            time.sleep(sleep_sec)
+            if not first_run:
+                # Sync to the next 1-minute candle close (:00 seconds)
+                now = time.time()
+                sleep_sec = max(5, int(60 - (now % 60)))
+                time.sleep(sleep_sec)
+            first_run = False
 
             target_chat_id = chat_id_getter()
             if not target_chat_id:
@@ -1521,9 +1523,11 @@ def auto_scanner_worker(token: str, chat_id_getter):
                     send_message(token, target_chat_id, alert_text, reply_markup=reply_markup)
 
                     if CHARTS_AVAILABLE:
-                        b_buf = generate_mt5_chart("BTC-USD", "BITCOIN (BTC-USD)")
-                        if b_buf:
-                            send_telegram_chart(token, target_chat_id, b_buf, f"📊 MT5 1M Chart: Bitcoin (${b['price']:,.2f}) | Score {b['final_score']}/10")
+                        threading.Thread(
+                            target=_send_chart_async,
+                            args=(token, target_chat_id, "BTC-USD", f"📊 MT5 1M Chart: Bitcoin (${b['price']:,.2f}) | Score {b['final_score']}/10", b.get("hist")),
+                            daemon=True
+                        ).start()
 
 
             # ── 2. Gold (XAU/USD) Continuous Scanner ──
@@ -1564,9 +1568,11 @@ def auto_scanner_worker(token: str, chat_id_getter):
                     send_message(token, target_chat_id, alert_text, reply_markup=reply_markup)
 
                     if CHARTS_AVAILABLE:
-                        g_buf = generate_mt5_chart("GC=F", "GOLD (XAU/USD)")
-                        if g_buf:
-                            send_telegram_chart(token, target_chat_id, g_buf, f"📊 MT5 1M Chart: Gold (${g['price']:,.2f}) | Score {g['final_score']}/10")
+                        threading.Thread(
+                            target=_send_chart_async,
+                            args=(token, target_chat_id, "GC=F", f"📊 MT5 1M Chart: Gold (${g['price']:,.2f}) | Score {g['final_score']}/10", g.get("hist")),
+                            daemon=True
+                        ).start()
 
 
             # ── 3. Clean 1-Minute Console Heartbeat (Zero Spam) ──
@@ -2671,6 +2677,22 @@ def start_bot():
     t_trail = threading.Thread(target=trailing_monitor_worker, args=(token, get_active_chat_id), daemon=True)
     t_trail.start()
 
+    # Dedicated thread pool for processing incoming commands & button callbacks without blocking polling loop
+    cmd_executor = concurrent.futures.ThreadPoolExecutor(max_workers=6, thread_name_prefix="tg_worker")
+
+    def _safe_callback(tok, cq):
+        try:
+            handle_callback_query(tok, cq)
+        except Exception as cq_err:
+            print(f"⚠️ Error handling callback query: {cq_err}")
+
+    def _safe_command(tok, sid, sname, mtext):
+        try:
+            process_telegram_command(tok, sid, sname, mtext)
+        except Exception as cmd_err:
+            print(f"⚠️ Error processing command '{mtext}': {cmd_err}")
+            send_message(tok, sid, f"⚠️ Error processing command: {cmd_err}")
+
     offset = None
     while True:
         try:
@@ -2684,12 +2706,9 @@ def start_bot():
             for u in updates.get("result", []):
                 offset = u["update_id"] + 1
 
-                # Handle interactive inline button clicks
+                # Handle interactive inline button clicks concurrently
                 if "callback_query" in u:
-                    try:
-                        handle_callback_query(token, u["callback_query"])
-                    except Exception as cq_err:
-                        print(f"⚠️ Error handling callback query: {cq_err}")
+                    cmd_executor.submit(_safe_callback, token, u["callback_query"])
                     continue
 
                 if "message" in u and "text" in u["message"]:
@@ -2704,11 +2723,7 @@ def start_bot():
                         save_chat_id(sender_id)
 
                     print(f"📩 [{datetime.now().strftime('%H:%M:%S')}] From {sender_name}: '{msg_text}'")
-                    try:
-                        process_telegram_command(token, sender_id, sender_name, msg_text)
-                    except Exception as cmd_err:
-                        print(f"⚠️ Error processing command '{msg_text}': {cmd_err}")
-                        send_message(token, sender_id, f"⚠️ Error processing command: {cmd_err}")
+                    cmd_executor.submit(_safe_command, token, sender_id, sender_name, msg_text)
 
         except urllib.error.HTTPError as e:
             if e.code == 401:
