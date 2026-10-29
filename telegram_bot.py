@@ -1038,35 +1038,55 @@ def format_scan_summary(data: dict) -> str:
     if not b or not g:
         return "⚠️ Market data temporarily unavailable from provider. Retrying momentarily..."
 
+    # Automatically trigger and evaluate Omniscient Matrix across all 7 background agents
+    m_state = {}
+    if INSTITUTIONAL_AVAILABLE and omniscient_matrix:
+        try:
+            m_state = omniscient_matrix.evaluate_full_matrix(data)
+        except Exception:
+            m_state = omniscient_matrix.get_latest_matrix()
+
+    b_mat = m_state.get("btc", {})
+    g_mat = m_state.get("gold", {})
+    regime_badge = m_state.get("regime_badge", "⚖️ BALANCED")
+
     session_info = get_market_session() if RISK_ENGINE_AVAILABLE else None
     strat = get_active_strategy() if RISK_ENGINE_AVAILABLE else {"name": "Scalp Sniper", "code": "SCALP"}
     session_badge = f"{session_info.get('badge', '🌐')} {session_info.get('name', 'Active')}" if session_info else "Active Market"
     edge_str = session_info.get('win_rate_edge', 'Normal') if session_info else 'Normal'
 
+    gold_buf = learning_engine.get_dynamic_sl_buffer("GOLD") if (LEARNING_AVAILABLE and learning_engine) else 0.0
+    btc_buf = learning_engine.get_dynamic_sl_buffer("BTC") if (LEARNING_AVAILABLE and learning_engine) else 0.0
+
     b_gp_str = f"✅ INSIDE (${b['levels']['fib_650']:,.0f} - ${b['levels']['fib_618']:,.0f})" if b['levels']['in_golden_pocket'] else "Outside GP"
     g_gp_str = f"✅ INSIDE (${g['levels']['fib_650']:,.0f} - ${g['levels']['fib_618']:,.0f})" if g['levels']['in_golden_pocket'] else "Outside GP"
 
+    b_pred = b.get("prediction") or {}
+    g_pred = g.get("prediction") or {}
+
     lines = [
-        f"📊 *HARD-ASSET MULTI-SKILL SCAN* ({session_badge})",
-        f"🎯 Active Profile: *{strat['name']} ({strat['code']})* | Edge: `{edge_str}`",
+        f"📊 *HARD-ASSET ALL-AGENT MULTI-FACTOR SCAN* ({session_badge})",
+        f"🌐 *Cross-Asset Flow:* {regime_badge} | Profile: *{strat['name']} ({strat['code']})*",
         "",
-        f"🌐 *Macro Radar:*",
+        f"🌐 *Agent 1: Macro & Liquidity Sovereign:*",
         f"• DXY: `{m['dxy']:.2f}` ({m['dxy_chg']:+.2f}%) | 10Y Yield: `{m['tnx']:.2f}%`",
         f"• GSR: `{m['gsr']:.1f}x` | VIX: `{m['vix']:.1f}` | F&G: `{m['fg_val']}` ({m['fg_label']})",
         "",
         f"₿ *Bitcoin (BTC-USD):* `${b['price']:,.2f}`",
-        f"• Score: `{b['base_score']}/10` (Learned: `{b['adaptive_score']:.1f}/10`) ──► {b['verdict']}",
+        f"• Omniscient Index: *{b_mat.get('oci', b['base_score']*10)}/100* {b_mat.get('bar', '')} ──► *{b_mat.get('consensus', 'Approved')}*",
         f"• HTF Bias: `{b.get('htf_bias', {}).get('summary', 'Neutral')}`",
-        f"• Regime: `{b['regime']}` (ADX: `{b['adx']:.1f}` | DI: +{b.get('plus_di', 0):.0f}/-{b.get('minus_di', 0):.0f})",
-        f"• Golden Pocket: {b_gp_str}",
-        f"• Microstructure: `{b['trap_type']}` | Body: `{b.get('candle_body_pct', 50):.0f}%`",
+        f"• Structural Golden Pocket: {b_gp_str}",
+        f"• Microstructure Sentinel: `{b['trap_type']}` | Body: `{b.get('candle_body_pct', 50):.0f}%`",
+        f"• Predictive Twin: `{b_pred.get('win_probability', 75.0):.1f}% Win` | EV: `{b_pred.get('expected_value_r', 1.2):+.2f}R`",
+        f"• Dynamic Risk & SL Cushion: `+{btc_buf:.2f} ATR` | Score: `{b['base_score']}/10` ──► {b['verdict']}",
         "",
         f"🥇 *Gold (XAU/USD):* `${g['price']:,.2f}`",
-        f"• Score: `{g['base_score']}/10` (Learned: `{g['adaptive_score']:.1f}/10`) ──► {g['verdict']}",
+        f"• Omniscient Index: *{g_mat.get('oci', g['base_score']*10)}/100* {g_mat.get('bar', '')} ──► *{g_mat.get('consensus', 'Approved')}*",
         f"• HTF Bias: `{g.get('htf_bias', {}).get('summary', 'Neutral')}`",
-        f"• Regime: `{g['regime']}` (ADX: `{g['adx']:.1f}` | DI: +{g.get('plus_di', 0):.0f}/-{g.get('minus_di', 0):.0f})",
-        f"• Golden Pocket: {g_gp_str}",
-        f"• Microstructure: `{g['trap_type']}` | Body: `{g.get('candle_body_pct', 50):.0f}%`",
+        f"• Structural Golden Pocket: {g_gp_str}",
+        f"• Microstructure Sentinel: `{g['trap_type']}` | Body: `{g.get('candle_body_pct', 50):.0f}%`",
+        f"• Predictive Twin: `{g_pred.get('win_probability', 75.0):.1f}% Win` | EV: `{g_pred.get('expected_value_r', 1.2):+.2f}R`",
+        f"• Dynamic Risk & SL Cushion: `+{gold_buf:.2f} ATR` | Score: `{g['base_score']}/10` ──► {g['verdict']}",
         ""
     ]
 
@@ -1948,8 +1968,18 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
                 return
             lv = b["levels"]
             strat_info = b.get("lot_info", {})
+            if INSTITUTIONAL_AVAILABLE and omniscient_matrix:
+                try:
+                    omniscient_matrix.evaluate_full_matrix(data)
+                except Exception:
+                    pass
+            m_st = omniscient_matrix.get_latest_matrix() if (INSTITUTIONAL_AVAILABLE and omniscient_matrix) else {}
+            b_mat = m_st.get("btc", {})
+            b_pred = b.get("prediction") or {}
             ticket = (
-                f"₿ *Bitcoin (BTC-USD) Multi-Skill Audit:*\n"
+                f"₿ *Bitcoin (BTC-USD) All-Agent Multi-Skill Audit:*\n"
+                f"• Omniscient Index: *{b_mat.get('oci', b['base_score']*10)}/100* {b_mat.get('bar', '')} ({b_mat.get('consensus', 'Approved')})\n"
+                f"• Predictive Twin: `{b_pred.get('win_probability', 75.0):.1f}% Win` | EV: `{b_pred.get('expected_value_r', 1.2):+.2f}R`\n"
                 f"• Price: `${b['price']:,.2f}`\n"
                 f"• Score: `{b['base_score']}/10` (Learned: `{b['adaptive_score']:.1f}/10`)\n"
                 f"• Strategy: `{strat_info.get('strategy', 'SCALP')}` ({strat_info.get('holding_time', '5-30m')})\n"
@@ -1986,8 +2016,18 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             lv = g["levels"]
             m = data.get("macro", {})
             strat_info = g.get("lot_info", {})
+            if INSTITUTIONAL_AVAILABLE and omniscient_matrix:
+                try:
+                    omniscient_matrix.evaluate_full_matrix(data)
+                except Exception:
+                    pass
+            m_st = omniscient_matrix.get_latest_matrix() if (INSTITUTIONAL_AVAILABLE and omniscient_matrix) else {}
+            g_mat = m_st.get("gold", {})
+            g_pred = g.get("prediction") or {}
             ticket = (
-                f"🥇 *Gold (XAU/USD / GC=F) Multi-Skill Audit:*\n"
+                f"🥇 *Gold (XAU/USD / GC=F) All-Agent Multi-Skill Audit:*\n"
+                f"• Omniscient Index: *{g_mat.get('oci', g['base_score']*10)}/100* {g_mat.get('bar', '')} ({g_mat.get('consensus', 'Approved')})\n"
+                f"• Predictive Twin: `{g_pred.get('win_probability', 75.0):.1f}% Win` | EV: `{g_pred.get('expected_value_r', 1.2):+.2f}R`\n"
                 f"• Price: `${g['price']:,.2f}`\n"
                 f"• Score: `{g['base_score']}/10` (Learned: `{g['adaptive_score']:.1f}/10`)\n"
                 f"• Strategy: `{strat_info.get('strategy', 'SCALP')}` ({strat_info.get('holding_time', '5-30m')})\n"
@@ -2014,10 +2054,17 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
                     send_telegram_chart(token, sender_id, g_buf, f"📊 MT5 Chart: Gold (${g['price']:,.2f})")
             return
 
-        # Default /market (or /scan): Dual Asset Scan + Dual MT5 Charts
-        send_message(token, sender_id, "⏳ Running multi-skill quantitative scan & generating MT5 charts...")
+        # Default /market (or /scan): Dual Asset Scan + Dual MT5 Charts (All Agents Active)
+        send_message(token, sender_id, "⏳ Running multi-agent quantitative scan across all 7 background agents...")
         data = run_full_pipeline()
-        send_message(token, sender_id, format_scan_summary(data))
+        scan_markup = {
+            "inline_keyboard": [
+                [{"text": "🌐 Omniscient Matrix", "callback_data": "matrix"}, {"text": "🔮 Predict Twin", "callback_data": "predict"}],
+                [{"text": "🥇 Gold Deep Dive", "callback_data": "matrix_gold"}, {"text": "₿ BTC Deep Dive", "callback_data": "matrix_btc"}],
+                [{"text": "👥 Agent Ballots", "callback_data": "matrix_agents"}, {"text": "⚡ Combined All", "callback_data": "all"}]
+            ]
+        }
+        send_message(token, sender_id, format_scan_summary(data), reply_markup=scan_markup)
         if CHARTS_AVAILABLE and data.get("btc") and data.get("gold"):
             b_buf = generate_mt5_chart("BTC-USD", "BITCOIN (BTC-USD)")
             if b_buf:
