@@ -462,9 +462,9 @@ class MT5LiveBroker:
     TRAIL_PROFILES = {
         "SCALP": {
             "name": "SCALP",
-            "breakeven_r": 0.40,
-            "trail_start_r": 0.75,
-            "trail_step_r": 0.30,
+            "breakeven_r": 0.35,
+            "trail_start_r": 0.65,
+            "trail_step_r": 0.20,
         },
         "SWING": {
             "name": "SWING",

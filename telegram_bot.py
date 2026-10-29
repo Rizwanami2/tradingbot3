@@ -1034,6 +1034,7 @@ def auto_scanner_worker(token: str, chat_id_getter):
             if not data or not data.get("btc") or not data.get("gold"):
                 continue
 
+            active_strat = get_active_strategy() if RISK_ENGINE_AVAILABLE else {"code": "SCALP", "name": "Sniper Scalp"}
             b = data["btc"]
             g = data["gold"]
             current_time = time.time()

@@ -459,15 +459,15 @@ STRATEGIES = {
     "SCALP": {
         "code": "SCALP",
         "name": "Institutional Key-Level Scalp",
-        "description": "Small practical SL/TP on institutional key trade levels. Focus: ~68-78% practical scalp win rate.",
-        "sl_mult": 0.35,
-        "rr_tp1": 1.25,
-        "rr_tp2": 1.85,
-        "breakeven_r": 0.40,       # Fast breakeven lock at +0.40R (eliminates drawdown risk)
-        "trail_start_r": 0.70,     # Dynamic trail starts at +0.70R
-        "trail_step_r": 0.25,      # Tight 0.25R trailing buffer
+        "description": "Small, low practical SL/TP on institutional key trade levels. Focus: ~75-85% practical scalp win rate.",
+        "sl_mult": 0.22,
+        "rr_tp1": 1.20,
+        "rr_tp2": 1.75,
+        "breakeven_r": 0.35,       # Fast breakeven lock at +0.35R (eliminates drawdown risk immediately)
+        "trail_start_r": 0.65,     # Dynamic trail starts at +0.65R
+        "trail_step_r": 0.20,      # Tight 0.20R trailing buffer
         "risk_pct": 0.50,          # Conservative 0.50% risk per scalp
-        "target_win_rate": "~68-78% (Key Level Practical Scalp)",
+        "target_win_rate": "~75-85% (Key Level Practical Scalp)",
         "accuracy_tip": "Key level (Golden Pocket, S/R, EMA), wick <28%, body >=28%, RSI 35-70",
         "regime_filter": "Key Level Reaction / Momentum",
         "holding_time": "5 - 30 minutes",
@@ -923,16 +923,16 @@ def calculate_strategy_levels(asset: str, current_price: float, atr: float = 0.0
     base_atr = atr if atr > 0 else (28.0 if asset_key == "GOLD" else 2200.0)
     sl_mult = strat["sl_mult"]
 
-    # 1. Strategy-Specific Stop-Loss Distance (Tight, Practical Scalping Bounds)
+    # 1. Strategy-Specific Stop-Loss Distance (Tight, Low Practical Scalping Bounds)
     if asset_key == "GOLD":
         raw_sl_dist = base_atr * sl_mult
-        min_bound = 3.00 if strat_key == "SCALP" else 6.00 if strat_key == "SWING" else 3.50
-        max_bound = 4.80 if strat_key == "SCALP" else 35.00 if strat_key == "SWING" else 15.00
+        min_bound = 2.40 if strat_key == "SCALP" else 6.00 if strat_key == "SWING" else 3.50
+        max_bound = 3.50 if strat_key == "SCALP" else 35.00 if strat_key == "SWING" else 15.00
         sl_dist = max(min_bound, min(raw_sl_dist, max_bound))
     else:
         raw_sl_dist = base_atr * sl_mult
-        min_bound = 250.0 if strat_key == "SCALP" else 800.0 if strat_key == "SWING" else 400.0
-        max_bound = 450.0 if strat_key == "SCALP" else 3500.0 if strat_key == "SWING" else 1800.0
+        min_bound = 190.0 if strat_key == "SCALP" else 800.0 if strat_key == "SWING" else 400.0
+        max_bound = 300.0 if strat_key == "SCALP" else 3500.0 if strat_key == "SWING" else 1800.0
         sl_dist = max(min_bound, min(raw_sl_dist, max_bound))
 
     sl_dist = round(sl_dist, 2)
