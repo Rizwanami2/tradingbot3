@@ -304,6 +304,20 @@ class TestHardAssetProject(unittest.TestCase):
             "/trail",
             "/trail on",
             "/trail off",
+            "/trail status",
+            "/trail scalp",
+            "/trail swing",
+
+            # Automated Push Hub
+            "/autopush",
+            "/autopush on",
+            "/autopush off",
+            "/autopush gold",
+            "/autopush btc",
+            "/autopush status",
+            "/push",
+            "/push on",
+            "/push off",
 
             # Self-Learning Hub
             "/learn",
@@ -793,7 +807,7 @@ class TestHardAssetProject(unittest.TestCase):
         # 8. Test auto-executed alert formatting when auto_trade is active
         mock_exec = {"success": True, "mode": "PAPER", "symbol": "GC=F", "lots": 0.05, "price": 2740.0, "ticket": 999888, "sl": 2736.0, "tp": 2744.5}
         auto_text, auto_markup = telegram_bot.format_elite_alert("GOLD", data, mock_gold_setup, exec_result=mock_exec, is_auto_trade=True)
-        self.assertIn("AUTO-EXECUTION", auto_text)
+        self.assertTrue("AUTO-EXECUTION" in auto_text or "AUTO-PUSH" in auto_text)
         self.assertIn("999888", auto_text)
         auto_callbacks = [btn["callback_data"] for row in auto_markup["inline_keyboard"] for btn in row]
         self.assertIn("unlock_gold", auto_callbacks)
@@ -837,6 +851,153 @@ class TestHardAssetProject(unittest.TestCase):
         self.assertIn("EXECUTE", verdict)
 
         print("    ✅ SCALP Strategy Score >= 7 Execution: ALL PASSED")
+
+    def test_13_auto_push_and_trail_rework(self):
+        """Verify dynamic trailing stop rework, initial risk preservation, paper trailing, and auto-push."""
+        print("\n[*] 13. Testing Trailing Stop Engine & Auto-Push Pipeline...")
+        token, sender_id, sender_name = "123456:TEST_TOKEN", "12345", "Trader"
+        orig_mode = risk_engine.safety_manager.get_trading_mode()
+        risk_engine.safety_manager.set_trading_mode("PAPER")
+        risk_engine.safety_manager.state["paper_account"]["positions"] = []
+
+        # ── 1. Paper Trailing: Initial Risk Preservation & Peak Ratchet ──
+        order = risk_engine.safety_manager.execute_paper_order(
+            asset="GOLD", action="BUY", price=2700.0,
+            stop_loss=2697.0, tp1=2706.0, tp2=2710.0,
+            lots=0.10, risk_usd=30.0, risk_pct=0.5,
+            strategy="SCALP", score=8
+        )
+        ticket = order["ticket"]
+        self.assertTrue(order["success"])
+
+        # Check initial risk distance is ~3.0
+        pos = [p for p in risk_engine.safety_manager.get_paper_positions() if p["ticket"] == ticket][0]
+        self.assertAlmostEqual(pos["initial_risk_dist"], 3.0, delta=0.2)
+
+        # No trailing below threshold (+0.20R)
+        events_sub = risk_engine.safety_manager.trail_paper_positions({"GOLD": 2700.60}, default_strategy="SCALP")
+        self.assertEqual(events_sub, [])
+
+        # Breakeven trigger at +0.40R ($2701.20)
+        events_be = risk_engine.safety_manager.trail_paper_positions({"GOLD": 2701.20}, default_strategy="SCALP")
+        self.assertEqual(len(events_be), 1)
+        self.assertEqual(events_be[0]["action"], "BREAKEVEN")
+        pos = [p for p in risk_engine.safety_manager.get_paper_positions() if p["ticket"] == ticket][0]
+        self.assertGreater(pos["sl"], 2700.0)
+        be_sl = pos["sl"]
+
+        # Critical: Dynamic Trailing Trigger at +0.75R ($2702.30)
+        # Verify initial_risk_dist did NOT collapse to spread buffer!
+        events_tr = risk_engine.safety_manager.trail_paper_positions({"GOLD": 2702.30}, default_strategy="SCALP")
+        self.assertEqual(len(events_tr), 1)
+        self.assertEqual(events_tr[0]["action"], "TRAILED")
+        pos = [p for p in risk_engine.safety_manager.get_paper_positions() if p["ticket"] == ticket][0]
+        self.assertGreater(pos["sl"], be_sl)
+        self.assertAlmostEqual(pos["initial_risk_dist"], 3.0, delta=0.2)
+        trailed_sl = pos["sl"]
+
+        # Peak tracking ratchet: price retraces to $2701.80 (SL must NOT drop)
+        events_dip = risk_engine.safety_manager.trail_paper_positions({"GOLD": 2701.80}, default_strategy="SCALP")
+        self.assertEqual(events_dip, [])
+        pos = [p for p in risk_engine.safety_manager.get_paper_positions() if p["ticket"] == ticket][0]
+        self.assertEqual(pos["sl"], trailed_sl)
+
+        # Target hit: price reaches TP ($2706.50) -> Auto close paper position
+        events_tp = risk_engine.safety_manager.trail_paper_positions({"GOLD": 2706.50}, default_strategy="SCALP")
+        self.assertEqual(len(events_tp), 1)
+        self.assertEqual(events_tp[0]["action"], "TP_HIT")
+        remaining = [p["ticket"] for p in risk_engine.safety_manager.get_paper_positions()]
+        self.assertNotIn(ticket, remaining)
+
+        # Stop loss hit test
+        order_sl = risk_engine.safety_manager.execute_paper_order(
+            asset="BTC", action="BUY", price=68000.0,
+            stop_loss=67700.0, tp1=68500.0, tp2=69000.0,
+            lots=0.05, risk_usd=15.0, risk_pct=0.5,
+            strategy="SCALP", score=8
+        )
+        ticket_sl = order_sl["ticket"]
+        events_sl = risk_engine.safety_manager.trail_paper_positions({"BTC": 67600.0}, default_strategy="SCALP")
+        self.assertEqual(len(events_sl), 1)
+        self.assertEqual(events_sl[0]["action"], "SL_HIT")
+        remaining = [p["ticket"] for p in risk_engine.safety_manager.get_paper_positions()]
+        self.assertNotIn(ticket_sl, remaining)
+
+        # ── 2. Auto-Push Mode Controller ──
+        telegram_bot.set_auto_push_mode("BOTH")
+        self.assertTrue(telegram_bot.is_auto_push_active("GOLD"))
+        self.assertTrue(telegram_bot.is_auto_push_active("BTC"))
+        self.assertEqual(telegram_bot.AUTO_PUSH_MODE, "BOTH")
+        self.assertEqual(telegram_bot.AUTO_TRADE_MODE, "BOTH")
+
+        telegram_bot.set_auto_push_mode("GOLD")
+        self.assertTrue(telegram_bot.is_auto_push_active("GOLD"))
+        self.assertFalse(telegram_bot.is_auto_push_active("BTC"))
+
+        telegram_bot.set_auto_push_mode("BTC")
+        self.assertFalse(telegram_bot.is_auto_push_active("GOLD"))
+        self.assertTrue(telegram_bot.is_auto_push_active("BTC"))
+
+        telegram_bot.set_auto_push_mode("OFF")
+        self.assertFalse(telegram_bot.is_auto_push_active("GOLD"))
+        self.assertFalse(telegram_bot.is_auto_push_active("BTC"))
+
+        # ── 3. Telegram Auto-Push & Trail Commands ──
+        self.mock_tg.sent_messages.clear()
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/autopush on")
+        self.assertTrue(telegram_bot.is_auto_push_active("GOLD"))
+        self.assertTrue(telegram_bot.is_auto_push_active("BTC"))
+        self.assertIn("AUTOMATED PUSH ACTIVATED", self.mock_tg.sent_messages[-1][1])
+
+        self.mock_tg.sent_messages.clear()
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/push off")
+        self.assertFalse(telegram_bot.is_auto_push_active("GOLD"))
+        self.assertIn("AUTOMATED PUSH DISABLED", self.mock_tg.sent_messages[-1][1])
+
+        self.mock_tg.sent_messages.clear()
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/autopush status")
+        self.assertIn("AUTO-PUSH STATUS REPORT", self.mock_tg.sent_messages[-1][1])
+
+        self.mock_tg.sent_messages.clear()
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/trail status")
+        self.assertIn("DETAILED TRAILING STATUS", self.mock_tg.sent_messages[-1][1])
+
+        # ── 4. Interactive Callbacks ──
+        cq_push_on = {"id": "cq_push_1", "from": {"id": int(sender_id), "first_name": sender_name}, "data": "autopush_on"}
+        telegram_bot.handle_callback_query(token, cq_push_on)
+        self.assertTrue(telegram_bot.is_auto_push_active("GOLD"))
+
+        cq_push_off = {"id": "cq_push_2", "from": {"id": int(sender_id), "first_name": sender_name}, "data": "autopush_off"}
+        telegram_bot.handle_callback_query(token, cq_push_off)
+        self.assertFalse(telegram_bot.is_auto_push_active("GOLD"))
+
+        cq_trail_on = {"id": "cq_tr_1", "from": {"id": int(sender_id), "first_name": sender_name}, "data": "trail_on"}
+        telegram_bot.handle_callback_query(token, cq_trail_on)
+        self.assertTrue(telegram_bot.TRAILING_STOP_ENABLED)
+
+        # ── 5. Auto-Push Order Execution and Alert Formatting ──
+        mock_setup = {
+            "asset": "GOLD", "symbol": "GC=F", "entry": 2740.0, "sl": 2736.0, "tp1": 2745.0, "tp2": 2750.0,
+            "lots": 0.05, "risk_usd": 20.0, "score": 8, "time": time.time(), "strategy": "SCALP"
+        }
+        res_exec = telegram_bot.execute_setup_order("GOLD", mock_setup, token, sender_id, trigger_source="AUTOPUSH")
+        self.assertTrue(res_exec["success"])
+        self.assertIn("ticket", res_exec)
+
+        # Alert formatting with Auto-Push badge
+        pipeline_data = telegram_bot.run_full_pipeline()
+        alert_text, markup = telegram_bot.format_elite_alert("GOLD", pipeline_data, mock_setup, exec_result=res_exec, is_auto_trade=True)
+        self.assertIn("AUTO-PUSH", alert_text)
+        self.assertIn("EXECUTED ON BROKER", alert_text)
+        self.assertIn(str(res_exec["ticket"]), alert_text)
+        callbacks = [btn["callback_data"] for row in markup["inline_keyboard"] for btn in row]
+        self.assertIn("unlock_gold", callbacks)
+        self.assertIn("trail", callbacks)
+
+        # Clean up
+        risk_engine.safety_manager.close_paper_position(res_exec["ticket"], 2742.0)
+        risk_engine.safety_manager.set_trading_mode(orig_mode)
+        print("    ✅ Trailing Stop Engine & Auto-Push Pipeline: ALL PASSED")
 
 
 if __name__ == "__main__":

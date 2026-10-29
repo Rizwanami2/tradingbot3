@@ -52,6 +52,8 @@ class MT5LiveBroker:
         self.last_password = None
         self.last_server = None
         self.last_path = None
+        self.position_initial_risks = {}
+        self.position_peak_prices = {}
 
     def connect(self, login: int = None, password: str = None, server: str = None, path: str = None) -> tuple:
         """
@@ -411,6 +413,11 @@ class MT5LiveBroker:
                 "comment": comment
             })
 
+        # Pre-seed initial risk distance and peak price for trailing engine
+        if res.order:
+            self.position_initial_risks[res.order] = abs(actual_fill - final_sl) if (actual_fill > 0 and final_sl > 0) else sl_dist
+            self.position_peak_prices[res.order] = actual_fill
+
         return {
             "success": True,
             "ticket": res.order,
@@ -487,28 +494,60 @@ class MT5LiveBroker:
     }
 
     def trail_positions(self, default_strategy: str = "SCALP",
-                        breakeven_r: float = None, trail_step_r: float = None) -> list:
+                        breakeven_r: float = None, trail_step_r: float = None,
+                        current_prices: dict = None) -> list:
         """
         Automated Profile-Aware Trailing Stop & Breakeven Protection.
+        Works across both Live MT5 Broker positions and Paper Trading simulation.
         Adapts trailing mechanics dynamically based on each position's strategy profile:
-          - SCALP: Fast breakeven at +0.40R, tight trailing starting at +0.75R (0.30R step).
-          - SWING: Wide breakeven at +1.00R, structural trailing starting at +1.50R (0.70R step).
-          - BALANCE: Breakeven at +0.60R, dynamic equilibrium trailing starting at +1.05R (0.35R step).
-          - SWAP: Breakeven at +0.80R, wide carry buffer starting at +1.30R (0.60R step).
-        Includes automatic rollover spread-spike insulation (freezes trail during 21:50-22:15 UTC daily).
-        Returns list of modification events for alerts.
+          - SCALP: Fast breakeven at +0.35R, tight trailing starting at +0.65R (0.20R step).
+          - SWING: Breakeven at +0.45R, structural trailing starting at +0.90R (0.40R step).
+          - BALANCE: Breakeven at +0.50R, dynamic equilibrium trailing starting at +0.85R (0.30R step).
+          - SWAP: Breakeven at +0.50R, carry buffer starting at +1.00R (0.45R step).
+        Prevents collapsing risk-distance on breakeven, ratchets trailing stop strictly
+        behind peak favorable price, and insulates against rollover spread-spikes.
         """
+        mode = safety_manager.get_trading_mode() if safety_manager else "LIVE"
+
+        # ── 1. PAPER TRADING TRAILING ENGINE ──
+        if mode == "PAPER" and safety_manager:
+            prices = dict(current_prices) if current_prices else {}
+            if "GOLD" not in prices or "BTC" not in prices:
+                try:
+                    from market_data import market_feed
+                    if "GOLD" not in prices:
+                        g_t = market_feed.get_live_price("GOLD")
+                        if g_t and g_t.get("price", 0) > 0:
+                            prices["GOLD"] = g_t["price"]
+                    if "BTC" not in prices:
+                        b_t = market_feed.get_live_price("BTC")
+                        if b_t and b_t.get("price", 0) > 0:
+                            prices["BTC"] = b_t["price"]
+                except Exception:
+                    pass
+            return safety_manager.trail_paper_positions(prices, default_strategy=default_strategy)
+
+        # ── 2. LIVE / DEMO BROKER TRAILING ENGINE ──
         if not self.ensure_connected():
             return []
 
-        # ── 1. Rollover Spread-Spike Insulation (21:50 - 22:15 UTC) ──
+        # Rollover Spread-Spike Insulation (21:50 - 22:15 UTC)
         now_utc = datetime.utcnow()
         if (now_utc.hour == 21 and now_utc.minute >= 50) or (now_utc.hour == 22 and now_utc.minute <= 15):
             return []
 
         positions = mt5.positions_get()
         if not positions:
+            self.position_initial_risks.clear()
+            self.position_peak_prices.clear()
             return []
+
+        # Cleanup closed tickets from tracking dictionaries
+        open_tickets = {p.ticket for p in positions}
+        for t in list(self.position_initial_risks.keys()):
+            if t not in open_tickets:
+                self.position_initial_risks.pop(t, None)
+                self.position_peak_prices.pop(t, None)
 
         events = []
         for p in positions:
@@ -529,12 +568,17 @@ class MT5LiveBroker:
             entry = p.price_open
             curr_sl = p.sl
             curr_tp = p.tp
+            ticket = p.ticket
 
-            # Estimate initial risk distance D
-            if curr_sl > 0:
-                risk_dist = abs(entry - curr_sl)
+            # Recover or calculate un-collapsing initial risk distance
+            if ticket in self.position_initial_risks:
+                risk_dist = self.position_initial_risks[ticket]
             else:
-                risk_dist = 4.0 if ("XAU" in symbol.upper() or "GOLD" in symbol.upper()) else 350.0
+                if curr_sl > 0 and ((is_buy and curr_sl < entry) or (not is_buy and curr_sl > entry)):
+                    risk_dist = abs(entry - curr_sl)
+                else:
+                    risk_dist = 3.0 if ("XAU" in symbol.upper() or "GOLD" in symbol.upper()) else 250.0
+                self.position_initial_risks[ticket] = risk_dist
 
             if risk_dist <= 0:
                 continue
@@ -557,9 +601,16 @@ class MT5LiveBroker:
             active_trail_start_r = profile["trail_start_r"]
             active_trail_step_r = trail_step_r if (trail_step_r is not None and trail_step_r > 0) else profile["trail_step_r"]
 
-            # Profit distance and current R-multiple
+            # Update Peak Favorable Price
+            prev_peak = self.position_peak_prices.get(ticket, entry)
+            peak_price = max(prev_peak, curr_price) if is_buy else min(prev_peak, curr_price)
+            self.position_peak_prices[ticket] = peak_price
+
+            # Profit distance & R-multiples
             profit_dist = (curr_price - entry) if is_buy else (entry - curr_price)
             current_r = profit_dist / risk_dist
+            peak_profit_dist = (peak_price - entry) if is_buy else (entry - peak_price)
+            peak_r = peak_profit_dist / risk_dist
 
             # ── 2. Strategy-Specific Breakeven Trigger ──
             breakeven_sl = round(entry + spread_buffer if is_buy else entry - spread_buffer, digits)
@@ -570,10 +621,10 @@ class MT5LiveBroker:
                 needs_breakeven = True
 
             if needs_breakeven:
-                res = self.modify_position_sltp(p.ticket, breakeven_sl, curr_tp)
+                res = self.modify_position_sltp(ticket, breakeven_sl, curr_tp)
                 if res.get("success"):
                     events.append({
-                        "ticket": p.ticket,
+                        "ticket": ticket,
                         "symbol": symbol,
                         "type": "BUY" if is_buy else "SELL",
                         "strategy": strat_name,
@@ -582,36 +633,39 @@ class MT5LiveBroker:
                         "new_sl": breakeven_sl,
                         "current_price": curr_price,
                         "profit_r": current_r,
-                        "msg": f"🛡️ *[{strat_name}] BREAKEVEN LOCKED:* #{p.ticket} `{symbol}` SL moved to `${breakeven_sl:,.2f}` (+{current_r:.2f}R reached — 100% Risk-Free!)"
+                        "msg": f"🛡️ *[{strat_name}] BREAKEVEN LOCKED:* #{ticket} `{symbol}` SL moved to `${breakeven_sl:,.2f}` (+{current_r:.2f}R reached — 100% Risk-Free!)"
                     })
                     continue
 
-            # ── 3. Strategy-Specific Dynamic Trailing Step ──
-            if current_r >= active_trail_start_r:
-                trailing_sl = round(curr_price - (risk_dist * active_trail_step_r) if is_buy else curr_price + (risk_dist * active_trail_step_r), digits)
-                should_trail = False
-                if is_buy and trailing_sl > curr_sl and trailing_sl > entry:
-                    should_trail = True
-                elif not is_buy and (trailing_sl < curr_sl or curr_sl == 0) and trailing_sl < entry:
-                    should_trail = True
+            # ── 3. Strategy-Specific Dynamic Trailing Step Ratchet ──
+            if peak_r >= active_trail_start_r:
+                if is_buy:
+                    trailing_sl = round(peak_price - (risk_dist * active_trail_step_r), digits)
+                    trailing_sl = max(trailing_sl, breakeven_sl)
+                    should_trail = trailing_sl > curr_sl and (trailing_sl - curr_sl) >= (10 * point)
+                else:
+                    trailing_sl = round(peak_price + (risk_dist * active_trail_step_r), digits)
+                    trailing_sl = min(trailing_sl, breakeven_sl)
+                    should_trail = (curr_sl == 0 or trailing_sl < curr_sl) and abs(trailing_sl - curr_sl) >= (10 * point)
 
                 if should_trail:
-                    # Enforce minimum trail movement of 15 points
-                    if abs(trailing_sl - curr_sl) >= (15 * point):
-                        res = self.modify_position_sltp(p.ticket, trailing_sl, curr_tp)
-                        if res.get("success"):
-                            events.append({
-                                "ticket": p.ticket,
-                                "symbol": symbol,
-                                "type": "BUY" if is_buy else "SELL",
-                                "strategy": strat_name,
-                                "action": "TRAILED",
-                                "old_sl": curr_sl,
-                                "new_sl": trailing_sl,
-                                "current_price": curr_price,
-                                "profit_r": current_r,
-                                "msg": f"📈 *[{strat_name}] TRAILING ADVANCED:* #{p.ticket} `{symbol}` SL trailed to `${trailing_sl:,.2f}` (+{current_r:.2f}R — Profit Secured!)"
-                            })
+                    res = self.modify_position_sltp(ticket, trailing_sl, curr_tp)
+                    if res.get("success"):
+                        events.append({
+                            "ticket": ticket,
+                            "symbol": symbol,
+                            "type": "BUY" if is_buy else "SELL",
+                            "strategy": strat_name,
+                            "action": "TRAILED",
+                            "old_sl": curr_sl,
+                            "new_sl": trailing_sl,
+                            "current_price": curr_price,
+                            "peak_price": peak_price,
+                            "profit_r": current_r,
+                            "msg": f"📈 *[{strat_name}] TRAILING ADVANCED:* #{ticket} `{symbol}` SL trailed to `${trailing_sl:,.2f}` (+{current_r:.2f}R — Profit Secured!)"
+                        })
+
+        return events
 
         return events
 

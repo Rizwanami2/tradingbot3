@@ -315,6 +315,7 @@ class SafetyManager:
 
         sim_spread = 0.15 if asset_key == "GOLD" else 8.0
         fill_price = round(price + (sim_spread / 2.0) if action.upper() == "BUY" else price - (sim_spread / 2.0), 2)
+        initial_sl_dist = round(abs(fill_price - stop_loss), 2) if (fill_price > 0 and stop_loss > 0) else (3.0 if asset_key == "GOLD" else 250.0)
 
         position = {
             "ticket": ticket,
@@ -326,6 +327,9 @@ class SafetyManager:
             "requested_price": price,
             "slippage": round(abs(fill_price - price), 2),
             "sl": stop_loss,
+            "initial_sl": stop_loss,
+            "initial_risk_dist": initial_sl_dist,
+            "peak_price": fill_price,
             "tp1": tp1,
             "tp2": tp2,
             "risk_usd": risk_usd,
@@ -373,6 +377,171 @@ class SafetyManager:
 
     def get_paper_positions(self) -> list:
         return self.state.get("paper_account", {}).get("positions", [])
+
+    def modify_paper_position_sltp(self, ticket: str, new_sl: float, new_tp: float = None) -> dict:
+        """Modifies Stop-Loss and/or Take-Profit of an active paper position."""
+        positions = self.state["paper_account"]["positions"]
+        target = None
+        for p in positions:
+            if str(p["ticket"]) == str(ticket):
+                target = p
+                break
+        if not target:
+            return {"success": False, "error": f"Paper position #{ticket} not found."}
+
+        old_sl = target.get("sl", 0.0)
+        target["sl"] = round(new_sl, 2)
+        if new_tp is not None:
+            target["tp1"] = round(new_tp, 2)
+
+        self.save_state()
+        self.log_order_audit({
+            "event": "POSITION_MODIFIED_PAPER",
+            "ticket": ticket,
+            "asset": target["asset"],
+            "old_sl": old_sl,
+            "new_sl": target["sl"],
+            "tp": target.get("tp1")
+        })
+        return {"success": True, "ticket": ticket, "sl": target["sl"], "tp": target.get("tp1")}
+
+    def trail_paper_positions(self, current_prices: dict, default_strategy: str = "SCALP") -> list:
+        """
+        Automated Profile-Aware Trailing Stop, Breakeven & SL/TP Hit Engine for Paper Trading.
+        Preserves initial risk distance across all steps, prevents premature stop-out,
+        and ratchets dynamic trailing behind peak favorable price.
+        """
+        positions = list(self.state.get("paper_account", {}).get("positions", []))
+        if not positions:
+            return []
+
+        events = []
+        for p in positions:
+            asset = p.get("asset", "GOLD")
+            symbol = p.get("symbol", "XAUUSD")
+            curr_price = current_prices.get(asset) or current_prices.get(symbol) or current_prices.get(asset.lower())
+            if curr_price is None or curr_price <= 0:
+                continue
+
+            entry = p.get("open_price", 0.0)
+            curr_sl = p.get("sl", 0.0)
+            curr_tp = p.get("tp1", 0.0)
+            is_buy = p.get("action", "BUY") == "BUY"
+            ticket = p["ticket"]
+
+            # 1. Recover un-collapsing initial risk distance
+            initial_risk_dist = p.get("initial_risk_dist")
+            if not initial_risk_dist or initial_risk_dist <= 0:
+                initial_sl = p.get("initial_sl", curr_sl)
+                if initial_sl > 0 and ((is_buy and initial_sl < entry) or (not is_buy and initial_sl > entry)):
+                    initial_risk_dist = abs(entry - initial_sl)
+                else:
+                    initial_risk_dist = 3.0 if asset == "GOLD" else 250.0
+                p["initial_risk_dist"] = initial_risk_dist
+
+            strat_code = p.get("strategy", default_strategy).upper()
+            strat = STRATEGIES.get(strat_code, STRATEGIES["SCALP"])
+            active_be_r = strat.get("breakeven_r", 0.35)
+            active_trail_start_r = strat.get("trail_start_r", 0.65)
+            active_trail_step_r = strat.get("trail_step_r", 0.20)
+            spread_buffer = 0.15 if asset == "GOLD" else 8.0
+
+            # 2. Check Stop-Loss Hit
+            sl_hit = (is_buy and curr_price <= curr_sl) or (not is_buy and curr_price >= curr_sl)
+            if sl_hit:
+                res = self.close_paper_position(ticket, curr_sl, reason="STOP_LOSS_HIT")
+                events.append({
+                    "ticket": ticket,
+                    "symbol": symbol,
+                    "asset": asset,
+                    "action": "SL_HIT",
+                    "price": curr_sl,
+                    "pnl": res.get("closed_pnl", 0.0),
+                    "msg": f"🛑 *[{strat_code} PAPER] STOP-LOSS HIT:* #{ticket} `{symbol}` hit SL at `${curr_sl:,.2f}` (PnL: `${res.get('closed_pnl', 0.0):+,.2f}`)"
+                })
+                continue
+
+            # 3. Check Take-Profit Hit
+            tp_hit = (is_buy and curr_price >= curr_tp) or (not is_buy and curr_price <= curr_tp)
+            if tp_hit:
+                res = self.close_paper_position(ticket, curr_tp, reason="TAKE_PROFIT_HIT")
+                events.append({
+                    "ticket": ticket,
+                    "symbol": symbol,
+                    "asset": asset,
+                    "action": "TP_HIT",
+                    "price": curr_tp,
+                    "pnl": res.get("closed_pnl", 0.0),
+                    "msg": f"🎯 *[{strat_code} PAPER] TAKE-PROFIT ACHIEVED:* #{ticket} `{symbol}` reached Target at `${curr_tp:,.2f}`! (PnL: `${res.get('closed_pnl', 0.0):+,.2f}` 🎉)"
+                })
+                continue
+
+            # 4. Update Peak Favorable Price
+            prev_peak = p.get("peak_price", entry)
+            peak_price = max(prev_peak, curr_price) if is_buy else min(prev_peak, curr_price)
+            p["peak_price"] = peak_price
+
+            # Profit distance & R-multiples
+            profit_dist = (curr_price - entry) if is_buy else (entry - curr_price)
+            current_r = profit_dist / initial_risk_dist
+            peak_profit_dist = (peak_price - entry) if is_buy else (entry - peak_price)
+            peak_r = peak_profit_dist / initial_risk_dist
+
+            # 5. Breakeven Trigger
+            breakeven_sl = round(entry + spread_buffer if is_buy else entry - spread_buffer, 2)
+            needs_be = False
+            if is_buy and current_r >= active_be_r and curr_sl < entry:
+                needs_be = True
+            elif not is_buy and current_r >= active_be_r and (curr_sl > entry or curr_sl == 0):
+                needs_be = True
+
+            if needs_be:
+                old_sl = curr_sl
+                p["sl"] = breakeven_sl
+                self.save_state()
+                events.append({
+                    "ticket": ticket,
+                    "symbol": symbol,
+                    "asset": asset,
+                    "strategy": strat_code,
+                    "action": "BREAKEVEN",
+                    "old_sl": old_sl,
+                    "new_sl": breakeven_sl,
+                    "current_price": curr_price,
+                    "profit_r": current_r,
+                    "msg": f"🛡️ *[{strat_code} PAPER] BREAKEVEN LOCKED:* #{ticket} `{symbol}` SL moved to `${breakeven_sl:,.2f}` (+{current_r:.2f}R — Risk-Free!)"
+                })
+                continue
+
+            # 6. Dynamic Trailing Step
+            if peak_r >= active_trail_start_r:
+                desired_sl = round(peak_price - (initial_risk_dist * active_trail_step_r) if is_buy else peak_price + (initial_risk_dist * active_trail_step_r), 2)
+                if is_buy:
+                    desired_sl = max(desired_sl, breakeven_sl)
+                    should_trail = desired_sl > curr_sl and (desired_sl - curr_sl) >= (0.10 if asset == "GOLD" else 5.0)
+                else:
+                    desired_sl = min(desired_sl, breakeven_sl)
+                    should_trail = (curr_sl == 0 or desired_sl < curr_sl) and abs(desired_sl - curr_sl) >= (0.10 if asset == "GOLD" else 5.0)
+
+                if should_trail:
+                    old_sl = curr_sl
+                    p["sl"] = desired_sl
+                    self.save_state()
+                    events.append({
+                        "ticket": ticket,
+                        "symbol": symbol,
+                        "asset": asset,
+                        "strategy": strat_code,
+                        "action": "TRAILED",
+                        "old_sl": old_sl,
+                        "new_sl": desired_sl,
+                        "current_price": curr_price,
+                        "peak_price": peak_price,
+                        "profit_r": current_r,
+                        "msg": f"📈 *[{strat_code} PAPER] TRAILING ADVANCED:* #{ticket} `{symbol}` SL trailed to `${desired_sl:,.2f}` (+{current_r:.2f}R — Profit Secured!)"
+                    })
+
+        return events
 
     def close_paper_position(self, ticket: str, exit_price: float, reason: str = "MANUAL_CLOSE") -> dict:
         positions = self.state["paper_account"]["positions"]

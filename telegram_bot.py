@@ -17,6 +17,7 @@ Combines ALL 12 Trading Skills into a Single Autonomous Telegram Engine:
  12. 100% Free of MetaTrader 5 (MT5) - Runs on ANY VPS (Windows / Linux)
 """
 
+from __future__ import annotations
 import sys
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -112,12 +113,55 @@ except Exception:
     institutional_engine = None
     INSTITUTIONAL_AVAILABLE = False
 
-# Live auto-trade state and separate watchlist ('OFF', 'BOTH', 'GOLD', 'BTC')
+# Live auto-trade and separate watchlist ('OFF', 'BOTH', 'GOLD', 'BTC')
 AUTO_TRADE_MODE = "OFF"
 AUTO_TRADE_LIVE = False
 
+# Automated Push Order Execution Controller ('OFF', 'BOTH', 'GOLD', 'BTC')
+AUTO_PUSH_MODE = "OFF"
+AUTO_PUSH_ENABLED = False
+
 # Automated Trailing Stop & Breakeven Protection
 TRAILING_STOP_ENABLED = True
+
+
+def is_auto_push_active(asset: str) -> bool:
+    """Returns True if automated order push is active for the specified asset."""
+    mode = (AUTO_PUSH_MODE or AUTO_TRADE_MODE or "OFF").upper()
+    if mode in ("BOTH", "ALL", "ON", "TRUE", "ENABLE", "1"):
+        return True
+    asset_norm = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
+    return mode == asset_norm
+
+
+def set_auto_push_mode(mode: str) -> tuple[str, bool]:
+    """Updates Auto Push and Auto Trade execution modes synchronously."""
+    global AUTO_PUSH_MODE, AUTO_PUSH_ENABLED, AUTO_TRADE_MODE, AUTO_TRADE_LIVE
+    m = mode.strip().upper()
+    if m in ("BOTH", "ALL", "ON", "TRUE", "ENABLE", "1"):
+        AUTO_PUSH_MODE = "BOTH"
+        AUTO_TRADE_MODE = "BOTH"
+        AUTO_PUSH_ENABLED = True
+        AUTO_TRADE_LIVE = True
+        return "BOTH", True
+    elif m in ("GOLD", "XAU", "XAUUSD"):
+        AUTO_PUSH_MODE = "GOLD"
+        AUTO_TRADE_MODE = "GOLD"
+        AUTO_PUSH_ENABLED = True
+        AUTO_TRADE_LIVE = True
+        return "GOLD", True
+    elif m in ("BTC", "BITCOIN", "BTCUSD"):
+        AUTO_PUSH_MODE = "BTC"
+        AUTO_TRADE_MODE = "BTC"
+        AUTO_PUSH_ENABLED = True
+        AUTO_TRADE_LIVE = True
+        return "BTC", True
+    else:
+        AUTO_PUSH_MODE = "OFF"
+        AUTO_TRADE_MODE = "OFF"
+        AUTO_PUSH_ENABLED = False
+        AUTO_TRADE_LIVE = False
+        return "OFF", False
 
 # Centralized Setup State Machine (Zero-Spam Lock & Interactive Execution Tracker)
 ACTIVE_SETUPS = {
@@ -955,7 +999,7 @@ def format_scan_summary(data: dict) -> str:
 
 
 def format_welcome_menu(sender_name: str) -> str:
-    auto_desc = f"ENABLED 🟢 ({AUTO_TRADE_MODE})" if AUTO_TRADE_MODE != "OFF" else "DISABLED ⚪"
+    auto_desc = f"ENABLED 🟢 ({AUTO_PUSH_MODE})" if AUTO_PUSH_MODE != "OFF" else "DISABLED ⚪ (Manual Approval)"
     mt5_status = "CONNECTED 🟢" if (MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected) else "OFFLINE ⚪"
     strat = get_active_strategy() if RISK_ENGINE_AVAILABLE else {"name": "Scalp Sniper", "code": "SCALP"}
     trail_st = "ACTIVE 🛡️" if TRAILING_STOP_ENABLED else "DISABLED ⚪"
@@ -971,9 +1015,11 @@ def format_welcome_menu(sender_name: str) -> str:
         f"• Continuous Scanner : `1-MIN CANDLE CLOSE` 🟢\n"
         f"• MT5 Live Broker    : `{mt5_status}` (Auto-Managed Leverage)\n"
         f"• Active Strategy    : `{strat['name']}` (`{strat['code']}`) 🎯\n"
-        f"• Auto-Trade Mode    : `{auto_desc}`\n"
-        f"• Auto-Trailing & BE : `{trail_st}` (+0.4R Breakeven / +0.75R Trail)\n\n"
+        f"• Auto-Push Mode     : `{auto_desc}`\n"
+        f"• Auto-Trailing & BE : `{trail_st}` (+{strat.get('breakeven_r', 0.35):.2f}R BE / +{strat.get('trail_start_r', 0.65):.2f}R Trail)\n\n"
         f"🗂️ *MODERN COMMAND HUBS:*\n"
+        f"⚡ `/autopush` (or `/push`) - Automated order push controller (`/autopush on|off|gold|btc`)\n\n"
+        f"🛡️ `/trail` - Automated trailing stop & breakeven hub (`/trail on|off|status`)\n\n"
         f"📊 `/market` - Institutional analysis & MT5 visual charts\n"
         f"   └ Options: `/market btc`, `/market gold`, `/market macro`, `/market levels`\n\n"
         f"⚡ `/trade` - Broker execution & watchlist selector\n"
@@ -991,7 +1037,7 @@ def format_welcome_menu(sender_name: str) -> str:
         f"🧠 `/learn` - Bayesian factor rankings & self-training (`/learn train`)\n\n"
         f"ℹ️ `/status` or `/health` - Feed health, latency, MT5 connection & engine status\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"💡 *Direct Shortcuts:* `/scan`, `/btc`, `/gold`, `/approve_gold`, `/approve_btc`, `/ignore_gold`, `/unlock`, `/lock_status`, `/positions`, `/close_all`"
+        f"💡 *Direct Shortcuts:* `/autopush`, `/trail`, `/scan`, `/btc`, `/gold`, `/approve_gold`, `/approve_btc`, `/ignore_gold`, `/unlock`, `/lock_status`, `/positions`, `/close_all`"
     )
 
 
@@ -1000,10 +1046,12 @@ def trailing_monitor_worker(token: str, chat_id_getter):
     Automated Profile-Aware Trailing Stop & Breakeven Monitor.
     Runs every 12 seconds:
       - Automatically reads strategy profile (SCALP, SWING, BALANCE, SWAP) from position comment or active strategy.
-      - SCALP: Locks Breakeven at +0.40R, trails at +0.75R (0.30R step).
-      - SWING: Locks Breakeven at +1.00R, trails at +1.50R (0.70R step).
-      - BALANCE: Locks Breakeven at +0.60R, trails at +1.05R (0.35R step).
-      - SWAP: Locks Breakeven at +0.80R, trails at +1.30R (0.60R step).
+      - Dual Engine: Works seamlessly across live MT5 broker positions AND simulated Paper Trading.
+      - Preserves initial risk distance across all steps (never collapses after breakeven).
+      - Ratchets dynamic trailing stop strictly behind peak favorable price.
+      - SCALP: Locks Breakeven at +0.35R, trails at +0.65R (0.20R step).
+      - SWING: Locks Breakeven at +0.45R, trails at +0.90R (0.40R step).
+      - Auto-releases scanner locks upon TP_HIT or SL_HIT.
       - Rollover hour protection (freezes modifications during 21:50-22:15 UTC).
     """
     global TRAILING_STOP_ENABLED
@@ -1013,17 +1061,27 @@ def trailing_monitor_worker(token: str, chat_id_getter):
             time.sleep(12)
             if not TRAILING_STOP_ENABLED:
                 continue
-            if not (MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected):
+            if not (MT5_EXECUTOR_AVAILABLE and live_broker):
+                continue
+
+            current_mode = safety_manager.get_trading_mode() if safety_manager else "LIVE"
+            if current_mode != "PAPER" and not live_broker.is_connected:
                 continue
 
             strat_code = get_active_strategy()["code"] if RISK_ENGINE_AVAILABLE else "SCALP"
             events = live_broker.trail_positions(default_strategy=strat_code)
             if events:
                 target_chat_id = chat_id_getter()
-                if target_chat_id:
-                    for ev in events:
+                for ev in events:
+                    if target_chat_id:
                         send_message(token, target_chat_id, ev["msg"])
-                        print(f"[{datetime.now().strftime('%H:%M:%S')}] Trailing Event: {ev['symbol']} #{ev['ticket']} -> {ev['action']} @ {ev['new_sl']}")
+                    action_name = ev.get("action", "")
+                    new_sl_val = ev.get("new_sl", ev.get("price", ""))
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] Trailing Event: {ev['symbol']} #{ev['ticket']} -> {action_name} @ {new_sl_val}")
+                    # Auto release scanner locks when trade closes on TP/SL
+                    if action_name in ("TP_HIT", "SL_HIT"):
+                        asset_key = ev.get("asset", "GOLD")
+                        clear_active_setup(asset_key)
         except Exception:
             time.sleep(5)
 
@@ -1033,6 +1091,25 @@ def execute_setup_order(asset: str, setup_data: dict, token: str, chat_id: str, 
     global live_broker, safety_manager
     if not (MT5_EXECUTOR_AVAILABLE and live_broker):
         return {"success": False, "error": "MT5 executor module not available."}
+
+    is_paper = (safety_manager.get_trading_mode() == "PAPER") if safety_manager else False
+    if not is_paper and not live_broker.ensure_connected():
+        return {"success": False, "error": "MT5 terminal disconnected on VPS."}
+
+    if live_broker.has_open_position(asset):
+        return {"success": False, "error": f"Open position already exists for {asset}."}
+
+    prefix = "AutoPush" if trigger_source == "AUTOPUSH" else ("Auto1M" if trigger_source == "AUTO" else "Approve")
+    comment = f"{prefix}-{setup_data.get('strategy', 'SCALP')}"
+    lots = setup_data.get("lots", 0.05)
+    entry = setup_data["entry"]
+    sl = setup_data["sl"]
+    tp1 = setup_data["tp1"]
+
+    res = live_broker.execute_live_sniper_order(
+        asset, "BUY", entry, sl, tp1, lots, comment=comment
+    )
+    return res
 
     is_paper = (safety_manager.get_trading_mode() == "PAPER") if safety_manager else False
     if not is_paper and not live_broker.ensure_connected():
@@ -1179,6 +1256,22 @@ def handle_callback_query(token: str, cq: dict):
         unlock_scanners(token, sender_id, "BTC")
     elif data in ("unlock_all", "unlock"):
         unlock_scanners(token, sender_id, "ALL")
+    elif data in ("autopush_on", "push_on"):
+        process_telegram_command(token, sender_id, sender_name, "/autopush on")
+    elif data in ("autopush_off", "push_off"):
+        process_telegram_command(token, sender_id, sender_name, "/autopush off")
+    elif data in ("autopush_gold", "push_gold"):
+        process_telegram_command(token, sender_id, sender_name, "/autopush gold")
+    elif data in ("autopush_btc", "push_btc"):
+        process_telegram_command(token, sender_id, sender_name, "/autopush btc")
+    elif data in ("autopush", "push"):
+        process_telegram_command(token, sender_id, sender_name, "/autopush")
+    elif data in ("trail_on", "trail_enable"):
+        process_telegram_command(token, sender_id, sender_name, "/trail on")
+    elif data in ("trail_off", "trail_disable"):
+        process_telegram_command(token, sender_id, sender_name, "/trail off")
+    elif data in ("trail", "trail_status"):
+        process_telegram_command(token, sender_id, sender_name, "/trail")
     elif data == "confirm_trade":
         process_telegram_command(token, sender_id, sender_name, "/confirm_trade YES")
     elif data == "positions":
@@ -1204,11 +1297,11 @@ def format_elite_alert(asset: str, data: dict, setup_data: dict = None, exec_res
 
     # Header badge based on execution status
     if is_auto_trade and exec_result and exec_result.get("success"):
-        hdr = f"⚡ *1M AUTO-EXECUTION [{exec_result.get('mode', 'LIVE')}] (SCORE: {item['final_score']}/10)*"
+        hdr = f"⚡ *1M AUTO-PUSH (AUTO-EXECUTION) [{exec_result.get('mode', 'LIVE')}] (SCORE: {item['final_score']}/10)*"
     elif is_auto_trade and exec_result and exec_result.get("requires_confirmation"):
         hdr = f"⚠️ *ELITE SIGNAL - CONFIRMATION REQUIRED (SCORE: {item['final_score']}/10)*"
     elif is_auto_trade and exec_result and exec_result.get("error"):
-        hdr = f"⚠️ *ELITE SIGNAL - AUTO-TRADE BLOCKED (SCORE: {item['final_score']}/10)*"
+        hdr = f"⚠️ *ELITE SIGNAL - AUTO-PUSH BLOCKED (SCORE: {item['final_score']}/10)*"
     else:
         hdr = f"🎯 *ELITE A+ TRADE SIGNAL (SCORE: {item['final_score']}/10)*"
 
@@ -1231,28 +1324,32 @@ def format_elite_alert(asset: str, data: dict, setup_data: dict = None, exec_res
         f"• Small Take-Profit: `${item['tp1']:,.2f}` (+{item['reward_pct']:.2f}% | {strat.get('rr_tp1', 1.2):.1f}R)",
         f"• Extended Target:   `${item['tp2']:,.2f}` (+{strat.get('rr_tp2', 2.0):.1f}R)",
         f"• Recommended Size:  `{lot_info.get('lots', 0.05)}` Lots (${lot_info.get('actual_risk_usd', 50):,.2f} risk)",
-        f"• Breakeven / Trail: BE at `+{strat.get('breakeven_r', 0.40):.2f}R` | Trail at `+{strat.get('trail_start_r', 0.75):.2f}R`",
+        f"• Breakeven / Trail: BE at `+{strat.get('breakeven_r', 0.35):.2f}R` | Trail at `+{strat.get('trail_start_r', 0.65):.2f}R`",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     ]
 
     a_low = asset.lower()
     if is_auto_trade and exec_result and exec_result.get("success"):
-        lines.append(f"⚡ *AUTO-TRADE STATUS: EXECUTED ON BROKER*")
+        lines.append(f"⚡ *AUTO-PUSH STATUS: EXECUTED ON BROKER*")
         lines.append(f"• Symbol: `{exec_result['symbol']}` (BUY)")
         lines.append(f"• Ticket: `#{exec_result['ticket']}` | Volume: `{exec_result['lots']}` Lots")
         lines.append(f"• Fill Price: `${exec_result['price']:,.2f}` | Mode: `{exec_result.get('mode', 'LIVE')}`")
-        lines.append(f"• Auto-trailing & breakeven active.")
+        lines.append(f"• Dynamic Trailing & Breakeven active 🛡️")
         lines.append(f"💡 *Unlock Scanner Now:* `/unlock_{a_low}` (or `/unlock`)")
         reply_markup = {
             "inline_keyboard": [
                 [
                     {"text": f"🔓 Unlock {asset}", "callback_data": f"unlock_{a_low}"},
                     {"text": "📊 Positions", "callback_data": "positions"}
+                ],
+                [
+                    {"text": "🛡️ Trail Hub", "callback_data": "trail"},
+                    {"text": "⚡ Auto-Push Hub", "callback_data": "autopush"}
                 ]
             ]
         }
     elif is_auto_trade and exec_result and exec_result.get("requires_confirmation"):
-        lines.append(f"⚠️ *AUTO-TRADE STATUS: FIRST LIVE TRADE REQUIRES CONFIRMATION*")
+        lines.append(f"⚠️ *AUTO-PUSH STATUS: FIRST LIVE TRADE REQUIRES CONFIRMATION*")
         lines.append(f"• Reply `/confirm_trade YES` or tap [Confirm Trade] below.")
         lines.append(f"• Or tap [Ignore] to dismiss.")
         reply_markup = {
@@ -1267,7 +1364,7 @@ def format_elite_alert(asset: str, data: dict, setup_data: dict = None, exec_res
             ]
         }
     elif is_auto_trade and exec_result and exec_result.get("error"):
-        lines.append(f"⚠️ *AUTO-TRADE STATUS: BLOCKED BY RISK GUARDRAIL*")
+        lines.append(f"⚠️ *AUTO-PUSH STATUS: BLOCKED BY RISK GUARDRAIL*")
         lines.append(f"• Reason: `{exec_result.get('error')}`")
         lines.append(f"• Approve Manually: `/approve_{a_low}`")
         lines.append(f"• Ignore & Dismiss: `/ignore_{a_low}` | Unlock: `/unlock`")
@@ -1283,10 +1380,11 @@ def format_elite_alert(asset: str, data: dict, setup_data: dict = None, exec_res
             ]
         }
     else:
-        lines.append("⏸️ *STATUS: PENDING MANUAL APPROVAL (Auto-Trade OFF)*")
+        lines.append("⏸️ *STATUS: PENDING MANUAL APPROVAL (Auto-Push OFF)*")
         lines.append("🔘 *ACTION OPTIONS:*")
         lines.append(f"• Approve & Execute : `/approve_{a_low}`")
         lines.append(f"• Ignore & Dismiss  : `/ignore_{a_low}`")
+        lines.append(f"• Activate Auto-Push: `/autopush on`")
         lines.append(f"• Reset Lock State  : `/unlock`")
         reply_markup = {
             "inline_keyboard": [
@@ -1295,6 +1393,7 @@ def format_elite_alert(asset: str, data: dict, setup_data: dict = None, exec_res
                     {"text": "❌ Ignore & Dismiss", "callback_data": f"ignore_{a_low}"}
                 ],
                 [
+                    {"text": "⚡ Enable Auto-Push", "callback_data": "autopush_on"},
                     {"text": "🔓 Unlock Scanner", "callback_data": f"unlock_{a_low}"}
                 ]
             ]
@@ -1360,18 +1459,18 @@ def auto_scanner_worker(token: str, chat_id_getter):
                     }
                     set_active_setup("BTC", setup_data)
 
-                    # Auto-Trade Execution
-                    is_auto = AUTO_TRADE_MODE in ("BOTH", "BTC")
+                    # Auto-Push Execution
+                    is_auto = is_auto_push_active("BTC")
                     exec_result = None
                     if is_auto:
-                        exec_result = execute_setup_order("BTC", setup_data, token, target_chat_id, trigger_source="AUTO")
+                        exec_result = execute_setup_order("BTC", setup_data, token, target_chat_id, trigger_source="AUTOPUSH")
                         if exec_result.get("success"):
                             setup_data["executed"] = True
                             setup_data["ticket"] = exec_result.get("ticket")
                             setup_data["status"] = "EXECUTED"
                             set_active_setup("BTC", setup_data)
 
-                    print(f"🎯 [{datetime.now().strftime('%H:%M:%S')}] BTC SIGNAL DETECTED: ${b['price']:,.2f} (Score {b['final_score']}/10)! AutoTrade={is_auto}")
+                    print(f"🎯 [{datetime.now().strftime('%H:%M:%S')}] BTC SIGNAL DETECTED: ${b['price']:,.2f} (Score {b['final_score']}/10)! AutoPush={is_auto}")
                     alert_text, reply_markup = format_elite_alert("BTC", data, setup_data, exec_result, is_auto)
                     send_message(token, target_chat_id, alert_text, reply_markup=reply_markup)
 
@@ -1385,10 +1484,16 @@ def auto_scanner_worker(token: str, chat_id_getter):
                     tp_text = f"🎯 *BITCOIN TAKE-PROFIT ACHIEVED!*\n• Price: `${b['price']:,.2f}` reached Target (`${btc_setup['tp1']:,.2f}`)!\n• Sniper profit secured. Setup closed."
                     send_message(token, target_chat_id, tp_text)
                     print(f"✅ [{datetime.now().strftime('%H:%M:%S')}] BTC Take-Profit Hit @ ${b['price']:,.2f}!")
+                    if btc_setup.get('executed') and btc_setup.get('ticket'):
+                        if RISK_ENGINE_AVAILABLE and safety_manager and safety_manager.get_trading_mode() == "PAPER":
+                            safety_manager.close_paper_position(btc_setup['ticket'], btc_setup['tp1'], reason="TAKE_PROFIT_HIT")
                     clear_active_setup("BTC")
                 elif b['price'] <= btc_setup['sl']:
                     sl_text = f"🛑 *BITCOIN STOP-LOSS HIT*\n• Price: `${b['price']:,.2f}` hit Stop (`${btc_setup['sl']:,.2f}`). Setup closed."
                     send_message(token, target_chat_id, sl_text)
+                    if btc_setup.get('executed') and btc_setup.get('ticket'):
+                        if RISK_ENGINE_AVAILABLE and safety_manager and safety_manager.get_trading_mode() == "PAPER":
+                            safety_manager.close_paper_position(btc_setup['ticket'], btc_setup['sl'], reason="STOP_LOSS_HIT")
                     clear_active_setup("BTC")
                 elif (current_time - btc_setup['time']) > (1800 if btc_setup.get('strategy') == 'SCALP' else 7200):
                     clear_active_setup("BTC")
@@ -1418,18 +1523,18 @@ def auto_scanner_worker(token: str, chat_id_getter):
                     }
                     set_active_setup("GOLD", setup_data)
 
-                    # Auto-Trade Execution
-                    is_auto = AUTO_TRADE_MODE in ("BOTH", "GOLD")
+                    # Auto-Push Execution
+                    is_auto = is_auto_push_active("GOLD")
                     exec_result = None
                     if is_auto:
-                        exec_result = execute_setup_order("GOLD", setup_data, token, target_chat_id, trigger_source="AUTO")
+                        exec_result = execute_setup_order("GOLD", setup_data, token, target_chat_id, trigger_source="AUTOPUSH")
                         if exec_result.get("success"):
                             setup_data["executed"] = True
                             setup_data["ticket"] = exec_result.get("ticket")
                             setup_data["status"] = "EXECUTED"
                             set_active_setup("GOLD", setup_data)
 
-                    print(f"🎯 [{datetime.now().strftime('%H:%M:%S')}] GOLD SIGNAL DETECTED: ${g['price']:,.2f} (Score {g['final_score']}/10)! AutoTrade={is_auto}")
+                    print(f"🎯 [{datetime.now().strftime('%H:%M:%S')}] GOLD SIGNAL DETECTED: ${g['price']:,.2f} (Score {g['final_score']}/10)! AutoPush={is_auto}")
                     alert_text, reply_markup = format_elite_alert("GOLD", data, setup_data, exec_result, is_auto)
                     send_message(token, target_chat_id, alert_text, reply_markup=reply_markup)
 
@@ -1443,10 +1548,16 @@ def auto_scanner_worker(token: str, chat_id_getter):
                     tp_text = f"🎯 *GOLD TAKE-PROFIT ACHIEVED!*\n• Price: `${g['price']:,.2f}` reached Target (`${gold_setup['tp1']:,.2f}`)!\n• Sniper profit secured. Setup closed."
                     send_message(token, target_chat_id, tp_text)
                     print(f"✅ [{datetime.now().strftime('%H:%M:%S')}] Gold Take-Profit Hit @ ${g['price']:,.2f}!")
+                    if gold_setup.get('executed') and gold_setup.get('ticket'):
+                        if RISK_ENGINE_AVAILABLE and safety_manager and safety_manager.get_trading_mode() == "PAPER":
+                            safety_manager.close_paper_position(gold_setup['ticket'], gold_setup['tp1'], reason="TAKE_PROFIT_HIT")
                     clear_active_setup("GOLD")
                 elif g['price'] <= gold_setup['sl']:
                     sl_text = f"🛑 *GOLD STOP-LOSS HIT*\n• Price: `${g['price']:,.2f}` hit Stop (`${gold_setup['sl']:,.2f}`). Setup closed."
                     send_message(token, target_chat_id, sl_text)
+                    if gold_setup.get('executed') and gold_setup.get('ticket'):
+                        if RISK_ENGINE_AVAILABLE and safety_manager and safety_manager.get_trading_mode() == "PAPER":
+                            safety_manager.close_paper_position(gold_setup['ticket'], gold_setup['sl'], reason="STOP_LOSS_HIT")
                     clear_active_setup("GOLD")
                 elif (current_time - gold_setup['time']) > (1800 if gold_setup.get('strategy') == 'SCALP' else 7200):
                     clear_active_setup("GOLD")
@@ -1668,23 +1779,19 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             sub_args = action_mode[4:].strip().split()
             sub_val = sub_args[0].lower() if sub_args else ""
             if sub_val in ("gold", "xau"):
-                AUTO_TRADE_MODE = "GOLD"
-                AUTO_TRADE_LIVE = True
+                set_auto_push_mode("GOLD")
                 send_message(token, sender_id, "🟢 *AUTO-TRADE WATCHLIST: GOLD ONLY*\nAutomated 1-minute execution is active exclusively for Gold (XAU/USD). Bitcoin will alert with charts without auto-execution.")
             elif sub_val in ("btc", "bitcoin"):
-                AUTO_TRADE_MODE = "BTC"
-                AUTO_TRADE_LIVE = True
+                set_auto_push_mode("BTC")
                 send_message(token, sender_id, "🟢 *AUTO-TRADE WATCHLIST: BITCOIN ONLY*\nAutomated 1-minute execution is active exclusively for Bitcoin (BTC/USD). Gold will alert with charts without auto-execution.")
             elif sub_val in ("both", "all", "on", "true", "1"):
-                AUTO_TRADE_MODE = "BOTH"
-                AUTO_TRADE_LIVE = True
-                send_message(token, sender_id, "🟢 *AUTO-TRADE WATCHLIST: BOTH GOLD & BITCOIN*\nAutomated 1-minute execution is active on both Gold and BTC when A+ setups (≥8/10) trigger.")
+                set_auto_push_mode("BOTH")
+                send_message(token, sender_id, "🟢 *AUTO-TRADE WATCHLIST: BOTH GOLD & BITCOIN*\nAutomated 1-minute execution is active on both Gold and BTC when setups trigger.")
             elif sub_val in ("off", "false", "disable", "0"):
-                AUTO_TRADE_MODE = "OFF"
-                AUTO_TRADE_LIVE = False
+                set_auto_push_mode("OFF")
                 send_message(token, sender_id, "⚪ *AUTO-TRADE DISABLED*\nAutomated execution is turned off. All 1-minute alerts and MT5 charts will continue broadcasting, requiring manual execution.")
             else:
-                curr_status = f"ENABLED 🟢 ({AUTO_TRADE_MODE})" if AUTO_TRADE_MODE != "OFF" else "DISABLED ⚪"
+                curr_status = f"ENABLED 🟢 ({AUTO_PUSH_MODE})" if AUTO_PUSH_MODE != "OFF" else "DISABLED ⚪"
                 send_message(token, sender_id, (
                     f"ℹ️ *1M Auto-Trade Watchlist Controller:*\n"
                     f"• Current Mode: `{curr_status}`\n\n"
@@ -2115,33 +2222,195 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
         send_message(token, sender_id, "\n".join(lines))
         return
 
-    # ── 6. TRAILING STOP HUB (/trail [on|off]) ──
+    # ── 5B. AUTOMATED PUSH CONTROLLER HUB (/autopush [on|off|both|gold|btc|status], /push) ──
+    if cmd in ("/autopush", "/push"):
+        sub = args_lower.strip()
+        if sub in ("on", "true", "enable", "both", "all", "1"):
+            mode, ok = set_auto_push_mode("BOTH")
+            if RISK_ENGINE_AVAILABLE and safety_manager and safety_manager.get_trading_mode() == "LIVE":
+                safety_manager.confirm_first_trade_today()
+            m_lbl = safety_manager.get_trading_mode() if safety_manager else "LIVE"
+            send_message(token, sender_id, (
+                f"⚡ *AUTOMATED PUSH ACTIVATED: BOTH GOLD & BITCOIN 🟢*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"• Target Watchlist   : `Gold (XAU/USD) & Bitcoin (BTC/USD)`\n"
+                f"• Execution Engine   : `{m_lbl} Execution`\n"
+                f"• Auto-Push Action   : Instantly sends market order to broker on qualified 1M signal\n"
+                f"• Execution Guard    : Score >= 7 (Scalp @ Key Level) | Score >= 8 (A+ Setup)\n"
+                f"• Trailing & BE      : Active (Locks Risk-Free automatically)\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"💡 Stop anytime with `/autopush off` (or `/push off`)."
+            ))
+            return
+        elif sub in ("gold", "xau"):
+            mode, ok = set_auto_push_mode("GOLD")
+            send_message(token, sender_id, (
+                f"🥇 *AUTOMATED PUSH ACTIVATED: GOLD ONLY 🟢*\n"
+                f"• Automated execution active exclusively for Gold (XAU/USD).\n"
+                f"• Bitcoin alerts will continue broadcasting for manual approval."
+            ))
+            return
+        elif sub in ("btc", "bitcoin"):
+            mode, ok = set_auto_push_mode("BTC")
+            send_message(token, sender_id, (
+                f"₿ *AUTOMATED PUSH ACTIVATED: BITCOIN ONLY 🟢*\n"
+                f"• Automated execution active exclusively for Bitcoin (BTC/USD).\n"
+                f"• Gold alerts will continue broadcasting for manual approval."
+            ))
+            return
+        elif sub in ("off", "false", "disable", "stop", "0"):
+            mode, ok = set_auto_push_mode("OFF")
+            send_message(token, sender_id, (
+                f"⚪ *AUTOMATED PUSH DISABLED*\n"
+                f"• Automated order execution is turned OFF.\n"
+                f"• 1-minute candle scanner will broadcast signals with interactive `[Approve & Execute]` buttons."
+            ))
+            return
+        elif sub == "status":
+            m_lbl = safety_manager.get_trading_mode() if safety_manager else "LIVE"
+            st_str = f"ACTIVE 🟢 ({AUTO_PUSH_MODE})" if AUTO_PUSH_MODE != "OFF" else "DISABLED ⚪ (Manual Approval)"
+            send_message(token, sender_id, (
+                f"⚡ *AUTO-PUSH STATUS REPORT*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"• Auto-Push Mode   : `{st_str}`\n"
+                f"• Execution Mode   : `{m_lbl}`\n"
+                f"• Trailing Monitor : `{'ACTIVE 🛡️' if TRAILING_STOP_ENABLED else 'DISABLED ⚪'}`\n"
+                f"• Gold Lock State  : `{'LOCKED 🔒' if is_setup_locked('GOLD') else 'IDLE 🟢'}`\n"
+                f"• BTC Lock State   : `{'LOCKED 🔒' if is_setup_locked('BTC') else 'IDLE 🟢'}`\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            ))
+            return
+        else:
+            m_lbl = safety_manager.get_trading_mode() if safety_manager else "LIVE"
+            st_str = f"ACTIVE 🟢 ({AUTO_PUSH_MODE})" if AUTO_PUSH_MODE != "OFF" else "DISABLED ⚪ (Manual Approval)"
+            reply_markup = {
+                "inline_keyboard": [
+                    [
+                        {"text": "⚡ Auto-Push ON (Both)", "callback_data": "autopush_on"},
+                        {"text": "⚪ Auto-Push OFF", "callback_data": "autopush_off"}
+                    ],
+                    [
+                        {"text": "🥇 Gold Only", "callback_data": "autopush_gold"},
+                        {"text": "₿ BTC Only", "callback_data": "autopush_btc"}
+                    ],
+                    [
+                        {"text": "🛡️ Trail Hub", "callback_data": "trail"},
+                        {"text": "📊 Positions", "callback_data": "positions"}
+                    ]
+                ]
+            }
+            send_message(token, sender_id, (
+                f"⚡ *AUTOMATED PUSH CONTROLLER (AUTO-PUSH HUB)*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"• Auto-Push State    : `{st_str}`\n"
+                f"• Target Watchlist   : `Gold (XAU/USD) & Bitcoin (BTC/USD)`\n"
+                f"• Broker Target      : `{m_lbl}`\n"
+                f"• Trailing Guardrail : `{'ACTIVE 🛡️' if TRAILING_STOP_ENABLED else 'DISABLED ⚪'}`\n"
+                f"• Signal Criteria    : Score >= 7 (Scalp @ Key Level) | Score >= 8 (A+ Setup)\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"⚡ *Quick Command Controls:*\n"
+                f"• `/autopush on`   (or `/push on`)   ──► Auto-push Gold & BTC\n"
+                f"• `/autopush gold` (or `/push gold`) ──► Auto-push Gold only\n"
+                f"• `/autopush btc`  (or `/push btc`)  ──► Auto-push BTC only\n"
+                f"• `/autopush off`  (or `/push off`)  ──► Revert to manual approval\n"
+                f"• `/autopush status`                 ──► Quick status breakdown"
+            ), reply_markup=reply_markup)
+            return
+
+    # ── 6. TRAILING STOP HUB (/trail [on|off|status|scalp|swing|balance|swap]) ──
     if cmd == "/trail":
         sub = args_lower.strip()
         if sub in ("on", "true", "enable", "1"):
             TRAILING_STOP_ENABLED = True
-            send_message(token, sender_id, "🛡️ *AUTOMATED PROFILE-AWARE TRAILING STOP: ENABLED 🟢*\n• Scans open live MT5 positions every 12 seconds.\n• Adapts breakeven and trailing distance to each position's strategy profile (SCALP, SWING, BALANCE, SWAP).\n• Rollover insulation freezes trail during 21:50-22:15 UTC daily spread spikes.")
+            send_message(token, sender_id, (
+                "🛡️ *AUTOMATED PROFILE-AWARE TRAILING STOP: ENABLED 🟢*\n"
+                "• Scans open live MT5 and Paper positions every 12 seconds.\n"
+                "• Preserves true initial risk distance (never collapses after breakeven).\n"
+                "• Ratchets dynamic trailing stop strictly behind peak favorable price.\n"
+                "• Adapts breakeven and trailing distance to each position's strategy profile (SCALP, SWING, BALANCE, SWAP).\n"
+                "• Rollover insulation freezes trail during 21:50-22:15 UTC daily spread spikes."
+            ))
             return
         elif sub in ("off", "false", "disable", "0"):
             TRAILING_STOP_ENABLED = False
             send_message(token, sender_id, "⚪ *AUTOMATED TRAILING STOP: DISABLED*\nOpen positions will remain anchored to their initial SL/TP orders.")
             return
+        elif sub in ("scalp", "swing", "balance", "swap"):
+            if RISK_ENGINE_AVAILABLE:
+                set_active_strategy(sub.upper())
+                curr_s = get_active_strategy()
+                send_message(token, sender_id, (
+                    f"🎯 *TRAILING PROFILE SWITCHED TO {curr_s['code']}*\n"
+                    f"• Strategy: `{curr_s['name']}`\n"
+                    f"• Breakeven: `+{curr_s.get('breakeven_r', 0.35):.2f}R`\n"
+                    f"• Trailing Trigger: `+{curr_s.get('trail_start_r', 0.65):.2f}R`\n"
+                    f"• Trailing Step: `{curr_s.get('trail_step_r', 0.20):.2f}R` behind peak"
+                ))
+            else:
+                send_message(token, sender_id, f"Profile switched to {sub.upper()}.")
+            return
+        elif sub == "status":
+            st = "ENABLED 🟢" if TRAILING_STOP_ENABLED else "DISABLED ⚪"
+            curr_mode = safety_manager.get_trading_mode() if safety_manager else "LIVE"
+            open_pos = live_broker.get_open_positions() if (MT5_EXECUTOR_AVAILABLE and live_broker) else []
+            lines = [
+                f"🛡️ *DETAILED TRAILING STATUS [{curr_mode}]*",
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                f"• Monitor State: `{st}`",
+                f"• Active Positions: `{len(open_pos)}`"
+            ]
+            if open_pos:
+                for p in open_pos:
+                    lines.append(f"• #{p['ticket']} `{p['symbol']}` {p['type']} @ `${p['open_price']:,.2f}` | SL: `${p['sl']:,.2f}` | TP: `${p['tp']:,.2f}`")
+            else:
+                lines.append("• No positions currently open.")
+            lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            send_message(token, sender_id, "\n".join(lines))
+            return
         else:
             st = "ENABLED 🟢" if TRAILING_STOP_ENABLED else "DISABLED ⚪"
-            curr_s = get_active_strategy() if RISK_ENGINE_AVAILABLE else {"name": "Scalp Sniper", "code": "SCALP", "breakeven_r": 0.40, "trail_start_r": 0.75, "trail_step_r": 0.30}
+            curr_s = get_active_strategy() if RISK_ENGINE_AVAILABLE else {"name": "Scalp Sniper", "code": "SCALP", "breakeven_r": 0.35, "trail_start_r": 0.65, "trail_step_r": 0.20}
+            curr_mode = safety_manager.get_trading_mode() if safety_manager else "LIVE"
+            open_pos = live_broker.get_open_positions() if (MT5_EXECUTOR_AVAILABLE and live_broker) else []
+
+            pos_lines = []
+            if open_pos:
+                for p in open_pos:
+                    pos_lines.append(f"  • #{p['ticket']} `{p['symbol']}` {p['type']} @ `${p['open_price']:,.2f}` | SL: `${p['sl']:,.2f}` | TP: `${p['tp']:,.2f}`")
+            else:
+                pos_lines.append("  • (No open positions currently active)")
+
+            reply_markup = {
+                "inline_keyboard": [
+                    [
+                        {"text": "🛡️ Trail ON", "callback_data": "trail_on"},
+                        {"text": "⚪ Trail OFF", "callback_data": "trail_off"}
+                    ],
+                    [
+                        {"text": "⚡ Auto Push Hub", "callback_data": "autopush"},
+                        {"text": "📊 Positions", "callback_data": "positions"}
+                    ]
+                ]
+            }
+
             send_message(token, sender_id, (
                 f"🛡️ *AUTOMATED PROFILE-AWARE TRAILING CONTROLLER*\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"• Monitor Status     : `{st}`\n"
+                f"• Trailing Engine    : `{st}`\n"
+                f"• Execution Mode     : `{curr_mode}` (Dual MT5 & Paper Trailing)\n"
                 f"• Active Profile     : *{curr_s['name']} ({curr_s['code']})* 🎯\n"
-                f"• Breakeven Trigger  : `+{curr_s.get('breakeven_r', 0.40):.2f}R` (Instant Risk-Free)\n"
-                f"• Trailing Trigger   : Starts at `+{curr_s.get('trail_start_r', 0.75):.2f}R`\n"
-                f"• Trailing Step      : `{curr_s.get('trail_step_r', 0.30):.2f}R` behind price\n"
-                f"• Rollover Shield    : `ACTIVE (Insulated from 21:50-22:15 UTC spread spikes)`\n"
-                f"• Position Tracking  : Auto-detects SCALP / SWING / BALANCE / SWAP from ticket comment\n"
+                f"• Fast Breakeven     : `+{curr_s.get('breakeven_r', 0.35):.2f}R` (Instant Risk-Free Lock)\n"
+                f"• Trailing Trigger   : Starts at `+{curr_s.get('trail_start_r', 0.65):.2f}R`\n"
+                f"• Trailing Step      : `{curr_s.get('trail_step_r', 0.20):.2f}R` behind peak price\n"
+                f"• Anti-Collapse Guard: Preserves true initial risk distance\n"
+                f"• Peak Tracking      : Ratchets trailing SL forward strictly behind peak\n"
+                f"• Rollover Shield    : Insulated daily from 21:50-22:15 UTC\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"Controls: `/trail on` to enable, `/trail off` to disable."
-            ))
+                f"📋 *Monitored Positions ({len(open_pos)}):*\n"
+                + "\n".join(pos_lines) + "\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Controls: `/trail on`, `/trail off`, `/trail scalp`, `/trail swing`"
+            ), reply_markup=reply_markup)
             return
 
     # ── 7. SELF-LEARNING HUB (/learn, /train) ──
