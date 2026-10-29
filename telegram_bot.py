@@ -1386,6 +1386,10 @@ def format_elite_alert(asset: str, data: dict, setup_data: dict = None, exec_res
                 [
                     {"text": "📊 Positions", "callback_data": "positions"},
                     {"text": "🛑 Close All", "callback_data": "close_all"}
+                ],
+                [
+                    {"text": "🛡️ Trail Hub", "callback_data": "trail"},
+                    {"text": "⚡ Auto-Push", "callback_data": "autopush"}
                 ]
             ]
         }
