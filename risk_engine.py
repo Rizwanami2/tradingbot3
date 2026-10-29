@@ -58,18 +58,18 @@ MAX_TOTAL_DRAWDOWN_PCT = 6.0        # Portfolio halt at 6.0% drawdown
 STRATEGIES = {
     "SCALP": {
         "code": "SCALP",
-        "name": "High Win-Rate Sniper Scalp",
-        "description": "Ultra-tight 0.45x ATR SL with quick 1.2R target. Focus: ~80-85% sniper win rate.",
-        "sl_mult": 0.45,
-        "rr_tp1": 1.20,
-        "rr_tp2": 2.00,
+        "name": "Institutional Key-Level Scalp",
+        "description": "Small practical SL/TP on institutional key trade levels. Focus: ~68-78% practical scalp win rate.",
+        "sl_mult": 0.35,
+        "rr_tp1": 1.25,
+        "rr_tp2": 1.85,
         "breakeven_r": 0.40,       # Fast breakeven lock at +0.40R (eliminates drawdown risk)
-        "trail_start_r": 0.75,     # Dynamic trail starts at +0.75R
-        "trail_step_r": 0.30,      # Tight 0.30R trailing buffer
+        "trail_start_r": 0.70,     # Dynamic trail starts at +0.70R
+        "trail_step_r": 0.25,      # Tight 0.25R trailing buffer
         "risk_pct": 0.50,          # Conservative 0.50% risk per scalp
-        "target_win_rate": "~80-85% (High-Frequency Sniper)",
-        "accuracy_tip": "Rejection wick <20%, body >=40%, RSI 40-65, London/NY peak liquidity",
-        "regime_filter": "Momentum with healthy ATR (Avoid low liquidity / chop)",
+        "target_win_rate": "~68-78% (Key Level Practical Scalp)",
+        "accuracy_tip": "Key level (Golden Pocket, S/R, EMA), wick <28%, body >=28%, RSI 35-70",
+        "regime_filter": "Key Level Reaction / Momentum",
         "holding_time": "5 - 30 minutes",
         "lot_cap_gold": 0.20,
         "lot_cap_btc": 0.10
@@ -234,7 +234,8 @@ def validate_strategy_accuracy(strat_code: str, asset: str, current_price: float
     veto_reasons = []
     accuracy_factors = []
 
-    # ── A. SCALP ACCURACY RULES (Target: ~80-85% Win Rate) ──
+    # ── A. SCALP ACCURACY RULES (Target: ~68-78% Practical Key-Level Scalp) ──
+    at_good_level = False
     if strat["code"] == "SCALP":
         min_atr = 1.50 if asset_key == "GOLD" else 150.0
         if atr < min_atr:
@@ -243,28 +244,48 @@ def validate_strategy_accuracy(strat_code: str, asset: str, current_price: float
         else:
             accuracy_factors.append(f"Optimal Scalp Volatility (ATR ${atr:.1f})")
 
-        # Candle body quality: Avoid indecision dojis
-        if candle_body_pct < 35.0:
+        # Detect institutional key trade level confluence
+        levels = levels or {}
+        in_gp = levels.get("in_golden_pocket", False)
+        sw_low = levels.get("sw_low", 0.0)
+        near_support = (sw_low > 0 and (current_price - sw_low) / current_price <= 0.05) or levels.get("near_support", False) or levels.get("near_swing_support", False)
+        ma20_ema = levels.get("ma20_ema", 0.0)
+        near_ema = ma20_ema > 0 and abs(current_price - ma20_ema) / current_price <= 0.02
+        s1 = levels.get("s1", 0.0)
+        near_s1 = s1 > 0 and abs(current_price - s1) / current_price <= 0.015
+        at_good_level = bool(in_gp or near_support or near_ema or near_s1)
+
+        if at_good_level:
+            accuracy_factors.append("Institutional Trade Level Confluence (Golden Pocket / Support / EMA)")
+
+        # Candle body quality: allow slightly responsive body at key reaction levels, avoid pure dojis
+        min_body = 28.0 if at_good_level else 32.0
+        if candle_body_pct < min_body:
             passed = False
-            veto_reasons.append(f"Indecision Candle Body ({candle_body_pct:.1f}% < 35%). High win-rate scalp requires directional momentum body.")
+            veto_reasons.append(f"Indecision Candle Body ({candle_body_pct:.1f}% < {min_body:.0f}%). Practical scalp requires directional momentum body.")
         else:
             accuracy_factors.append(f"Directional Candle Body Thrust ({candle_body_pct:.1f}%)")
 
-        if is_buy and upper_wick_pct >= 20.0:
+        # Wick tolerance: allow natural reaction wicks up to 28% at key levels
+        max_wick = 28.0 if at_good_level else 24.0
+        if is_buy and upper_wick_pct >= max_wick:
             passed = False
-            veto_reasons.append(f"Candle Rejection Wick ({upper_wick_pct:.1f}% >= 20%). Selling pressure prevents clean scalp.")
-        elif not is_buy and lower_wick_pct >= 20.0:
+            veto_reasons.append(f"Candle Rejection Wick ({upper_wick_pct:.1f}% >= {max_wick:.0f}%). Selling pressure prevents clean scalp.")
+        elif not is_buy and lower_wick_pct >= max_wick:
             passed = False
-            veto_reasons.append(f"Candle Absorption Wick ({lower_wick_pct:.1f}% >= 20%). Buying absorption prevents short scalp.")
+            veto_reasons.append(f"Candle Absorption Wick ({lower_wick_pct:.1f}% >= {max_wick:.0f}%). Buying absorption prevents short scalp.")
         else:
             accuracy_factors.append("Clean Microstructure (Minimal Rejection Wick)")
 
-        if is_buy and (rsi > 68.0 or rsi < 38.0):
+        # Practical RSI bounds for scalping
+        min_rsi = 35.0 if at_good_level else 38.0
+        max_rsi = 70.0 if at_good_level else 68.0
+        if is_buy and (rsi > max_rsi or rsi < min_rsi):
             passed = False
-            veto_reasons.append(f"RSI Exhaustion ({rsi:.1f}). Long scalps require RSI 38-68.")
-        elif not is_buy and (rsi < 32.0 or rsi > 62.0):
+            veto_reasons.append(f"RSI Exhaustion ({rsi:.1f}). Long scalps require RSI {min_rsi:.0f}-{max_rsi:.0f}.")
+        elif not is_buy and (rsi < (100.0 - max_rsi) or rsi > (100.0 - min_rsi)):
             passed = False
-            veto_reasons.append(f"RSI Oversold/Overbought ({rsi:.1f}). Short scalps require RSI 32-62.")
+            veto_reasons.append(f"RSI Oversold/Overbought ({rsi:.1f}). Short scalps require RSI {(100.0-max_rsi):.0f}-{(100.0-min_rsi):.0f}.")
         else:
             accuracy_factors.append(f"Momentum Sweet Spot (RSI {rsi:.1f})")
 
@@ -403,7 +424,8 @@ def validate_strategy_accuracy(strat_code: str, asset: str, current_price: float
         "session": session_info["session"],
         "liquidity": session_info["liquidity"],
         "accuracy_factors": accuracy_factors,
-        "veto_reasons": veto_reasons
+        "veto_reasons": veto_reasons,
+        "at_good_level": at_good_level
     }
 
 
@@ -501,16 +523,16 @@ def calculate_strategy_levels(asset: str, current_price: float, atr: float = 0.0
     base_atr = atr if atr > 0 else (28.0 if asset_key == "GOLD" else 2200.0)
     sl_mult = strat["sl_mult"]
 
-    # 1. Strategy-Specific Stop-Loss Distance
+    # 1. Strategy-Specific Stop-Loss Distance (Tight, Practical Scalping Bounds)
     if asset_key == "GOLD":
         raw_sl_dist = base_atr * sl_mult
-        min_bound = 2.50 if strat_key == "SCALP" else 6.00 if strat_key == "SWING" else 3.50
-        max_bound = 5.50 if strat_key == "SCALP" else 35.00 if strat_key == "SWING" else 15.00
+        min_bound = 3.00 if strat_key == "SCALP" else 6.00 if strat_key == "SWING" else 3.50
+        max_bound = 4.80 if strat_key == "SCALP" else 35.00 if strat_key == "SWING" else 15.00
         sl_dist = max(min_bound, min(raw_sl_dist, max_bound))
     else:
         raw_sl_dist = base_atr * sl_mult
         min_bound = 250.0 if strat_key == "SCALP" else 800.0 if strat_key == "SWING" else 400.0
-        max_bound = 580.0 if strat_key == "SCALP" else 3500.0 if strat_key == "SWING" else 1800.0
+        max_bound = 450.0 if strat_key == "SCALP" else 3500.0 if strat_key == "SWING" else 1800.0
         sl_dist = max(min_bound, min(raw_sl_dist, max_bound))
 
     sl_dist = round(sl_dist, 2)

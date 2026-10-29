@@ -55,6 +55,13 @@ except Exception:
     LEARNING_AVAILABLE = False
     learning_engine = None
 
+# Import Multi-Strategy Risk Engine for Practical TP/SL
+try:
+    import risk_engine
+    RISK_ENGINE_AVAILABLE = True
+except Exception:
+    RISK_ENGINE_AVAILABLE = False
+
 
 def compute_rsi(series, period: int = 14) -> float:
     if len(series) < period + 1:
@@ -205,25 +212,38 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
 
     # Final Execution Verdict (Considers both base score & learned adaptive weights)
     final_score = max(score, int(round(adaptive_score)))
+    at_good_level = in_golden_pocket or feat_near_support
     if final_score >= 9:
-        verdict = "A+ SETUP (EXECUTE ORDER)"
+        verdict = "🟢 A+ SETUP (EXECUTE ORDER)"
+        action = "BUY"
+    elif final_score >= 8:
+        verdict = "🟢 A SETUP (EXECUTE ORDER)"
         action = "BUY"
     elif final_score >= 7:
-        verdict = "B SETUP (HALF SIZE)"
-        action = "BUY_HALF"
+        if at_good_level:
+            verdict = "🟢 SCALP SETUP @ KEY LEVEL (EXECUTE ORDER)"
+            action = "BUY"
+        else:
+            verdict = "🟡 B SETUP (HALF SIZE)"
+            action = "BUY_HALF"
     else:
-        verdict = "VETOED (WAIT FOR CONFLUENCE)"
+        verdict = "🔴 VETOED (WAIT FOR CONFLUENCE)"
         action = "STAND_ASIDE"
 
-    # Invalidation & Target Calculation
-    if in_golden_pocket:
-        stop_loss = fib_650 * 0.985
-        tp1 = fib_500 if curr < fib_500 * 0.98 else sw_high * 0.98
-        tp2 = sw_high
+    # Small Practical TP & SL Calculation for Scalp Execution
+    if RISK_ENGINE_AVAILABLE:
+        strat_calc = risk_engine.calculate_strategy_levels(
+            asset_type, curr, atr=vol30, action="BUY", strategy="SCALP",
+            levels={"in_golden_pocket": in_golden_pocket, "sw_low": sw_low}
+        )
+        stop_loss = strat_calc["stop_loss"]
+        tp1 = strat_calc["tp1"]
+        tp2 = strat_calc["tp2"]
     else:
-        stop_loss = sw_low * 0.985
-        tp1 = fib_500
-        tp2 = sw_high
+        sl_dist = 3.80 if asset_type == "GOLD" else 350.0
+        stop_loss = round(curr - sl_dist, 2)
+        tp1 = round(curr + (sl_dist * 1.25), 2)
+        tp2 = round(curr + (sl_dist * 1.85), 2)
 
     # Log signal to self-learning journal if actionable
     trade_id = None

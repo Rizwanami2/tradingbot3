@@ -223,9 +223,17 @@ def run_historical_backtest(asset: str = "GOLD",
         if vix_val <= 25.0: score += 1
         if (curr_price - sw_low) / curr_price <= 0.05: score += 1
 
-        # Strict Confluence Filter
+        # Institutional Trade Level Confluence for Scalp & General Execution
+        near_swing_sup = (curr_price - sw_low) / curr_price <= 0.05
+        near_ema = not np.isnan(ma20_ema) and abs(curr_price - ma20_ema) / curr_price <= 0.02
+        at_good_level = in_golden_pocket or near_swing_sup or near_ema
+
+        # Confluence Filter:
+        # For SCALP: execute on good institutional trade levels with score >= 7
         if score < min_score_filter:
-            if not (allow_b_setups and score >= 7):
+            if strat_code == "SCALP" and at_good_level and score >= 7:
+                pass  # Execute scalp on key trade level!
+            elif not (allow_b_setups and score >= 7):
                 continue
 
         # Hard Guardrail: Strictly VETO all longs on Bull Traps (Mandated by Hard-Asset Rules)
@@ -263,11 +271,15 @@ def run_historical_backtest(asset: str = "GOLD",
                 continue
 
         if strat_code == "SCALP":
-            if candle_body_pct < 35.0:  # Avoid low-conviction doji candles
+            min_body = 28.0 if at_good_level else 32.0
+            if candle_body_pct < min_body:  # Responsive body at key levels
                 continue
-            if up_wick_pct >= 20.0:     # Reject selling wicks for clean momentum scalps
+            max_wick = 28.0 if at_good_level else 24.0
+            if up_wick_pct >= max_wick:     # Allow small natural reaction wick at support
                 continue
-            if rsi > 68.0 or rsi < 38.0:  # Momentum sweet spot
+            min_rsi = 35.0 if at_good_level else 38.0
+            max_rsi = 70.0 if at_good_level else 68.0
+            if rsi > max_rsi or rsi < min_rsi:  # Scalp momentum range
                 continue
 
         # Strategy Accuracy Verification
@@ -275,7 +287,7 @@ def run_historical_backtest(asset: str = "GOLD",
             "curr": curr_price, "sw_high": sw_high, "sw_low": sw_low,
             "fib_500": fib_500, "fib_618": fib_618, "fib_650": fib_650,
             "in_golden_pocket": in_golden_pocket, "ma50": ma50, "ma200": ma200,
-            "ma20_ema": ma20_ema
+            "ma20_ema": ma20_ema, "near_support": near_swing_sup, "near_ema": near_ema
         }
 
         accuracy = validate_strategy_accuracy(

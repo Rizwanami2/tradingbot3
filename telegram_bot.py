@@ -589,6 +589,13 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
     final_score = max(base_score, int(round(adaptive_score)))
     is_a_plus = final_score >= 8
 
+    # Key institutional level detection for Scalp execution
+    at_good_level = strat_accuracy.get("at_good_level", False) or \
+                    levels.get("in_golden_pocket", False) or \
+                    ((curr - sw_low) / curr <= 0.05 if (sw_low and curr) else False) or \
+                    (levels.get("ma20_ema") and abs(curr - levels["ma20_ema"]) / curr <= 0.02)
+    can_execute_scalp = (active_strat["code"] == "SCALP" and final_score >= 7 and at_good_level and strat_accuracy["passed"] and trap_type != "BULL_TRAP")
+
     # VETO conditions: Anti-Trap & Strategy-Specific Accuracy Filters
     if trap_type == "BULL_TRAP":
         is_a_plus = False
@@ -598,6 +605,9 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
         verdict = f"🔴 VETOED [{active_strat['code']}]: {strat_accuracy['veto_reasons'][0]}"
     elif is_a_plus:
         verdict = f"🟢 A+ SETUP [{active_strat['code']}] (Score: {final_score}/10) - High Probability Execution"
+    elif can_execute_scalp:
+        is_a_plus = True  # Qualified for practical key level scalp execution
+        verdict = f"🟢 SCALP EXECUTION [{active_strat['code']}] (Score: {final_score}/10) - Key Level Clearance"
     elif final_score >= 6:
         verdict = f"🟡 B SETUP [{active_strat['code']}] (Score: {final_score}/10) - Watchlist / Reduced Size"
     else:
@@ -981,8 +991,8 @@ def auto_scanner_worker(token: str, chat_id_getter):
 
             # ── 1. Bitcoin (BTC/USD) State Machine (Zero Spam) ──
             if active_btc_setup is None:
-                # Check for FRESH High-Quality A+ Setup
-                if b['is_a_plus'] and b['final_score'] >= 8:
+                # Check for FRESH High-Quality A+ Setup or Qualified Key-Level Scalp
+                if b['is_a_plus'] and (b['final_score'] >= 8 or (active_strat['code'] == "SCALP" and b['final_score'] >= 7)):
                     active_btc_setup = {
                         "entry": b['entry'],
                         "sl": b['stop_loss'],
@@ -1022,8 +1032,8 @@ def auto_scanner_worker(token: str, chat_id_getter):
 
             # ── 2. Gold (XAU/USD) State Machine (Zero Spam) ──
             if active_gold_setup is None:
-                # Check for FRESH High-Quality A+ Setup
-                if g['is_a_plus'] and g['final_score'] >= 8:
+                # Check for FRESH High-Quality A+ Setup or Qualified Key-Level Scalp
+                if g['is_a_plus'] and (g['final_score'] >= 8 or (active_strat['code'] == "SCALP" and g['final_score'] >= 7)):
                     active_gold_setup = {
                         "entry": g['entry'],
                         "sl": g['stop_loss'],
