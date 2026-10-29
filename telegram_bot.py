@@ -119,6 +119,49 @@ AUTO_TRADE_LIVE = False
 # Automated Trailing Stop & Breakeven Protection
 TRAILING_STOP_ENABLED = True
 
+# Centralized Setup State Machine (Zero-Spam Lock & Interactive Execution Tracker)
+ACTIVE_SETUPS = {
+    "BTC": None,
+    "GOLD": None
+}
+SETUP_LOCK = threading.Lock()
+
+
+def get_active_setup(asset: str) -> dict | None:
+    asset_key = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
+    with SETUP_LOCK:
+        setup = ACTIVE_SETUPS.get(asset_key)
+        return dict(setup) if setup else None
+
+
+def set_active_setup(asset: str, setup_data: dict):
+    asset_key = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
+    with SETUP_LOCK:
+        ACTIVE_SETUPS[asset_key] = setup_data
+
+
+def clear_active_setup(asset: str) -> bool:
+    asset_key = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
+    with SETUP_LOCK:
+        had = ACTIVE_SETUPS.get(asset_key) is not None
+        ACTIVE_SETUPS[asset_key] = None
+        return had
+
+
+def clear_all_setups() -> tuple[bool, bool]:
+    with SETUP_LOCK:
+        had_gold = ACTIVE_SETUPS.get("GOLD") is not None
+        had_btc = ACTIVE_SETUPS.get("BTC") is not None
+        ACTIVE_SETUPS["GOLD"] = None
+        ACTIVE_SETUPS["BTC"] = None
+        return had_gold, had_btc
+
+
+def is_setup_locked(asset: str) -> bool:
+    asset_key = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
+    with SETUP_LOCK:
+        return ACTIVE_SETUPS.get(asset_key) is not None
+
 
 ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config_telegram.json")
@@ -264,6 +307,22 @@ def send_message(token: str, chat_id: str, text: str, reply_markup: dict = None)
                 return json.loads(r.read())
         except Exception:
             return None
+    except Exception:
+        return None
+
+
+def answer_callback_query(token: str, callback_query_id: str, text: str = None, show_alert: bool = False):
+    """Answers a Telegram inline keyboard callback query so the loading spinner stops."""
+    url = f"https://api.telegram.org/bot{token}/answerCallbackQuery"
+    payload = {"callback_query_id": str(callback_query_id)}
+    if text:
+        payload["text"] = text
+        payload["show_alert"] = show_alert
+    try:
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            return json.loads(r.read())
     except Exception:
         return None
 
@@ -625,11 +684,14 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
     is_a_plus = final_score >= 8
 
     # Key institutional level detection for Scalp execution
+    sw_low = levels.get("sw_low", 0.0)
     at_good_level = strat_accuracy.get("at_good_level", False) or \
                     levels.get("in_golden_pocket", False) or \
-                    ((curr - sw_low) / curr <= 0.05 if (sw_low and curr) else False) or \
-                    (levels.get("ma20_ema") and abs(curr - levels["ma20_ema"]) / curr <= 0.02)
-    can_execute_scalp = (active_strat["code"] == "SCALP" and final_score >= 7 and at_good_level and strat_accuracy["passed"] and trap_type != "BULL_TRAP")
+                    (sw_low > 0 and curr > 0 and (curr - sw_low) / curr <= 0.05) or \
+                    (levels.get("ma20_ema") and abs(curr - levels["ma20_ema"]) / curr <= 0.02) or \
+                    (levels.get("s1") and abs(curr - levels["s1"]) / curr <= 0.02)
+    is_scalp_strategy = (active_strat["code"] == "SCALP")
+    can_execute_scalp = is_scalp_strategy and (final_score >= 7) and (trap_type != "BULL_TRAP") and not htf_eval.get("veto")
 
     # VETO conditions: Anti-Trap, HTF Bias & Strategy Accuracy Filters
     if trap_type == "BULL_TRAP":
@@ -638,14 +700,14 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
     elif htf_eval.get("veto"):
         is_a_plus = False
         verdict = f"🔴 VETOED [HTF BIAS]: {htf_eval['veto_reason']}"
+    elif can_execute_scalp:
+        is_a_plus = True  # Qualified for practical key level scalp execution
+        verdict = f"🟢 SCALP EXECUTION [{active_strat['code']}] (Score: {final_score}/10) - High Probability Execution"
     elif not strat_accuracy["passed"]:
         is_a_plus = False
         verdict = f"🔴 VETOED [{active_strat['code']}]: {strat_accuracy['veto_reasons'][0]}"
     elif is_a_plus:
         verdict = f"🟢 A+ SETUP [{active_strat['code']}] (Score: {final_score}/10) - High Probability Execution"
-    elif can_execute_scalp:
-        is_a_plus = True  # Qualified for practical key level scalp execution
-        verdict = f"🟢 SCALP EXECUTION [{active_strat['code']}] (Score: {final_score}/10) - Key Level Clearance"
     elif final_score >= 6:
         verdict = f"🟡 B SETUP [{active_strat['code']}] (Score: {final_score}/10) - Watchlist / Reduced Size"
     else:
@@ -916,6 +978,8 @@ def format_welcome_menu(sender_name: str) -> str:
         f"   └ Options: `/market btc`, `/market gold`, `/market macro`, `/market levels`\n\n"
         f"⚡ `/trade` - Broker execution & watchlist selector\n"
         f"   └ Options: `/trade buy gold`, `/trade sell btc`, `/trade close`, `/trade auto [gold|btc|both|off]`\n\n"
+        f"🔓 `/unlock` - Scanner lock & interactive alert controls\n"
+        f"   └ Options: `/approve_gold`, `/approve_btc`, `/ignore_gold`, `/ignore_btc`, `/unlock_all`, `/lock_status`\n\n"
         f"🛡️ `/safety` - Safety & circuit breaker controller dashboard\n"
         f"   └ Options: `/mode [paper|demo|live]`, `/enable_live CONFIRM`, `/confirm_trade YES`\n\n"
         f"🚨 `/kill` - Emergency Kill-Switch: Liquidate all & halt trading\n"
@@ -927,7 +991,7 @@ def format_welcome_menu(sender_name: str) -> str:
         f"🧠 `/learn` - Bayesian factor rankings & self-training (`/learn train`)\n\n"
         f"ℹ️ `/status` or `/health` - Feed health, latency, MT5 connection & engine status\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"💡 *Direct Shortcuts:* `/scan`, `/btc`, `/gold`, `/buy_gold`, `/sell_gold`, `/buy_btc`, `/sell_btc`, `/positions`, `/close_all`"
+        f"💡 *Direct Shortcuts:* `/scan`, `/btc`, `/gold`, `/approve_gold`, `/approve_btc`, `/ignore_gold`, `/unlock`, `/lock_status`, `/positions`, `/close_all`"
     )
 
 
@@ -964,8 +1028,170 @@ def trailing_monitor_worker(token: str, chat_id_getter):
             time.sleep(5)
 
 
-def format_elite_alert(asset: str, data: dict) -> str:
-    """Formats an uncluttered, high-impact elite trade alert (zero spam)."""
+def execute_setup_order(asset: str, setup_data: dict, token: str, chat_id: str, trigger_source: str = "AUTO") -> dict:
+    """Executes order on MT5 or Paper broker with safety checks and returns result dict."""
+    global live_broker, safety_manager
+    if not (MT5_EXECUTOR_AVAILABLE and live_broker):
+        return {"success": False, "error": "MT5 executor module not available."}
+
+    is_paper = (safety_manager.get_trading_mode() == "PAPER") if safety_manager else False
+    if not is_paper and not live_broker.ensure_connected():
+        return {"success": False, "error": "MT5 terminal disconnected on VPS."}
+
+    if live_broker.has_open_position(asset):
+        return {"success": False, "error": f"Open position already exists for {asset}."}
+
+    comment = f"Auto1M-{setup_data.get('strategy', 'SCALP')}" if trigger_source == "AUTO" else f"Approve-{setup_data.get('strategy', 'SCALP')}"
+    lots = setup_data.get("lots", 0.05)
+    entry = setup_data["entry"]
+    sl = setup_data["sl"]
+    tp1 = setup_data["tp1"]
+
+    res = live_broker.execute_live_sniper_order(
+        asset, "BUY", entry, sl, tp1, lots, comment=comment
+    )
+    return res
+
+
+def approve_active_setup(token: str, chat_id: str, asset: str) -> dict:
+    """Approves and executes a pending trade signal immediately on MT5/Paper broker."""
+    setup = get_active_setup(asset)
+    if not setup:
+        send_message(token, chat_id, f"⚠️ *No Pending Setup for {asset}*\n• Scanner is currently idle.\n• Use `/scan` or wait for the next 1-minute candle signal.")
+        return {"success": False, "error": "No active setup"}
+
+    if setup.get("executed"):
+        send_message(token, chat_id, f"ℹ️ *Already Executed:*\n• {asset} setup (Ticket `#{setup.get('ticket')}`) is already active.\n• Use `/positions` to monitor PnL or `/close_all` to exit.")
+        return {"success": False, "error": "Already executed"}
+
+    res = execute_setup_order(asset, setup, token, chat_id, trigger_source="MANUAL")
+    if res.get("success"):
+        setup["executed"] = True
+        setup["ticket"] = res.get("ticket")
+        setup["status"] = "EXECUTED"
+        set_active_setup(asset, setup)
+        m_lbl = res.get("mode", "LIVE")
+        reply_txt = (
+            f"✅ *{asset} TRADE APPROVED & EXECUTED [{m_lbl}]*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"• Symbol: `{res['symbol']}` (BUY)\n"
+            f"• Ticket: `#{res['ticket']}`\n"
+            f"• Volume: `{res['lots']}` Lots\n"
+            f"• Fill Price: `${res['price']:,.2f}`\n"
+            f"• Stop-Loss: `${res['sl']:,.2f}`\n"
+            f"• Take-Profit: `${res['tp']:,.2f}`\n"
+            f"• Strategy: `{setup.get('strategy', 'SCALP')}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🛡️ Auto-trailing and breakeven monitor active.\n"
+            f"💡 To reset scanner locks anytime: `/unlock_{asset.lower()}`"
+        )
+        send_message(token, chat_id, reply_txt)
+        return {"success": True, "ticket": res.get("ticket")}
+    elif res.get("requires_confirmation"):
+        send_message(token, chat_id, f"⚠️ *FIRST LIVE TRADE CONFIRMATION REQUIRED ({asset})*\n• Price: `${setup['entry']:,.2f}`\n• Risk: `${setup.get('risk_usd', 50):,.2f}`\nReply with `/confirm_trade YES` to authorize execution.")
+        return {"success": False, "error": "Confirmation required"}
+    else:
+        err_msg = res.get("error", "Execution failed")
+        send_message(token, chat_id, f"❌ *{asset} Execution Failed:*\n• Reason: `{err_msg}`\n• Dismiss setup with `/ignore_{asset.lower()}` or reset lock with `/unlock`.")
+        return {"success": False, "error": err_msg}
+
+
+def ignore_active_setup(token: str, chat_id: str, asset: str) -> bool:
+    """Dismisses an active/pending setup and unlocks the scanner for that asset."""
+    had = clear_active_setup(asset)
+    if not had:
+        send_message(token, chat_id, f"ℹ️ No pending setup for {asset} to ignore. Scanner is already unlocked.")
+        return False
+    send_message(token, chat_id, f"❌ *{asset} SETUP DISMISSED & UNLOCKED*\n• The pending setup has been cancelled.\n• Scanner is now unlocked and scanning for fresh signals.")
+    return True
+
+
+def unlock_scanners(token: str, chat_id: str, asset: str = "ALL") -> dict:
+    """Manually unlocks setup locks immediately so fresh signals can trigger."""
+    if asset.upper() == "GOLD":
+        clear_active_setup("GOLD")
+        send_message(token, chat_id, "🔓 *GOLD SCANNER UNLOCKED!*\n• Any locked signal state has been cleared.\n• Gold 1M scanner is actively searching for new signals.")
+        return {"gold_unlocked": True}
+    elif asset.upper() == "BTC":
+        clear_active_setup("BTC")
+        send_message(token, chat_id, "🔓 *BITCOIN SCANNER UNLOCKED!*\n• Any locked signal state has been cleared.\n• BTC 1M scanner is actively searching for new signals.")
+        return {"btc_unlocked": True}
+    else:
+        clear_all_setups()
+        send_message(token, chat_id, "🔓 *ALL SCANNERS UNLOCKED NOW!*\n• Both Gold and Bitcoin signal locks have been cleared.\n• 1M live scanner will immediately evaluate fresh signals.")
+        return {"gold_unlocked": True, "btc_unlocked": True}
+
+
+def get_lock_status_text() -> str:
+    """Returns a clean breakdown of current scanner locks and active setups."""
+    now = time.time()
+    g_setup = get_active_setup("GOLD")
+    b_setup = get_active_setup("BTC")
+
+    g_line = "🟢 IDLE (Ready for fresh signals)"
+    if g_setup:
+        age_m = int((now - g_setup["time"]) / 60)
+        status_lbl = "EXECUTED ⚡" if g_setup.get("executed") else "PENDING ⏸️"
+        g_line = f"🔒 LOCKED [{status_lbl}]\n  • Entry: `${g_setup['entry']:,.2f}` | TP: `${g_setup['tp1']:,.2f}` | SL: `${g_setup['sl']:,.2f}`\n  • Age: `{age_m}m` | Score: `{g_setup['score']}/10`\n  • Action: `/approve_gold` | `/ignore_gold` | `/unlock_gold`"
+
+    b_line = "🟢 IDLE (Ready for fresh signals)"
+    if b_setup:
+        age_m = int((now - b_setup["time"]) / 60)
+        status_lbl = "EXECUTED ⚡" if b_setup.get("executed") else "PENDING ⏸️"
+        b_line = f"🔒 LOCKED [{status_lbl}]\n  • Entry: `${b_setup['entry']:,.2f}` | TP: `${b_setup['tp1']:,.2f}` | SL: `${b_setup['sl']:,.2f}`\n  • Age: `{age_m}m` | Score: `{b_setup['score']}/10`\n  • Action: `/approve_btc` | `/ignore_btc` | `/unlock_btc`"
+
+    auto_st = f"ENABLED 🟢 ({AUTO_TRADE_MODE})" if AUTO_TRADE_MODE != "OFF" else "DISABLED ⚪ (Manual Approval)"
+    return (
+        f"🔐 *SCANNER LOCK & SETUP STATUS*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"• Auto-Trade Mode: `{auto_st}`\n\n"
+        f"🥇 *Gold (XAU/USD):*\n{g_line}\n\n"
+        f"₿ *Bitcoin (BTC/USD):*\n{b_line}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💡 Commands: `/unlock`, `/unlock_gold`, `/unlock_btc`, `/approve_gold`, `/approve_btc`"
+    )
+
+
+def handle_callback_query(token: str, cq: dict):
+    """Processes interactive Telegram inline keyboard button presses."""
+    cq_id = cq.get("id")
+    from_user = cq.get("from", {})
+    sender_id = str(from_user.get("id"))
+    sender_name = from_user.get("first_name", "User")
+    data = cq.get("data", "")
+
+    # Immediately acknowledge callback query to stop button loading spinner
+    answer_callback_query(token, cq_id)
+
+    print(f"🔘 [{datetime.now().strftime('%H:%M:%S')}] Inline Button Clicked by {sender_name} ({sender_id}): '{data}'")
+
+    if data in ("exec_gold", "approve_gold"):
+        approve_active_setup(token, sender_id, "GOLD")
+    elif data in ("exec_btc", "approve_btc"):
+        approve_active_setup(token, sender_id, "BTC")
+    elif data in ("ignore_gold", "dismiss_gold"):
+        ignore_active_setup(token, sender_id, "GOLD")
+    elif data in ("ignore_btc", "dismiss_btc"):
+        ignore_active_setup(token, sender_id, "BTC")
+    elif data == "unlock_gold":
+        unlock_scanners(token, sender_id, "GOLD")
+    elif data == "unlock_btc":
+        unlock_scanners(token, sender_id, "BTC")
+    elif data in ("unlock_all", "unlock"):
+        unlock_scanners(token, sender_id, "ALL")
+    elif data == "confirm_trade":
+        process_telegram_command(token, sender_id, sender_name, "/confirm_trade YES")
+    elif data == "positions":
+        process_telegram_command(token, sender_id, sender_name, "/positions")
+    elif data == "status":
+        process_telegram_command(token, sender_id, sender_name, "/status")
+
+
+def format_elite_alert(asset: str, data: dict, setup_data: dict = None, exec_result: dict = None, is_auto_trade: bool = False):
+    """
+    Formats an uncluttered, high-impact elite trade alert with interactive action options.
+    Returns (alert_text, reply_markup).
+    """
     item = data["btc"] if asset == "BTC" else data["gold"]
     sym_name = "BITCOIN (BTC/USD)" if asset == "BTC" else "GOLD (XAU/USD)"
     icon = "₿" if asset == "BTC" else "🥇"
@@ -976,8 +1202,18 @@ def format_elite_alert(asset: str, data: dict) -> str:
     target_wr = strat.get("target_win_rate", "80-85%")
     session_info = get_market_session() if RISK_ENGINE_AVAILABLE else None
 
+    # Header badge based on execution status
+    if is_auto_trade and exec_result and exec_result.get("success"):
+        hdr = f"⚡ *1M AUTO-EXECUTION [{exec_result.get('mode', 'LIVE')}] (SCORE: {item['final_score']}/10)*"
+    elif is_auto_trade and exec_result and exec_result.get("requires_confirmation"):
+        hdr = f"⚠️ *ELITE SIGNAL - CONFIRMATION REQUIRED (SCORE: {item['final_score']}/10)*"
+    elif is_auto_trade and exec_result and exec_result.get("error"):
+        hdr = f"⚠️ *ELITE SIGNAL - AUTO-TRADE BLOCKED (SCORE: {item['final_score']}/10)*"
+    else:
+        hdr = f"🎯 *ELITE A+ TRADE SIGNAL (SCORE: {item['final_score']}/10)*"
+
     lines = [
-        f"🎯 *ELITE A+ TRADE SIGNAL (SCORE: {item['final_score']}/10)*",
+        hdr,
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         f"{icon} *Asset:* `{sym_name}`",
         f"• Strategy Profile: `{strat.get('name', strat_code)} ({strat_code})` 🎯",
@@ -996,10 +1232,75 @@ def format_elite_alert(asset: str, data: dict) -> str:
         f"• Extended Target:   `${item['tp2']:,.2f}` (+{strat.get('rr_tp2', 2.0):.1f}R)",
         f"• Recommended Size:  `{lot_info.get('lots', 0.05)}` Lots (${lot_info.get('actual_risk_usd', 50):,.2f} risk)",
         f"• Breakeven / Trail: BE at `+{strat.get('breakeven_r', 0.40):.2f}R` | Trail at `+{strat.get('trail_start_r', 0.75):.2f}R`",
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        "🔒 *Anti-Spam Filter:* This signal is locked. Zero duplicate alerts while in progress."
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     ]
-    return "\n".join(lines)
+
+    a_low = asset.lower()
+    if is_auto_trade and exec_result and exec_result.get("success"):
+        lines.append(f"⚡ *AUTO-TRADE STATUS: EXECUTED ON BROKER*")
+        lines.append(f"• Symbol: `{exec_result['symbol']}` (BUY)")
+        lines.append(f"• Ticket: `#{exec_result['ticket']}` | Volume: `{exec_result['lots']}` Lots")
+        lines.append(f"• Fill Price: `${exec_result['price']:,.2f}` | Mode: `{exec_result.get('mode', 'LIVE')}`")
+        lines.append(f"• Auto-trailing & breakeven active.")
+        lines.append(f"💡 *Unlock Scanner Now:* `/unlock_{a_low}` (or `/unlock`)")
+        reply_markup = {
+            "inline_keyboard": [
+                [
+                    {"text": f"🔓 Unlock {asset}", "callback_data": f"unlock_{a_low}"},
+                    {"text": "📊 Positions", "callback_data": "positions"}
+                ]
+            ]
+        }
+    elif is_auto_trade and exec_result and exec_result.get("requires_confirmation"):
+        lines.append(f"⚠️ *AUTO-TRADE STATUS: FIRST LIVE TRADE REQUIRES CONFIRMATION*")
+        lines.append(f"• Reply `/confirm_trade YES` or tap [Confirm Trade] below.")
+        lines.append(f"• Or tap [Ignore] to dismiss.")
+        reply_markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "✅ Confirm Trade", "callback_data": "confirm_trade"},
+                    {"text": f"❌ Ignore {asset}", "callback_data": f"ignore_{a_low}"}
+                ],
+                [
+                    {"text": f"🔓 Unlock {asset}", "callback_data": f"unlock_{a_low}"}
+                ]
+            ]
+        }
+    elif is_auto_trade and exec_result and exec_result.get("error"):
+        lines.append(f"⚠️ *AUTO-TRADE STATUS: BLOCKED BY RISK GUARDRAIL*")
+        lines.append(f"• Reason: `{exec_result.get('error')}`")
+        lines.append(f"• Approve Manually: `/approve_{a_low}`")
+        lines.append(f"• Ignore & Dismiss: `/ignore_{a_low}` | Unlock: `/unlock`")
+        reply_markup = {
+            "inline_keyboard": [
+                [
+                    {"text": f"✅ Approve {asset}", "callback_data": f"exec_{a_low}"},
+                    {"text": f"❌ Ignore {asset}", "callback_data": f"ignore_{a_low}"}
+                ],
+                [
+                    {"text": f"🔓 Unlock {asset}", "callback_data": f"unlock_{a_low}"}
+                ]
+            ]
+        }
+    else:
+        lines.append("⏸️ *STATUS: PENDING MANUAL APPROVAL (Auto-Trade OFF)*")
+        lines.append("🔘 *ACTION OPTIONS:*")
+        lines.append(f"• Approve & Execute : `/approve_{a_low}`")
+        lines.append(f"• Ignore & Dismiss  : `/ignore_{a_low}`")
+        lines.append(f"• Reset Lock State  : `/unlock`")
+        reply_markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "✅ Approve & Execute", "callback_data": f"exec_{a_low}"},
+                    {"text": "❌ Ignore & Dismiss", "callback_data": f"ignore_{a_low}"}
+                ],
+                [
+                    {"text": "🔓 Unlock Scanner", "callback_data": f"unlock_{a_low}"}
+                ]
+            ]
+        }
+
+    return "\n".join(lines), reply_markup
 
 
 def auto_scanner_worker(token: str, chat_id_getter):
@@ -1007,17 +1308,14 @@ def auto_scanner_worker(token: str, chat_id_getter):
     Continuous 1-Minute Live Candle Quantitative Scanner.
     Features:
       1. Continuous 1-minute candle sync (:00 seconds).
-      2. High-Quality Filter: Only Elite A+ Setups (Score >= 8/10 + Structural Confirmation).
-      3. Zero-Spam State Machine: 1 setup = 1 alert. No repetitive spam while trade is in progress.
-      4. Auto-resolves when Target (TP) is reached or setup invalidates.
-      5. Optional Auto-Trade Execution if /auto_trade on.
+      2. High-Quality Filter: Elite A+ Setups (Score >= 8/10) or Qualified Key-Level Scalps (Score >= 7/10).
+      3. Zero-Spam State Machine: 1 setup = 1 alert until resolved.
+      4. Auto-Execution: If auto-trade is ON, immediately executes order and displays ticket on alert.
+      5. Manual Approval / Ignore / Unlock: Interactive Telegram inline buttons and /approve, /ignore, /unlock.
+      6. Auto-resolves when Target (TP) is reached or setup invalidates.
     """
     print("⏰ Automated 1-Minute Live Candle Scanner: ACTIVE (Monitoring Gold & BTC every 60s)")
-    global AUTO_TRADE_LIVE
-
-    # Active setup trackers (None = IDLE; dict = setup currently active and locked)
-    active_btc_setup = None
-    active_gold_setup = None
+    global AUTO_TRADE_MODE, AUTO_TRADE_LIVE
 
     while True:
         try:
@@ -1039,103 +1337,129 @@ def auto_scanner_worker(token: str, chat_id_getter):
             g = data["gold"]
             current_time = time.time()
 
-            # ── 1. Bitcoin (BTC/USD) State Machine (Zero Spam) ──
-            if active_btc_setup is None:
-                # Check for FRESH High-Quality A+ Setup or Qualified Key-Level Scalp
-                if b['is_a_plus'] and (b['final_score'] >= 8 or (active_strat['code'] == "SCALP" and b['final_score'] >= 7)):
-                    active_btc_setup = {
+            # ── 1. Bitcoin (BTC/USD) State Machine ──
+            btc_setup = get_active_setup("BTC")
+            if btc_setup is None:
+                is_scalp_b = (active_strat['code'] == "SCALP" and b['final_score'] >= 7 and b['trap_type'] != "BULL_TRAP")
+                if b['is_a_plus'] or is_scalp_b:
+                    setup_data = {
+                        "asset": "BTC",
+                        "symbol": b['symbol'],
                         "entry": b['entry'],
                         "sl": b['stop_loss'],
-                        "tp": b['tp1'],
+                        "tp1": b['tp1'],
+                        "tp2": b['tp2'],
+                        "lots": b['lot_info']['lots'],
+                        "risk_usd": b['lot_info']['actual_risk_usd'],
+                        "score": b['final_score'],
                         "time": current_time,
-                        "score": b['final_score']
+                        "strategy": active_strat['code'],
+                        "executed": False,
+                        "ticket": None,
+                        "status": "PENDING"
                     }
-                    print(f"🎯 [{datetime.now().strftime('%H:%M:%S')}] ELITE BTC SIGNAL DETECTED: ${b['price']:,.2f} (Score {b['final_score']}/10)! Broadcasting single alert...")
-                    alert_text = format_elite_alert("BTC", data)
-                    send_message(token, target_chat_id, alert_text)
+                    set_active_setup("BTC", setup_data)
+
+                    # Auto-Trade Execution
+                    is_auto = AUTO_TRADE_MODE in ("BOTH", "BTC")
+                    exec_result = None
+                    if is_auto:
+                        exec_result = execute_setup_order("BTC", setup_data, token, target_chat_id, trigger_source="AUTO")
+                        if exec_result.get("success"):
+                            setup_data["executed"] = True
+                            setup_data["ticket"] = exec_result.get("ticket")
+                            setup_data["status"] = "EXECUTED"
+                            set_active_setup("BTC", setup_data)
+
+                    print(f"🎯 [{datetime.now().strftime('%H:%M:%S')}] BTC SIGNAL DETECTED: ${b['price']:,.2f} (Score {b['final_score']}/10)! AutoTrade={is_auto}")
+                    alert_text, reply_markup = format_elite_alert("BTC", data, setup_data, exec_result, is_auto)
+                    send_message(token, target_chat_id, alert_text, reply_markup=reply_markup)
 
                     if CHARTS_AVAILABLE:
                         b_buf = generate_mt5_chart("BTC-USD", "BITCOIN (BTC-USD)")
                         if b_buf:
-                            send_telegram_chart(token, target_chat_id, b_buf, f"📊 MT5 1M Chart: Bitcoin (${b['price']:,.2f}) | Elite A+ Signal")
-
-                    # Auto-Trade Execution (Respects Watchlist: BOTH, BTC, GOLD, OFF)
-                    global AUTO_TRADE_MODE
-                    if AUTO_TRADE_MODE in ("BOTH", "BTC") and MT5_EXECUTOR_AVAILABLE and live_broker:
-                        is_paper = (safety_manager.get_trading_mode() == "PAPER") if safety_manager else False
-                        if (is_paper or live_broker.is_connected) and not live_broker.has_open_position("BTC"):
-                            res = live_broker.execute_live_sniper_order("BTC", "BUY", b["entry"], b["stop_loss"], b["tp1"], b["lot_info"]["lots"], comment="Auto1M-A+")
-                            if res.get("requires_confirmation"):
-                                send_message(token, target_chat_id, f"⚠️ *FIRST LIVE TRADE OF TODAY REQUIRES CONFIRMATION (BTC)*\n• Price: `${b['price']:,.2f}`\n• Risk: `${b['lot_info']['actual_risk_usd']:,.2f}`\nReply with `/confirm_trade YES` to authorize live auto-execution.")
-                            elif res.get("success"):
-                                m_lbl = res.get("mode", "LIVE")
-                                send_message(token, target_chat_id, f"⚡ *1M AUTO-EXECUTION [{m_lbl}] (BTC)*\n• Symbol: `{res['symbol']}` (BUY)\n• Volume: `{res['lots']}` Lots\n• Price: `${res['price']:,.2f}`\n• Ticket: `#{res['ticket']}`\n• SL: `${res['sl']:,.2f}` | TP: `${res['tp']:,.2f}`")
-                            elif res.get("error"):
-                                print(f"🛑 [BTC Auto-Trade] Guardrail: {res.get('error')}")
+                            send_telegram_chart(token, target_chat_id, b_buf, f"📊 MT5 1M Chart: Bitcoin (${b['price']:,.2f}) | Score {b['final_score']}/10")
             else:
-                # Setup is active: monitor for Target or Invalidation (DO NOT SPAM)
-                # 1. Take-Profit hit?
-                if b['price'] >= active_btc_setup['tp']:
-                    tp_text = f"🎯 *BITCOIN TAKE-PROFIT ACHIEVED!*\n• Price: `${b['price']:,.2f}` reached Target (`${active_btc_setup['tp']:,.2f}`)!\n• High win-rate sniper profit secured. Setup closed."
+                # Setup is active: monitor for Target or Invalidation
+                if b['price'] >= btc_setup['tp1']:
+                    tp_text = f"🎯 *BITCOIN TAKE-PROFIT ACHIEVED!*\n• Price: `${b['price']:,.2f}` reached Target (`${btc_setup['tp1']:,.2f}`)!\n• Sniper profit secured. Setup closed."
                     send_message(token, target_chat_id, tp_text)
                     print(f"✅ [{datetime.now().strftime('%H:%M:%S')}] BTC Take-Profit Hit @ ${b['price']:,.2f}!")
-                    active_btc_setup = None
-                # 2. Stop-Loss hit or time expired (>2 hours)?
-                elif b['price'] <= active_btc_setup['sl'] or (current_time - active_btc_setup['time']) > 7200:
-                    active_btc_setup = None
-                elif abs(b['price'] - active_btc_setup['entry']) / active_btc_setup['entry'] > 0.025:
-                    active_btc_setup = None
+                    clear_active_setup("BTC")
+                elif b['price'] <= btc_setup['sl']:
+                    sl_text = f"🛑 *BITCOIN STOP-LOSS HIT*\n• Price: `${b['price']:,.2f}` hit Stop (`${btc_setup['sl']:,.2f}`). Setup closed."
+                    send_message(token, target_chat_id, sl_text)
+                    clear_active_setup("BTC")
+                elif (current_time - btc_setup['time']) > (1800 if btc_setup.get('strategy') == 'SCALP' else 7200):
+                    clear_active_setup("BTC")
+                elif abs(b['price'] - btc_setup['entry']) / btc_setup['entry'] > 0.025:
+                    clear_active_setup("BTC")
 
-            # ── 2. Gold (XAU/USD) State Machine (Zero Spam) ──
-            if active_gold_setup is None:
-                # Check for FRESH High-Quality A+ Setup or Qualified Key-Level Scalp
-                if g['is_a_plus'] and (g['final_score'] >= 8 or (active_strat['code'] == "SCALP" and g['final_score'] >= 7)):
-                    active_gold_setup = {
+            # ── 2. Gold (XAU/USD) State Machine ──
+            gold_setup = get_active_setup("GOLD")
+            if gold_setup is None:
+                is_scalp_g = (active_strat['code'] == "SCALP" and g['final_score'] >= 7 and g['trap_type'] != "BULL_TRAP")
+                if g['is_a_plus'] or is_scalp_g:
+                    setup_data = {
+                        "asset": "GOLD",
+                        "symbol": g['symbol'],
                         "entry": g['entry'],
                         "sl": g['stop_loss'],
-                        "tp": g['tp1'],
+                        "tp1": g['tp1'],
+                        "tp2": g['tp2'],
+                        "lots": g['lot_info']['lots'],
+                        "risk_usd": g['lot_info']['actual_risk_usd'],
+                        "score": g['final_score'],
                         "time": current_time,
-                        "score": g['final_score']
+                        "strategy": active_strat['code'],
+                        "executed": False,
+                        "ticket": None,
+                        "status": "PENDING"
                     }
-                    print(f"🎯 [{datetime.now().strftime('%H:%M:%S')}] ELITE GOLD SIGNAL DETECTED: ${g['price']:,.2f} (Score {g['final_score']}/10)! Broadcasting single alert...")
-                    alert_text = format_elite_alert("GOLD", data)
-                    send_message(token, target_chat_id, alert_text)
+                    set_active_setup("GOLD", setup_data)
+
+                    # Auto-Trade Execution
+                    is_auto = AUTO_TRADE_MODE in ("BOTH", "GOLD")
+                    exec_result = None
+                    if is_auto:
+                        exec_result = execute_setup_order("GOLD", setup_data, token, target_chat_id, trigger_source="AUTO")
+                        if exec_result.get("success"):
+                            setup_data["executed"] = True
+                            setup_data["ticket"] = exec_result.get("ticket")
+                            setup_data["status"] = "EXECUTED"
+                            set_active_setup("GOLD", setup_data)
+
+                    print(f"🎯 [{datetime.now().strftime('%H:%M:%S')}] GOLD SIGNAL DETECTED: ${g['price']:,.2f} (Score {g['final_score']}/10)! AutoTrade={is_auto}")
+                    alert_text, reply_markup = format_elite_alert("GOLD", data, setup_data, exec_result, is_auto)
+                    send_message(token, target_chat_id, alert_text, reply_markup=reply_markup)
 
                     if CHARTS_AVAILABLE:
                         g_buf = generate_mt5_chart("GC=F", "GOLD (XAU/USD)")
                         if g_buf:
-                            send_telegram_chart(token, target_chat_id, g_buf, f"📊 MT5 1M Chart: Gold (${g['price']:,.2f}) | Elite A+ Signal")
-
-                    # Auto-Trade Execution (Respects Watchlist: BOTH, BTC, GOLD, OFF)
-                    if AUTO_TRADE_MODE in ("BOTH", "GOLD") and MT5_EXECUTOR_AVAILABLE and live_broker:
-                        is_paper = (safety_manager.get_trading_mode() == "PAPER") if safety_manager else False
-                        if (is_paper or live_broker.is_connected) and not live_broker.has_open_position("GOLD"):
-                            res = live_broker.execute_live_sniper_order("GOLD", "BUY", g["entry"], g["stop_loss"], g["tp1"], g["lot_info"]["lots"], comment="Auto1M-A+")
-                            if res.get("requires_confirmation"):
-                                send_message(token, target_chat_id, f"⚠️ *FIRST LIVE TRADE OF TODAY REQUIRES CONFIRMATION (GOLD)*\n• Price: `${g['price']:,.2f}`\n• Risk: `${g['lot_info']['actual_risk_usd']:,.2f}`\nReply with `/confirm_trade YES` to authorize live auto-execution.")
-                            elif res.get("success"):
-                                m_lbl = res.get("mode", "LIVE")
-                                send_message(token, target_chat_id, f"⚡ *1M AUTO-EXECUTION [{m_lbl}] (GOLD)*\n• Symbol: `{res['symbol']}` (BUY)\n• Volume: `{res['lots']}` Lots\n• Price: `${res['price']:,.2f}`\n• Ticket: `#{res['ticket']}`\n• SL: `${res['sl']:,.2f}` | TP: `${res['tp']:,.2f}`")
-                            elif res.get("error"):
-                                print(f"🛑 [Gold Auto-Trade] Guardrail: {res.get('error')}")
+                            send_telegram_chart(token, target_chat_id, g_buf, f"📊 MT5 1M Chart: Gold (${g['price']:,.2f}) | Score {g['final_score']}/10")
             else:
-                # Setup is active: monitor for Target or Invalidation (DO NOT SPAM)
-                # 1. Take-Profit hit?
-                if g['price'] >= active_gold_setup['tp']:
-                    tp_text = f"🎯 *GOLD TAKE-PROFIT ACHIEVED!*\n• Price: `${g['price']:,.2f}` reached Target (`${active_gold_setup['tp']:,.2f}`)!\n• High win-rate sniper profit secured. Setup closed."
+                # Setup is active: monitor for Target or Invalidation
+                if g['price'] >= gold_setup['tp1']:
+                    tp_text = f"🎯 *GOLD TAKE-PROFIT ACHIEVED!*\n• Price: `${g['price']:,.2f}` reached Target (`${gold_setup['tp1']:,.2f}`)!\n• Sniper profit secured. Setup closed."
                     send_message(token, target_chat_id, tp_text)
                     print(f"✅ [{datetime.now().strftime('%H:%M:%S')}] Gold Take-Profit Hit @ ${g['price']:,.2f}!")
-                    active_gold_setup = None
-                # 2. Stop-Loss hit or time expired (>2 hours)?
-                elif g['price'] <= active_gold_setup['sl'] or (current_time - active_gold_setup['time']) > 7200:
-                    active_gold_setup = None
-                elif abs(g['price'] - active_gold_setup['entry']) / active_gold_setup['entry'] > 0.020:
-                    active_gold_setup = None
+                    clear_active_setup("GOLD")
+                elif g['price'] <= gold_setup['sl']:
+                    sl_text = f"🛑 *GOLD STOP-LOSS HIT*\n• Price: `${g['price']:,.2f}` hit Stop (`${gold_setup['sl']:,.2f}`). Setup closed."
+                    send_message(token, target_chat_id, sl_text)
+                    clear_active_setup("GOLD")
+                elif (current_time - gold_setup['time']) > (1800 if gold_setup.get('strategy') == 'SCALP' else 7200):
+                    clear_active_setup("GOLD")
+                elif abs(g['price'] - gold_setup['entry']) / gold_setup['entry'] > 0.020:
+                    clear_active_setup("GOLD")
 
             # ── 3. Clean 1-Minute Console Heartbeat (Zero Spam) ──
-            btc_st = "Active Signal 🔒" if active_btc_setup else f"Score {b['final_score']}/10 (Stand Aside)"
-            gold_st = "Active Signal 🔒" if active_gold_setup else f"Score {g['final_score']}/10 (Stand Aside)"
+            btc_st = f"Active Signal 🔒 ({btc_setup.get('status', 'ACTIVE')})" if btc_setup else f"Score {b['final_score']}/10 (Stand Aside)"
+            gold_st = f"Active Signal 🔒 ({gold_setup.get('status', 'ACTIVE')})" if gold_setup else f"Score {g['final_score']}/10 (Stand Aside)"
             print(f"[{datetime.now().strftime('%H:%M:%S')}] 1M Scan: BTC: {btc_st} | Gold: {gold_st} (Spam: 0)")
+
+        except Exception as scan_err:
+            time.sleep(5)
 
         except Exception as scan_err:
             time.sleep(5)
@@ -1474,6 +1798,60 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             f"• `/portfolio`      ──► Full position breakdown"
         )
         send_message(token, sender_id, card)
+        return
+
+    # ── 3B. MANUAL SIGNAL APPROVAL (/approve [gold|btc] | /approve_gold | /approve_btc) ──
+    if cmd in ("/approve", "/approve_gold", "/approve_btc"):
+        target_asset = "GOLD" if (cmd == "/approve_gold" or "gold" in args_lower or "xau" in args_lower) else ("BTC" if (cmd == "/approve_btc" or "btc" in args_lower or "bitcoin" in args_lower) else None)
+        if not target_asset:
+            g_s = get_active_setup("GOLD")
+            b_s = get_active_setup("BTC")
+            if g_s and not b_s:
+                target_asset = "GOLD"
+            elif b_s and not g_s:
+                target_asset = "BTC"
+            elif g_s and b_s:
+                send_message(token, sender_id, "ℹ️ Both Gold and BTC have active setups. Specify asset:\n• `/approve_gold`\n• `/approve_btc`")
+                return
+            else:
+                send_message(token, sender_id, "⚠️ No pending trade setups to approve. Scanner is idle. Use `/scan` to view market.")
+                return
+        approve_active_setup(token, sender_id, target_asset)
+        return
+
+    # ── 3C. SIGNAL DISMISSAL (/ignore [gold|btc] | /ignore_gold | /ignore_btc | /dismiss) ──
+    if cmd in ("/ignore", "/ignore_gold", "/ignore_btc", "/dismiss"):
+        target_asset = "GOLD" if (cmd == "/ignore_gold" or "gold" in args_lower or "xau" in args_lower) else ("BTC" if (cmd == "/ignore_btc" or "btc" in args_lower or "bitcoin" in args_lower) else None)
+        if not target_asset:
+            g_s = get_active_setup("GOLD")
+            b_s = get_active_setup("BTC")
+            if g_s and not b_s:
+                target_asset = "GOLD"
+            elif b_s and not g_s:
+                target_asset = "BTC"
+            elif g_s and b_s:
+                send_message(token, sender_id, "ℹ️ Specify which setup to ignore:\n• `/ignore_gold`\n• `/ignore_btc`\n• `/unlock` (clears both)")
+                return
+            else:
+                send_message(token, sender_id, "ℹ️ No pending setups to ignore. Scanner is already unlocked.")
+                return
+        ignore_active_setup(token, sender_id, target_asset)
+        return
+
+    # ── 3D. SCANNER UNLOCK CONTROLLER (/unlock [gold|btc|all] | /unlock_gold | /unlock_btc | /unlock_all) ──
+    if cmd in ("/unlock", "/unlock_gold", "/unlock_btc", "/unlock_all"):
+        if cmd == "/unlock_gold" or "gold" in args_lower or "xau" in args_lower:
+            unlock_scanners(token, sender_id, "GOLD")
+        elif cmd == "/unlock_btc" or "btc" in args_lower or "bitcoin" in args_lower:
+            unlock_scanners(token, sender_id, "BTC")
+        else:
+            unlock_scanners(token, sender_id, "ALL")
+        return
+
+    # ── 3E. SCANNER LOCK STATUS (/lock_status | /locks) ──
+    if cmd in ("/lock_status", "/locks"):
+        st_text = get_lock_status_text()
+        send_message(token, sender_id, st_text)
         return
 
     # ── 4. MODERN STRATEGY HUB (/strategy [scalp|swing|balance|swap]) ──
@@ -1867,6 +2245,8 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
         curr_mode = safety_manager.get_trading_mode() if RISK_ENGINE_AVAILABLE else "PAPER"
         kill_act, _ = safety_manager.is_kill_switch_active() if RISK_ENGINE_AVAILABLE else (False, "")
         kill_str = "LOCKED 🚨 (Halted)" if kill_act else "ARMED ✅"
+        g_lock = "LOCKED 🔒 (/unlock_gold)" if is_setup_locked("GOLD") else "IDLE 🟢"
+        b_lock = "LOCKED 🔒 (/unlock_btc)" if is_setup_locked("BTC") else "IDLE 🟢"
 
         status_msg = (
             f"🤖 *SYSTEM & ENGINE HEALTH*\n"
@@ -1876,6 +2256,7 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             f"• Daily Loss Circuit Brk  : `ARMED ✅ (-2.0% daily halt)`\n"
             f"• Max Open Positions Cap  : `2 Positions Max`\n"
             f"• 1-Minute Candle Scanner : `ACTIVE (Every 60s)` 🟢\n"
+            f"• Scanner Setup Locks     : Gold: `{g_lock}` | BTC: `{b_lock}`\n"
             f"• MT5 Broker Connection   : `{broker_line}`\n"
             f"• Live Account Equity     : `{eq_line}`\n"
             f"• Active Strategy         : `{strat['name']}` (`{strat['code']}`) 🎯\n"
@@ -1959,6 +2340,14 @@ def start_bot():
 
             for u in updates.get("result", []):
                 offset = u["update_id"] + 1
+
+                # Handle interactive inline button clicks
+                if "callback_query" in u:
+                    try:
+                        handle_callback_query(token, u["callback_query"])
+                    except Exception as cq_err:
+                        print(f"⚠️ Error handling callback query: {cq_err}")
+                    continue
 
                 if "message" in u and "text" in u["message"]:
                     msg_text = u["message"]["text"].strip()

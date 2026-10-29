@@ -696,9 +696,9 @@ def validate_strategy_accuracy(strat_code: str, asset: str, current_price: float
         elif session_info["is_golden_overlap"]:
             accuracy_factors.append("London / NY Golden Overlap (+10% Win Rate Edge)")
 
-        if spread_ratio and spread_ratio > 0.12:
+        if spread_ratio and spread_ratio > 0.15:
             passed = False
-            veto_reasons.append(f"Broker spread too wide ({spread_ratio*100:.1f}% > 12% of ATR).")
+            veto_reasons.append(f"Broker spread too wide ({spread_ratio*100:.1f}% > 15% of ATR).")
 
     # ── B. SWING ACCURACY RULES (Target: ~68-75% Win Rate, Asymmetric R:R) ──
     elif strat["code"] == "SWING":

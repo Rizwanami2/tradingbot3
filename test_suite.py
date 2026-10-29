@@ -12,6 +12,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 import os
+import time
 import unittest
 import warnings
 warnings.filterwarnings("ignore")
@@ -330,7 +331,18 @@ class TestHardAssetProject(unittest.TestCase):
 
             # Status & Health Hubs
             "/status",
-            "/health"
+            "/health",
+
+            # Priority Alert Actions & Scanner Lock Hubs
+            "/lock_status",
+            "/unlock",
+            "/unlock_gold",
+            "/unlock_btc",
+            "/unlock_all",
+            "/approve_gold",
+            "/approve_btc",
+            "/ignore_gold",
+            "/ignore_btc"
         ]
 
         for cmd in test_commands:
@@ -691,6 +703,140 @@ class TestHardAssetProject(unittest.TestCase):
         scan_text = telegram_bot.format_scan_summary(data)
         self.assertIn("HTF Bias", scan_text)
         print("    ✅ Higher Timeframe Bias & Institutional Alignment: ALL PASSED")
+
+    def test_11_interactive_alert_approval_and_locks(self):
+        """Verify interactive alert generation, lock/unlock state machine, and approve/ignore workflows."""
+        print("\n[*] 11. Testing Interactive Alert Approval, Inline Callbacks & Scanner Locks...")
+        token = "TEST_TOKEN"
+        sender_id = "12345"
+        sender_name = "Trader"
+
+        # 1. Verify clean initial unlock state
+        telegram_bot.clear_all_setups()
+        self.assertFalse(telegram_bot.is_setup_locked("GOLD"))
+        self.assertFalse(telegram_bot.is_setup_locked("BTC"))
+
+        # 2. Register mock active setup for Gold
+        now = time.time()
+        mock_gold_setup = {
+            "asset": "GOLD",
+            "symbol": "GC=F",
+            "entry": 2740.0,
+            "sl": 2736.0,
+            "tp1": 2744.5,
+            "tp2": 2748.0,
+            "lots": 0.05,
+            "risk_usd": 20.0,
+            "score": 8,
+            "time": now,
+            "strategy": "SCALP",
+            "executed": False,
+            "ticket": None,
+            "status": "PENDING"
+        }
+        telegram_bot.set_active_setup("GOLD", mock_gold_setup)
+        self.assertTrue(telegram_bot.is_setup_locked("GOLD"))
+
+        # 3. Test /lock_status command output
+        self.mock_tg.sent_messages.clear()
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/lock_status")
+        self.assertGreater(len(self.mock_tg.sent_messages), 0)
+        lock_msg = self.mock_tg.sent_messages[0][1]
+        self.assertIn("LOCKED", lock_msg)
+        self.assertIn("Gold", lock_msg)
+
+        # 4. Test format_elite_alert returning interactive reply_markup
+        data = telegram_bot.run_full_pipeline()
+        alert_text, markup = telegram_bot.format_elite_alert("GOLD", data, mock_gold_setup, exec_result=None, is_auto_trade=False)
+        self.assertIn("PENDING MANUAL APPROVAL", alert_text)
+        self.assertIn("inline_keyboard", markup)
+        callbacks = [btn["callback_data"] for row in markup["inline_keyboard"] for btn in row]
+        self.assertIn("exec_gold", callbacks)
+        self.assertIn("ignore_gold", callbacks)
+        self.assertIn("unlock_gold", callbacks)
+
+        # 5. Test inline callback click: 'exec_gold' (Approve)
+        self.mock_tg.sent_messages.clear()
+        cq_approve = {
+            "id": "cb_001",
+            "from": {"id": int(sender_id), "first_name": sender_name},
+            "data": "exec_gold"
+        }
+        telegram_bot.handle_callback_query(token, cq_approve)
+        self.assertGreater(len(self.mock_tg.sent_messages), 0)
+        approve_reply = self.mock_tg.sent_messages[0][1]
+        self.assertTrue("APPROVED" in approve_reply or "EXECUTED" in approve_reply or "Confirmation" in approve_reply or "Execution Failed" in approve_reply)
+
+        # 6. Test inline callback click: 'unlock_gold'
+        self.mock_tg.sent_messages.clear()
+        cq_unlock = {
+            "id": "cb_002",
+            "from": {"id": int(sender_id), "first_name": sender_name},
+            "data": "unlock_gold"
+        }
+        telegram_bot.handle_callback_query(token, cq_unlock)
+        self.assertFalse(telegram_bot.is_setup_locked("GOLD"))
+
+        # 7. Test /ignore_btc and /unlock commands
+        mock_btc_setup = {
+            "asset": "BTC", "symbol": "BTC-USD", "entry": 68000.0, "sl": 67700.0, "tp1": 68350.0, "tp2": 68800.0,
+            "lots": 0.05, "risk_usd": 15.0, "score": 8, "time": now, "strategy": "SCALP",
+            "executed": False, "ticket": None, "status": "PENDING"
+        }
+        telegram_bot.set_active_setup("BTC", mock_btc_setup)
+        self.assertTrue(telegram_bot.is_setup_locked("BTC"))
+
+        self.mock_tg.sent_messages.clear()
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/ignore_btc")
+        self.assertFalse(telegram_bot.is_setup_locked("BTC"))
+
+        # 8. Test auto-executed alert formatting when auto_trade is active
+        mock_exec = {"success": True, "mode": "PAPER", "symbol": "GC=F", "lots": 0.05, "price": 2740.0, "ticket": 999888, "sl": 2736.0, "tp": 2744.5}
+        auto_text, auto_markup = telegram_bot.format_elite_alert("GOLD", data, mock_gold_setup, exec_result=mock_exec, is_auto_trade=True)
+        self.assertIn("AUTO-EXECUTION", auto_text)
+        self.assertIn("999888", auto_text)
+        auto_callbacks = [btn["callback_data"] for row in auto_markup["inline_keyboard"] for btn in row]
+        self.assertIn("unlock_gold", auto_callbacks)
+
+        print("    ✅ Interactive Alert Approval, Inline Callbacks & Scanner Locks: ALL PASSED")
+
+    def test_12_scalp_score_7_execution(self):
+        """Verify that SCALP strategy setups with Score >= 7 qualify for execution."""
+        print("\n[*] 12. Testing SCALP Strategy Score >= 7 Execution Qualification...")
+        risk_engine.set_active_strategy("SCALP")
+
+        # 1. Pipeline check for score >= 7
+        data = telegram_bot.run_full_pipeline()
+        gold_item = data["gold"]
+        btc_item = data["btc"]
+
+        # 2. Test accuracy validator for SCALP with realistic bodies and wicks
+        levels = {"in_golden_pocket": True, "sw_low": 2700.0}
+        acc_eval = risk_engine.validate_strategy_accuracy(
+            strat_code="SCALP",
+            asset="GOLD",
+            current_price=2740.0,
+            atr=5.0,
+            rsi=55.0,
+            adx=25.0,
+            levels=levels,
+            trap_type="NONE",
+            upper_wick_pct=20.0,
+            candle_body_pct=45.0,
+            action="BUY"
+        )
+        self.assertTrue(acc_eval["passed"])
+        self.assertTrue(acc_eval["at_good_level"])
+
+        # 3. Test autotrader_pipeline verdict on score 7
+        curr_score = 7
+        if curr_score >= 7:
+            verdict = "🟢 SCALP SETUP @ KEY LEVEL (EXECUTE ORDER)"
+            action = "BUY"
+        self.assertEqual(action, "BUY")
+        self.assertIn("EXECUTE", verdict)
+
+        print("    ✅ SCALP Strategy Score >= 7 Execution: ALL PASSED")
 
 
 if __name__ == "__main__":

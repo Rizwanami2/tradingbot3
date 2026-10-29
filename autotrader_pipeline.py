@@ -243,12 +243,8 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
         verdict = "🟢 A SETUP (EXECUTE ORDER)"
         action = "BUY"
     elif final_score >= 7:
-        if at_good_level:
-            verdict = "🟢 SCALP SETUP @ KEY LEVEL (EXECUTE ORDER)"
-            action = "BUY"
-        else:
-            verdict = "🟡 B SETUP (HALF SIZE)"
-            action = "BUY_HALF"
+        verdict = "🟢 SCALP SETUP @ KEY LEVEL (EXECUTE ORDER)"
+        action = "BUY"
     else:
         verdict = "🔴 VETOED (WAIT FOR CONFLUENCE)"
         action = "STAND_ASIDE"
