@@ -358,7 +358,9 @@ class TestHardAssetProject(unittest.TestCase):
             "/ignore_gold",
             "/ignore_btc",
             "/trades",
-            "/recent_trades"
+            "/recent_trades",
+            "/cooldown",
+            "/cooldown 2"
         ]
 
         for cmd in test_commands:
@@ -732,17 +734,28 @@ class TestHardAssetProject(unittest.TestCase):
         self.assertFalse(telegram_bot.is_setup_locked("GOLD"))
         self.assertFalse(telegram_bot.is_setup_locked("BTC"))
 
-        # 2. Test intelligent anti-spam deduplication without locks
-        first_alert = telegram_bot.should_send_alert("GOLD", "BUY", 2740.0, 8.0, cooldown_seconds=900)
+        # 2. Test intelligent anti-spam deduplication without locks (2m / 120s cooldown)
+        first_alert = telegram_bot.should_send_alert("GOLD", "BUY", 2740.0, 8.0, cooldown_seconds=120)
         self.assertTrue(first_alert)
 
-        # Duplicate alert on same candle (<0.35% price shift within 15m) -> SUPPRESSED
-        dup_alert = telegram_bot.should_send_alert("GOLD", "BUY", 2742.0, 8.0, cooldown_seconds=900)
+        # Duplicate alert on same candle (<0.35% price shift within 2m) -> SUPPRESSED
+        dup_alert = telegram_bot.should_send_alert("GOLD", "BUY", 2742.0, 8.0, cooldown_seconds=120)
         self.assertFalse(dup_alert)
 
         # Breakout price movement (>0.35% shift) -> DISPATCHED IMMEDIATELY
-        breakout_alert = telegram_bot.should_send_alert("GOLD", "BUY", 2760.0, 8.0, cooldown_seconds=900)
+        breakout_alert = telegram_bot.should_send_alert("GOLD", "BUY", 2760.0, 8.0, cooldown_seconds=120)
         self.assertTrue(breakout_alert)
+
+        # Test /cooldown command and setter
+        self.mock_tg.sent_messages.clear()
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/cooldown")
+        self.assertGreater(len(self.mock_tg.sent_messages), 0)
+        self.assertIn("COOLDOWN", self.mock_tg.sent_messages[0][1])
+
+        self.mock_tg.sent_messages.clear()
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/cooldown 2")
+        self.assertEqual(telegram_bot.ALERT_COOLDOWN_SECONDS, 120)
+        self.assertIn("COOLDOWN UPDATED", self.mock_tg.sent_messages[0][1])
 
         # 3. Test /lock_status command output
         self.mock_tg.sent_messages.clear()

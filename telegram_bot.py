@@ -175,16 +175,28 @@ PENDING_SETUPS = {
 }
 DEDUP_LOCK = threading.Lock()
 
+# Alert & Auto-Trade Deduplication Cooldown (in seconds)
+ALERT_COOLDOWN_SECONDS = 120  # 2 minutes auto-trade & alert cooldown
 
-def should_send_alert(asset: str, action: str, price: float, score: float, cooldown_seconds: int = 900) -> bool:
+
+def set_alert_cooldown(seconds: int) -> int:
+    """Sets the alert and auto-trade deduplication cooldown in seconds."""
+    global ALERT_COOLDOWN_SECONDS
+    ALERT_COOLDOWN_SECONDS = max(10, int(seconds))
+    return ALERT_COOLDOWN_SECONDS
+
+
+def should_send_alert(asset: str, action: str, price: float, score: float, cooldown_seconds: int = None) -> bool:
     """
     Intelligent deduplication check.
     Returns True if an alert should be dispatched; False if it is a duplicate spam.
     Rule:
-      - Suppressed only if the SAME asset & action was alerted within 15m AND price has not moved >0.35%.
-      - If price moves >0.35% (breakout/movement) or 15m passes, fresh alert dispatches immediately.
+      - Suppressed only if the SAME asset & action was alerted within cooldown (default 2 min / 120s) AND price has not moved >0.35%.
+      - If price moves >0.35% (breakout/movement) or cooldown passes, fresh alert dispatches immediately.
       - The scanner is NEVER locked!
     """
+    if cooldown_seconds is None:
+        cooldown_seconds = ALERT_COOLDOWN_SECONDS
     asset_key = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
     now = time.time()
     with DEDUP_LOCK:
@@ -1085,7 +1097,7 @@ def format_welcome_menu(sender_name: str) -> str:
         f"🧠 `/learn` - Bayesian factor rankings & self-training (`/learn train`)\n\n"
         f"ℹ️ `/status` or `/health` - Feed health, latency, MT5 connection & engine status\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"💡 *Direct Shortcuts:* `/autopush`, `/trail`, `/scan`, `/btc`, `/gold`, `/approve_gold`, `/approve_btc`, `/ignore_gold`, `/trades`, `/positions`, `/close_all`"
+        f"💡 *Direct Shortcuts:* `/cooldown`, `/autopush`, `/trail`, `/scan`, `/btc`, `/gold`, `/approve_gold`, `/approve_btc`, `/ignore_gold`, `/trades`, `/positions`, `/close_all`"
     )
 
 
@@ -1261,15 +1273,17 @@ def get_lock_status_text() -> str:
     """Returns continuous scanner status (locks eliminated)."""
     auto_st = f"ENABLED 🟢 ({AUTO_TRADE_MODE})" if AUTO_TRADE_MODE != "OFF" else "DISABLED ⚪ (Manual Approval)"
     strat = get_active_strategy() if RISK_ENGINE_AVAILABLE else {"name": "Scalp Sniper", "code": "SCALP"}
+    cd_min = ALERT_COOLDOWN_SECONDS / 60.0
     return (
         f"🟢 *CONTINUOUS 1M SCANNER (ZERO LOCKS)*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"• Scanner Status: `ACTIVE & MONITORING (:00s)` 🟢\n"
-        f"• Anti-Spam Filter: `Intelligent Deduplication (15m window)`\n"
+        f"• Anti-Spam Filter: `Intelligent Deduplication ({cd_min:.1f}m window)`\n"
         f"• Auto-Trade Mode: `{auto_st}`\n"
         f"• Active Strategy: `{strat.get('name', 'SCALP')} ({strat.get('code', 'SCALP')})`\n"
         f"• Lock System: `COMPLETELY REMOVED (Free Flow)`\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💡 Cooldown setting: `/cooldown 2` (currently {ALERT_COOLDOWN_SECONDS}s)\n"
         f"💡 To execute signals manually: `/approve_gold` | `/approve_btc`\n"
         f"💡 To dismiss signals: `/ignore_gold` | `/ignore_btc`"
     )
@@ -1472,7 +1486,7 @@ def auto_scanner_worker(token: str, chat_id_getter):
             # ── 1. Bitcoin (BTC/USD) Continuous Scanner ──
             is_scalp_b = (active_strat['code'] == "SCALP" and b['final_score'] >= 7 and b['trap_type'] != "BULL_TRAP")
             if b['is_a_plus'] or is_scalp_b:
-                if should_send_alert("BTC", "BUY", b['price'], b['final_score'], cooldown_seconds=900):
+                if should_send_alert("BTC", "BUY", b['price'], b['final_score'], cooldown_seconds=ALERT_COOLDOWN_SECONDS):
                     setup_data = {
                         "asset": "BTC",
                         "symbol": b['symbol'],
@@ -1515,7 +1529,7 @@ def auto_scanner_worker(token: str, chat_id_getter):
             # ── 2. Gold (XAU/USD) Continuous Scanner ──
             is_scalp_g = (active_strat['code'] == "SCALP" and g['final_score'] >= 7 and g['trap_type'] != "BULL_TRAP")
             if g['is_a_plus'] or is_scalp_g:
-                if should_send_alert("GOLD", "BUY", g['price'], g['final_score'], cooldown_seconds=900):
+                if should_send_alert("GOLD", "BUY", g['price'], g['final_score'], cooldown_seconds=ALERT_COOLDOWN_SECONDS):
                     setup_data = {
                         "asset": "GOLD",
                         "symbol": g['symbol'],
@@ -1949,6 +1963,57 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
     if cmd in ("/lock_status", "/locks"):
         st_text = get_lock_status_text()
         send_message(token, sender_id, st_text)
+        return
+
+    # ── 3F. AUTO-TRADE & ALERT COOLDOWN (/cooldown) ──
+    if cmd in ("/cooldown", "/alert_cooldown"):
+        global ALERT_COOLDOWN_SECONDS
+        if not args:
+            cd_m = ALERT_COOLDOWN_SECONDS / 60.0
+            msg = (
+                f"⏱️ *AUTO-TRADE & ALERT COOLDOWN*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"• Active Cooldown : `{ALERT_COOLDOWN_SECONDS}s` ({cd_m:.1f} minutes)\n"
+                f"• Price Movement  : `>0.35%` breakout immediately bypasses cooldown\n"
+                f"• Scanner Locks   : `None (Zero Locks / Free Continuous Flow)`\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"💡 *How to change:*\n"
+                f"• `/cooldown 2` (sets cooldown to 2 minutes)\n"
+                f"• `/cooldown 120s` (sets cooldown in seconds)\n"
+                f"• `/cooldown 5` (sets cooldown to 5 minutes)"
+            )
+            send_message(token, sender_id, msg)
+            return
+
+        arg_val = args.strip().lower()
+        new_seconds = None
+        try:
+            if arg_val.endswith("s"):
+                new_seconds = int(float(arg_val[:-1]))
+            elif arg_val.endswith("m"):
+                new_seconds = int(float(arg_val[:-1]) * 60)
+            else:
+                val = float(arg_val)
+                # If <= 30 assume minutes (e.g. 2 -> 120s), else assume seconds
+                new_seconds = int(val * 60) if val <= 30 else int(val)
+        except Exception:
+            send_message(token, sender_id, "⚠️ Invalid format. Send `/cooldown 2` (minutes) or `/cooldown 120s` (seconds).")
+            return
+
+        if new_seconds < 10:
+            send_message(token, sender_id, "⚠️ Cooldown must be at least 10 seconds.")
+            return
+
+        set_alert_cooldown(new_seconds)
+        cd_m = ALERT_COOLDOWN_SECONDS / 60.0
+        msg = (
+            f"✅ *COOLDOWN UPDATED SUCCESSFULLY*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"• New Cooldown : `{ALERT_COOLDOWN_SECONDS}s` ({cd_m:.1f} minutes)\n"
+            f"• Rule         : Same setup within `{cd_m:.1f}m` in same zone (<0.35% move) is deduplicated.\n"
+            f"• Breakout     : Any move >0.35% triggers alert/trade immediately."
+        )
+        send_message(token, sender_id, msg)
         return
 
     # ── 4. MODERN STRATEGY HUB (/strategy [scalp|swing|balance|swap]) ──
@@ -2534,7 +2599,7 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             f"• Daily Loss Circuit Brk  : `ARMED ✅ (-2.0% daily halt)`\n"
             f"• Max Open Positions Cap  : `2 Positions Max`\n"
             f"• 1-Minute Candle Scanner : `ACTIVE & CONTINUOUS (Every 60s)` 🟢\n"
-            f"• Anti-Spam Protection    : `Intelligent Deduplication (15m window, zero locks)`\n"
+            f"• Anti-Spam Protection    : `Intelligent Deduplication ({ALERT_COOLDOWN_SECONDS // 60}m window, zero locks)`\n"
             f"• MT5 Broker Connection   : `{broker_line}`\n"
             f"• Live Account Equity     : `{eq_line}`\n"
             f"• Active Strategy         : `{strat['name']}` (`{strat['code']}`) 🎯\n"
