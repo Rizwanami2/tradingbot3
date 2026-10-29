@@ -111,7 +111,8 @@ class SafetyManager:
             "paper_account": {
                 "balance": DEFAULT_ACCOUNT_BALANCE,
                 "equity": DEFAULT_ACCOUNT_BALANCE,
-                "positions": []
+                "positions": [],
+                "closed_history": []
             }
         }
         if os.path.exists(self.state_file):
@@ -542,6 +543,9 @@ class SafetyManager:
                     })
 
         return events
+    def get_closed_paper_positions(self, limit: int = 30) -> list:
+        history = self.state.get("paper_account", {}).get("closed_history", [])
+        return history[-limit:] if history else []
 
     def close_paper_position(self, ticket: str, exit_price: float, reason: str = "MANUAL_CLOSE") -> dict:
         positions = self.state["paper_account"]["positions"]
@@ -562,6 +566,38 @@ class SafetyManager:
         pnl = (exit_price - target["open_price"]) * target["lots"] * mult if is_buy else (target["open_price"] - exit_price) * target["lots"] * mult
         pnl = round(pnl, 2)
 
+        risk_usd = target.get("risk_usd") or 50.0
+        r_mult = round(pnl / risk_usd, 2) if risk_usd > 0 else (1.2 if pnl > 0 else -1.0)
+        outcome = "WIN" if pnl > 0 else "LOSS"
+        close_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+        closed_record = {
+            "ticket": ticket,
+            "asset": asset_key,
+            "symbol": target.get("symbol", "XAUUSD" if asset_key == "GOLD" else "BTCUSD"),
+            "action": target.get("action", "BUY"),
+            "lots": target.get("lots", 0.05),
+            "open_price": target.get("open_price", exit_price),
+            "exit_price": exit_price,
+            "sl": target.get("sl"),
+            "tp1": target.get("tp1"),
+            "pnl": pnl,
+            "r_multiple": r_mult,
+            "outcome": outcome,
+            "strategy": target.get("strategy", "SCALP"),
+            "score": target.get("score", 8),
+            "open_time": target.get("open_time"),
+            "close_time": close_time,
+            "reason": reason,
+            "source": "PAPER"
+        }
+
+        if "closed_history" not in self.state["paper_account"]:
+            self.state["paper_account"]["closed_history"] = []
+        self.state["paper_account"]["closed_history"].append(closed_record)
+        if len(self.state["paper_account"]["closed_history"]) > 100:
+            self.state["paper_account"]["closed_history"] = self.state["paper_account"]["closed_history"][-100:]
+
         self.state["paper_account"]["balance"] += pnl
         self.state["paper_account"]["equity"] = self.state["paper_account"]["balance"]
         self.record_pnl(pnl, self.state["paper_account"]["balance"])
@@ -573,6 +609,8 @@ class SafetyManager:
             "asset": asset_key,
             "exit_price": exit_price,
             "pnl_usd": pnl,
+            "r_multiple": r_mult,
+            "outcome": outcome,
             "reason": reason
         })
 
@@ -580,8 +618,11 @@ class SafetyManager:
             "success": True,
             "ticket": ticket,
             "closed_pnl": pnl,
+            "r_multiple": r_mult,
+            "outcome": outcome,
             "balance": self.state["paper_account"]["balance"],
-            "reason": reason
+            "reason": reason,
+            "closed_record": closed_record
         }
 
     # ── 8. Safety Dashboard Rendering ─────────────────────────────

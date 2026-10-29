@@ -124,7 +124,6 @@ AUTO_PUSH_ENABLED = False
 # Automated Trailing Stop & Breakeven Protection
 TRAILING_STOP_ENABLED = True
 
-
 def is_auto_push_active(asset: str) -> bool:
     """Returns True if automated order push is active for the specified asset."""
     mode = (AUTO_PUSH_MODE or AUTO_TRADE_MODE or "OFF").upper()
@@ -163,48 +162,97 @@ def set_auto_push_mode(mode: str) -> tuple[str, bool]:
         AUTO_TRADE_LIVE = False
         return "OFF", False
 
-# Centralized Setup State Machine (Zero-Spam Lock & Interactive Execution Tracker)
-ACTIVE_SETUPS = {
+
+# ── Intelligent Anti-Spam Deduplication Engine (Zero Lock Friction) ────────────
+# Allows continuous 1-minute scanning without ever locking up the scanner.
+LAST_ALERTED = {
+    "BTC": {"time": 0.0, "price": 0.0, "score": 0.0, "action": "BUY"},
+    "GOLD": {"time": 0.0, "price": 0.0, "score": 0.0, "action": "BUY"}
+}
+PENDING_SETUPS = {
     "BTC": None,
     "GOLD": None
 }
-SETUP_LOCK = threading.Lock()
+DEDUP_LOCK = threading.Lock()
 
 
-def get_active_setup(asset: str) -> dict | None:
+def should_send_alert(asset: str, action: str, price: float, score: float, cooldown_seconds: int = 900) -> bool:
+    """
+    Intelligent deduplication check.
+    Returns True if an alert should be dispatched; False if it is a duplicate spam.
+    Rule:
+      - Suppressed only if the SAME asset & action was alerted within 15m AND price has not moved >0.35%.
+      - If price moves >0.35% (breakout/movement) or 15m passes, fresh alert dispatches immediately.
+      - The scanner is NEVER locked!
+    """
     asset_key = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
-    with SETUP_LOCK:
-        setup = ACTIVE_SETUPS.get(asset_key)
+    now = time.time()
+    with DEDUP_LOCK:
+        last = LAST_ALERTED.get(asset_key, {"time": 0.0, "price": 0.0, "score": 0.0, "action": "BUY"})
+        time_diff = now - last.get("time", 0.0)
+        last_price = last.get("price", 0.0)
+        price_chg_pct = (abs(price - last_price) / last_price * 100.0) if last_price > 0 else 999.0
+        same_action = (last.get("action", "").upper() == action.upper())
+
+        if time_diff < cooldown_seconds and price_chg_pct < 0.35 and same_action:
+            return False  # Suppress duplicate alert in identical consolidation zone
+
+        # Register fresh alert timestamp and price
+        LAST_ALERTED[asset_key] = {
+            "time": now,
+            "price": price,
+            "score": score,
+            "action": action
+        }
+        return True
+
+
+def set_pending_setup(asset: str, setup_data: dict):
+    asset_key = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
+    with DEDUP_LOCK:
+        PENDING_SETUPS[asset_key] = setup_data
+
+
+def get_pending_setup(asset: str) -> dict | None:
+    asset_key = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
+    with DEDUP_LOCK:
+        setup = PENDING_SETUPS.get(asset_key)
         return dict(setup) if setup else None
 
 
-def set_active_setup(asset: str, setup_data: dict):
+def clear_pending_setup(asset: str) -> bool:
     asset_key = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
-    with SETUP_LOCK:
-        ACTIVE_SETUPS[asset_key] = setup_data
-
-
-def clear_active_setup(asset: str) -> bool:
-    asset_key = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
-    with SETUP_LOCK:
-        had = ACTIVE_SETUPS.get(asset_key) is not None
-        ACTIVE_SETUPS[asset_key] = None
+    with DEDUP_LOCK:
+        had = PENDING_SETUPS.get(asset_key) is not None
+        PENDING_SETUPS[asset_key] = None
         return had
 
 
+# Backward compatibility wrappers (scanner NEVER locks!)
+def get_active_setup(asset: str) -> dict | None:
+    return get_pending_setup(asset)
+
+
+def set_active_setup(asset: str, setup_data: dict):
+    set_pending_setup(asset, setup_data)
+
+
+def clear_active_setup(asset: str) -> bool:
+    return clear_pending_setup(asset)
+
+
 def clear_all_setups() -> tuple[bool, bool]:
-    with SETUP_LOCK:
-        had_gold = ACTIVE_SETUPS.get("GOLD") is not None
-        had_btc = ACTIVE_SETUPS.get("BTC") is not None
-        ACTIVE_SETUPS["GOLD"] = None
-        ACTIVE_SETUPS["BTC"] = None
-        return had_gold, had_btc
+    with DEDUP_LOCK:
+        had_g = PENDING_SETUPS.get("GOLD") is not None
+        had_b = PENDING_SETUPS.get("BTC") is not None
+        PENDING_SETUPS["GOLD"] = None
+        PENDING_SETUPS["BTC"] = None
+        return had_g, had_b
 
 
 def is_setup_locked(asset: str) -> bool:
-    asset_key = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
-    with SETUP_LOCK:
-        return ACTIVE_SETUPS.get(asset_key) is not None
+    """Scanner locks have been completely eliminated. Always returns False."""
+    return False
 
 
 ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
@@ -1024,8 +1072,8 @@ def format_welcome_menu(sender_name: str) -> str:
         f"   └ Options: `/market btc`, `/market gold`, `/market macro`, `/market levels`\n\n"
         f"⚡ `/trade` - Broker execution & watchlist selector\n"
         f"   └ Options: `/trade buy gold`, `/trade sell btc`, `/trade close`, `/trade auto [gold|btc|both|off]`\n\n"
-        f"🔓 `/unlock` - Scanner lock & interactive alert controls\n"
-        f"   └ Options: `/approve_gold`, `/approve_btc`, `/ignore_gold`, `/ignore_btc`, `/unlock_all`, `/lock_status`\n\n"
+        f"📜 `/trades` - Recent closed trades journal & PnL history\n"
+        f"   └ Options: `/trades`, `/recent_trades`\n\n"
         f"🛡️ `/safety` - Safety & circuit breaker controller dashboard\n"
         f"   └ Options: `/mode [paper|demo|live]`, `/enable_live CONFIRM`, `/confirm_trade YES`\n\n"
         f"🚨 `/kill` - Emergency Kill-Switch: Liquidate all & halt trading\n"
@@ -1037,7 +1085,7 @@ def format_welcome_menu(sender_name: str) -> str:
         f"🧠 `/learn` - Bayesian factor rankings & self-training (`/learn train`)\n\n"
         f"ℹ️ `/status` or `/health` - Feed health, latency, MT5 connection & engine status\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"💡 *Direct Shortcuts:* `/autopush`, `/trail`, `/scan`, `/btc`, `/gold`, `/approve_gold`, `/approve_btc`, `/ignore_gold`, `/unlock`, `/lock_status`, `/positions`, `/close_all`"
+        f"💡 *Direct Shortcuts:* `/autopush`, `/trail`, `/scan`, `/btc`, `/gold`, `/approve_gold`, `/approve_btc`, `/ignore_gold`, `/trades`, `/positions`, `/close_all`"
     )
 
 
@@ -1132,10 +1180,32 @@ def execute_setup_order(asset: str, setup_data: dict, token: str, chat_id: str, 
 
 def approve_active_setup(token: str, chat_id: str, asset: str) -> dict:
     """Approves and executes a pending trade signal immediately on MT5/Paper broker."""
-    setup = get_active_setup(asset)
+    setup = get_pending_setup(asset)
     if not setup:
-        send_message(token, chat_id, f"⚠️ *No Pending Setup for {asset}*\n• Scanner is currently idle.\n• Use `/scan` or wait for the next 1-minute candle signal.")
-        return {"success": False, "error": "No active setup"}
+        # Construct setup from live pipeline if available
+        data = run_full_pipeline()
+        item = data.get("btc") if asset.upper() == "BTC" else data.get("gold")
+        if item:
+            active_strat = get_active_strategy() if RISK_ENGINE_AVAILABLE else {"code": "SCALP"}
+            setup = {
+                "asset": asset.upper(),
+                "symbol": item["symbol"],
+                "entry": item["entry"],
+                "sl": item["stop_loss"],
+                "tp1": item["tp1"],
+                "tp2": item["tp2"],
+                "lots": item.get("lot_info", {}).get("lots", 0.05),
+                "risk_usd": item.get("lot_info", {}).get("actual_risk_usd", 50.0),
+                "score": item.get("final_score", 8),
+                "time": time.time(),
+                "strategy": active_strat["code"],
+                "executed": False,
+                "ticket": None,
+                "status": "PENDING"
+            }
+        else:
+            send_message(token, chat_id, f"⚠️ *No Actionable Setup for {asset}*\n• Scanner is monitoring 1-minute close.\n• Use `/scan` or `/buy_{asset.lower()}` to enter manually.")
+            return {"success": False, "error": "No active setup"}
 
     if setup.get("executed"):
         send_message(token, chat_id, f"ℹ️ *Already Executed:*\n• {asset} setup (Ticket `#{setup.get('ticket')}`) is already active.\n• Use `/positions` to monitor PnL or `/close_all` to exit.")
@@ -1146,7 +1216,7 @@ def approve_active_setup(token: str, chat_id: str, asset: str) -> dict:
         setup["executed"] = True
         setup["ticket"] = res.get("ticket")
         setup["status"] = "EXECUTED"
-        set_active_setup(asset, setup)
+        set_pending_setup(asset, setup)
         m_lbl = res.get("mode", "LIVE")
         reply_txt = (
             f"✅ *{asset} TRADE APPROVED & EXECUTED [{m_lbl}]*\n"
@@ -1159,8 +1229,7 @@ def approve_active_setup(token: str, chat_id: str, asset: str) -> dict:
             f"• Take-Profit: `${res['tp']:,.2f}`\n"
             f"• Strategy: `{setup.get('strategy', 'SCALP')}`\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🛡️ Auto-trailing and breakeven monitor active.\n"
-            f"💡 To reset scanner locks anytime: `/unlock_{asset.lower()}`"
+            f"🛡️ Auto-trailing and breakeven monitor active."
         )
         send_message(token, chat_id, reply_txt)
         return {"success": True, "ticket": res.get("ticket")}
@@ -1169,63 +1238,40 @@ def approve_active_setup(token: str, chat_id: str, asset: str) -> dict:
         return {"success": False, "error": "Confirmation required"}
     else:
         err_msg = res.get("error", "Execution failed")
-        send_message(token, chat_id, f"❌ *{asset} Execution Failed:*\n• Reason: `{err_msg}`\n• Dismiss setup with `/ignore_{asset.lower()}` or reset lock with `/unlock`.")
+        send_message(token, chat_id, f"❌ *{asset} Execution Failed:*\n• Reason: `{err_msg}`\n• Dismiss setup with `/ignore_{asset.lower()}`.")
         return {"success": False, "error": err_msg}
 
 
 def ignore_active_setup(token: str, chat_id: str, asset: str) -> bool:
-    """Dismisses an active/pending setup and unlocks the scanner for that asset."""
-    had = clear_active_setup(asset)
-    if not had:
-        send_message(token, chat_id, f"ℹ️ No pending setup for {asset} to ignore. Scanner is already unlocked.")
-        return False
-    send_message(token, chat_id, f"❌ *{asset} SETUP DISMISSED & UNLOCKED*\n• The pending setup has been cancelled.\n• Scanner is now unlocked and scanning for fresh signals.")
+    """Dismisses a pending setup."""
+    had = clear_pending_setup(asset)
+    send_message(token, chat_id, f"🗑️ *{asset} SETUP DISMISSED*\n• The setup has been dismissed.\n• Continuous 1-minute scanner is active.")
     return True
 
 
 def unlock_scanners(token: str, chat_id: str, asset: str = "ALL") -> dict:
-    """Manually unlocks setup locks immediately so fresh signals can trigger."""
-    if asset.upper() == "GOLD":
-        clear_active_setup("GOLD")
-        send_message(token, chat_id, "🔓 *GOLD SCANNER UNLOCKED!*\n• Any locked signal state has been cleared.\n• Gold 1M scanner is actively searching for new signals.")
-        return {"gold_unlocked": True}
-    elif asset.upper() == "BTC":
-        clear_active_setup("BTC")
-        send_message(token, chat_id, "🔓 *BITCOIN SCANNER UNLOCKED!*\n• Any locked signal state has been cleared.\n• BTC 1M scanner is actively searching for new signals.")
-        return {"btc_unlocked": True}
-    else:
-        clear_all_setups()
-        send_message(token, chat_id, "🔓 *ALL SCANNERS UNLOCKED NOW!*\n• Both Gold and Bitcoin signal locks have been cleared.\n• 1M live scanner will immediately evaluate fresh signals.")
-        return {"gold_unlocked": True, "btc_unlocked": True}
+    """Scanner locks have been completely removed. Provides user confirmation."""
+    clear_pending_setup("GOLD")
+    clear_pending_setup("BTC")
+    send_message(token, chat_id, "ℹ️ *Scanner Locks Completely Removed:*\n• The continuous 1-minute scanner runs freely without locks.\n• Intelligent anti-spam deduplication prevents repeated alerts automatically.")
+    return {"gold_unlocked": True, "btc_unlocked": True}
 
 
 def get_lock_status_text() -> str:
-    """Returns a clean breakdown of current scanner locks and active setups."""
-    now = time.time()
-    g_setup = get_active_setup("GOLD")
-    b_setup = get_active_setup("BTC")
-
-    g_line = "🟢 IDLE (Ready for fresh signals)"
-    if g_setup:
-        age_m = int((now - g_setup["time"]) / 60)
-        status_lbl = "EXECUTED ⚡" if g_setup.get("executed") else "PENDING ⏸️"
-        g_line = f"🔒 LOCKED [{status_lbl}]\n  • Entry: `${g_setup['entry']:,.2f}` | TP: `${g_setup['tp1']:,.2f}` | SL: `${g_setup['sl']:,.2f}`\n  • Age: `{age_m}m` | Score: `{g_setup['score']}/10`\n  • Action: `/approve_gold` | `/ignore_gold` | `/unlock_gold`"
-
-    b_line = "🟢 IDLE (Ready for fresh signals)"
-    if b_setup:
-        age_m = int((now - b_setup["time"]) / 60)
-        status_lbl = "EXECUTED ⚡" if b_setup.get("executed") else "PENDING ⏸️"
-        b_line = f"🔒 LOCKED [{status_lbl}]\n  • Entry: `${b_setup['entry']:,.2f}` | TP: `${b_setup['tp1']:,.2f}` | SL: `${b_setup['sl']:,.2f}`\n  • Age: `{age_m}m` | Score: `{b_setup['score']}/10`\n  • Action: `/approve_btc` | `/ignore_btc` | `/unlock_btc`"
-
+    """Returns continuous scanner status (locks eliminated)."""
     auto_st = f"ENABLED 🟢 ({AUTO_TRADE_MODE})" if AUTO_TRADE_MODE != "OFF" else "DISABLED ⚪ (Manual Approval)"
+    strat = get_active_strategy() if RISK_ENGINE_AVAILABLE else {"name": "Scalp Sniper", "code": "SCALP"}
     return (
-        f"🔐 *SCANNER LOCK & SETUP STATUS*\n"
+        f"🟢 *CONTINUOUS 1M SCANNER (ZERO LOCKS)*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"• Auto-Trade Mode: `{auto_st}`\n\n"
-        f"🥇 *Gold (XAU/USD):*\n{g_line}\n\n"
-        f"₿ *Bitcoin (BTC/USD):*\n{b_line}\n"
+        f"• Scanner Status: `ACTIVE & MONITORING (:00s)` 🟢\n"
+        f"• Anti-Spam Filter: `Intelligent Deduplication (15m window)`\n"
+        f"• Auto-Trade Mode: `{auto_st}`\n"
+        f"• Active Strategy: `{strat.get('name', 'SCALP')} ({strat.get('code', 'SCALP')})`\n"
+        f"• Lock System: `COMPLETELY REMOVED (Free Flow)`\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"💡 Commands: `/unlock`, `/unlock_gold`, `/unlock_btc`, `/approve_gold`, `/approve_btc`"
+        f"💡 To execute signals manually: `/approve_gold` | `/approve_btc`\n"
+        f"💡 To dismiss signals: `/ignore_gold` | `/ignore_btc`"
     )
 
 
@@ -1330,71 +1376,54 @@ def format_elite_alert(asset: str, data: dict, setup_data: dict = None, exec_res
 
     a_low = asset.lower()
     if is_auto_trade and exec_result and exec_result.get("success"):
-        lines.append(f"⚡ *AUTO-PUSH STATUS: EXECUTED ON BROKER*")
+        lines.append("⚡ *AUTO-TRADE STATUS: EXECUTED ON BROKER*")
         lines.append(f"• Symbol: `{exec_result['symbol']}` (BUY)")
         lines.append(f"• Ticket: `#{exec_result['ticket']}` | Volume: `{exec_result['lots']}` Lots")
         lines.append(f"• Fill Price: `${exec_result['price']:,.2f}` | Mode: `{exec_result.get('mode', 'LIVE')}`")
-        lines.append(f"• Dynamic Trailing & Breakeven active 🛡️")
-        lines.append(f"💡 *Unlock Scanner Now:* `/unlock_{a_low}` (or `/unlock`)")
+        lines.append("• Auto-trailing & breakeven active.")
         reply_markup = {
             "inline_keyboard": [
                 [
-                    {"text": f"🔓 Unlock {asset}", "callback_data": f"unlock_{a_low}"},
-                    {"text": "📊 Positions", "callback_data": "positions"}
-                ],
-                [
-                    {"text": "🛡️ Trail Hub", "callback_data": "trail"},
-                    {"text": "⚡ Auto-Push Hub", "callback_data": "autopush"}
+                    {"text": "📊 Positions", "callback_data": "positions"},
+                    {"text": "🛑 Close All", "callback_data": "close_all"}
                 ]
             ]
         }
     elif is_auto_trade and exec_result and exec_result.get("requires_confirmation"):
-        lines.append(f"⚠️ *AUTO-PUSH STATUS: FIRST LIVE TRADE REQUIRES CONFIRMATION*")
-        lines.append(f"• Reply `/confirm_trade YES` or tap [Confirm Trade] below.")
-        lines.append(f"• Or tap [Ignore] to dismiss.")
+        lines.append("⚠️ *AUTO-TRADE STATUS: FIRST LIVE TRADE REQUIRES CONFIRMATION*")
+        lines.append("• Reply `/confirm_trade YES` or tap [Confirm Trade] below.")
+        lines.append("• Or tap [Dismiss] to ignore.")
         reply_markup = {
             "inline_keyboard": [
                 [
                     {"text": "✅ Confirm Trade", "callback_data": "confirm_trade"},
-                    {"text": f"❌ Ignore {asset}", "callback_data": f"ignore_{a_low}"}
-                ],
-                [
-                    {"text": f"🔓 Unlock {asset}", "callback_data": f"unlock_{a_low}"}
+                    {"text": "❌ Dismiss", "callback_data": f"ignore_{a_low}"}
                 ]
             ]
         }
     elif is_auto_trade and exec_result and exec_result.get("error"):
-        lines.append(f"⚠️ *AUTO-PUSH STATUS: BLOCKED BY RISK GUARDRAIL*")
+        lines.append("⚠️ *AUTO-TRADE STATUS: BLOCKED BY RISK GUARDRAIL*")
         lines.append(f"• Reason: `{exec_result.get('error')}`")
         lines.append(f"• Approve Manually: `/approve_{a_low}`")
-        lines.append(f"• Ignore & Dismiss: `/ignore_{a_low}` | Unlock: `/unlock`")
+        lines.append(f"• Dismiss Signal: `/ignore_{a_low}`")
         reply_markup = {
             "inline_keyboard": [
                 [
                     {"text": f"✅ Approve {asset}", "callback_data": f"exec_{a_low}"},
-                    {"text": f"❌ Ignore {asset}", "callback_data": f"ignore_{a_low}"}
-                ],
-                [
-                    {"text": f"🔓 Unlock {asset}", "callback_data": f"unlock_{a_low}"}
+                    {"text": "❌ Dismiss", "callback_data": f"ignore_{a_low}"}
                 ]
             ]
         }
     else:
-        lines.append("⏸️ *STATUS: PENDING MANUAL APPROVAL (Auto-Push OFF)*")
+        lines.append("⏸️ *STATUS: HIGH-CONFLUENCE SIGNAL (Auto-Trade OFF)*")
         lines.append("🔘 *ACTION OPTIONS:*")
         lines.append(f"• Approve & Execute : `/approve_{a_low}`")
-        lines.append(f"• Ignore & Dismiss  : `/ignore_{a_low}`")
-        lines.append(f"• Activate Auto-Push: `/autopush on`")
-        lines.append(f"• Reset Lock State  : `/unlock`")
+        lines.append(f"• Dismiss Signal   : `/ignore_{a_low}`")
         reply_markup = {
             "inline_keyboard": [
                 [
-                    {"text": "✅ Approve & Execute", "callback_data": f"exec_{a_low}"},
-                    {"text": "❌ Ignore & Dismiss", "callback_data": f"ignore_{a_low}"}
-                ],
-                [
-                    {"text": "⚡ Enable Auto-Push", "callback_data": "autopush_on"},
-                    {"text": "🔓 Unlock Scanner", "callback_data": f"unlock_{a_low}"}
+                    {"text": f"✅ Approve {asset}", "callback_data": f"exec_{a_low}"},
+                    {"text": "❌ Dismiss", "callback_data": f"ignore_{a_low}"}
                 ]
             ]
         }
@@ -1436,11 +1465,10 @@ def auto_scanner_worker(token: str, chat_id_getter):
             g = data["gold"]
             current_time = time.time()
 
-            # ── 1. Bitcoin (BTC/USD) State Machine ──
-            btc_setup = get_active_setup("BTC")
-            if btc_setup is None:
-                is_scalp_b = (active_strat['code'] == "SCALP" and b['final_score'] >= 7 and b['trap_type'] != "BULL_TRAP")
-                if b['is_a_plus'] or is_scalp_b:
+            # ── 1. Bitcoin (BTC/USD) Continuous Scanner ──
+            is_scalp_b = (active_strat['code'] == "SCALP" and b['final_score'] >= 7 and b['trap_type'] != "BULL_TRAP")
+            if b['is_a_plus'] or is_scalp_b:
+                if should_send_alert("BTC", "BUY", b['price'], b['final_score'], cooldown_seconds=900):
                     setup_data = {
                         "asset": "BTC",
                         "symbol": b['symbol'],
@@ -1457,7 +1485,7 @@ def auto_scanner_worker(token: str, chat_id_getter):
                         "ticket": None,
                         "status": "PENDING"
                     }
-                    set_active_setup("BTC", setup_data)
+                    set_pending_setup("BTC", setup_data)
 
                     # Auto-Push Execution
                     is_auto = is_auto_push_active("BTC")
@@ -1468,7 +1496,7 @@ def auto_scanner_worker(token: str, chat_id_getter):
                             setup_data["executed"] = True
                             setup_data["ticket"] = exec_result.get("ticket")
                             setup_data["status"] = "EXECUTED"
-                            set_active_setup("BTC", setup_data)
+                            set_pending_setup("BTC", setup_data)
 
                     print(f"🎯 [{datetime.now().strftime('%H:%M:%S')}] BTC SIGNAL DETECTED: ${b['price']:,.2f} (Score {b['final_score']}/10)! AutoPush={is_auto}")
                     alert_text, reply_markup = format_elite_alert("BTC", data, setup_data, exec_result, is_auto)
@@ -1478,33 +1506,12 @@ def auto_scanner_worker(token: str, chat_id_getter):
                         b_buf = generate_mt5_chart("BTC-USD", "BITCOIN (BTC-USD)")
                         if b_buf:
                             send_telegram_chart(token, target_chat_id, b_buf, f"📊 MT5 1M Chart: Bitcoin (${b['price']:,.2f}) | Score {b['final_score']}/10")
-            else:
-                # Setup is active: monitor for Target or Invalidation
-                if b['price'] >= btc_setup['tp1']:
-                    tp_text = f"🎯 *BITCOIN TAKE-PROFIT ACHIEVED!*\n• Price: `${b['price']:,.2f}` reached Target (`${btc_setup['tp1']:,.2f}`)!\n• Sniper profit secured. Setup closed."
-                    send_message(token, target_chat_id, tp_text)
-                    print(f"✅ [{datetime.now().strftime('%H:%M:%S')}] BTC Take-Profit Hit @ ${b['price']:,.2f}!")
-                    if btc_setup.get('executed') and btc_setup.get('ticket'):
-                        if RISK_ENGINE_AVAILABLE and safety_manager and safety_manager.get_trading_mode() == "PAPER":
-                            safety_manager.close_paper_position(btc_setup['ticket'], btc_setup['tp1'], reason="TAKE_PROFIT_HIT")
-                    clear_active_setup("BTC")
-                elif b['price'] <= btc_setup['sl']:
-                    sl_text = f"🛑 *BITCOIN STOP-LOSS HIT*\n• Price: `${b['price']:,.2f}` hit Stop (`${btc_setup['sl']:,.2f}`). Setup closed."
-                    send_message(token, target_chat_id, sl_text)
-                    if btc_setup.get('executed') and btc_setup.get('ticket'):
-                        if RISK_ENGINE_AVAILABLE and safety_manager and safety_manager.get_trading_mode() == "PAPER":
-                            safety_manager.close_paper_position(btc_setup['ticket'], btc_setup['sl'], reason="STOP_LOSS_HIT")
-                    clear_active_setup("BTC")
-                elif (current_time - btc_setup['time']) > (1800 if btc_setup.get('strategy') == 'SCALP' else 7200):
-                    clear_active_setup("BTC")
-                elif abs(b['price'] - btc_setup['entry']) / btc_setup['entry'] > 0.025:
-                    clear_active_setup("BTC")
 
-            # ── 2. Gold (XAU/USD) State Machine ──
-            gold_setup = get_active_setup("GOLD")
-            if gold_setup is None:
-                is_scalp_g = (active_strat['code'] == "SCALP" and g['final_score'] >= 7 and g['trap_type'] != "BULL_TRAP")
-                if g['is_a_plus'] or is_scalp_g:
+
+            # ── 2. Gold (XAU/USD) Continuous Scanner ──
+            is_scalp_g = (active_strat['code'] == "SCALP" and g['final_score'] >= 7 and g['trap_type'] != "BULL_TRAP")
+            if g['is_a_plus'] or is_scalp_g:
+                if should_send_alert("GOLD", "BUY", g['price'], g['final_score'], cooldown_seconds=900):
                     setup_data = {
                         "asset": "GOLD",
                         "symbol": g['symbol'],
@@ -1521,7 +1528,7 @@ def auto_scanner_worker(token: str, chat_id_getter):
                         "ticket": None,
                         "status": "PENDING"
                     }
-                    set_active_setup("GOLD", setup_data)
+                    set_pending_setup("GOLD", setup_data)
 
                     # Auto-Push Execution
                     is_auto = is_auto_push_active("GOLD")
@@ -1532,7 +1539,7 @@ def auto_scanner_worker(token: str, chat_id_getter):
                             setup_data["executed"] = True
                             setup_data["ticket"] = exec_result.get("ticket")
                             setup_data["status"] = "EXECUTED"
-                            set_active_setup("GOLD", setup_data)
+                            set_pending_setup("GOLD", setup_data)
 
                     print(f"🎯 [{datetime.now().strftime('%H:%M:%S')}] GOLD SIGNAL DETECTED: ${g['price']:,.2f} (Score {g['final_score']}/10)! AutoPush={is_auto}")
                     alert_text, reply_markup = format_elite_alert("GOLD", data, setup_data, exec_result, is_auto)
@@ -1542,35 +1549,14 @@ def auto_scanner_worker(token: str, chat_id_getter):
                         g_buf = generate_mt5_chart("GC=F", "GOLD (XAU/USD)")
                         if g_buf:
                             send_telegram_chart(token, target_chat_id, g_buf, f"📊 MT5 1M Chart: Gold (${g['price']:,.2f}) | Score {g['final_score']}/10")
-            else:
-                # Setup is active: monitor for Target or Invalidation
-                if g['price'] >= gold_setup['tp1']:
-                    tp_text = f"🎯 *GOLD TAKE-PROFIT ACHIEVED!*\n• Price: `${g['price']:,.2f}` reached Target (`${gold_setup['tp1']:,.2f}`)!\n• Sniper profit secured. Setup closed."
-                    send_message(token, target_chat_id, tp_text)
-                    print(f"✅ [{datetime.now().strftime('%H:%M:%S')}] Gold Take-Profit Hit @ ${g['price']:,.2f}!")
-                    if gold_setup.get('executed') and gold_setup.get('ticket'):
-                        if RISK_ENGINE_AVAILABLE and safety_manager and safety_manager.get_trading_mode() == "PAPER":
-                            safety_manager.close_paper_position(gold_setup['ticket'], gold_setup['tp1'], reason="TAKE_PROFIT_HIT")
-                    clear_active_setup("GOLD")
-                elif g['price'] <= gold_setup['sl']:
-                    sl_text = f"🛑 *GOLD STOP-LOSS HIT*\n• Price: `${g['price']:,.2f}` hit Stop (`${gold_setup['sl']:,.2f}`). Setup closed."
-                    send_message(token, target_chat_id, sl_text)
-                    if gold_setup.get('executed') and gold_setup.get('ticket'):
-                        if RISK_ENGINE_AVAILABLE and safety_manager and safety_manager.get_trading_mode() == "PAPER":
-                            safety_manager.close_paper_position(gold_setup['ticket'], gold_setup['sl'], reason="STOP_LOSS_HIT")
-                    clear_active_setup("GOLD")
-                elif (current_time - gold_setup['time']) > (1800 if gold_setup.get('strategy') == 'SCALP' else 7200):
-                    clear_active_setup("GOLD")
-                elif abs(g['price'] - gold_setup['entry']) / gold_setup['entry'] > 0.020:
-                    clear_active_setup("GOLD")
+
 
             # ── 3. Clean 1-Minute Console Heartbeat (Zero Spam) ──
-            btc_st = f"Active Signal 🔒 ({btc_setup.get('status', 'ACTIVE')})" if btc_setup else f"Score {b['final_score']}/10 (Stand Aside)"
-            gold_st = f"Active Signal 🔒 ({gold_setup.get('status', 'ACTIVE')})" if gold_setup else f"Score {g['final_score']}/10 (Stand Aside)"
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] 1M Scan: BTC: {btc_st} | Gold: {gold_st} (Spam: 0)")
-
-        except Exception as scan_err:
-            time.sleep(5)
+            b_pend = get_pending_setup("BTC")
+            g_pend = get_pending_setup("GOLD")
+            btc_st = f"Active ({b_pend.get('status')})" if b_pend else f"Score {b['final_score']}/10"
+            gold_st = f"Active ({g_pend.get('status')})" if g_pend else f"Score {g['final_score']}/10"
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] 1M Scan: BTC: {btc_st} | Gold: {gold_st} (Spam: 0 | Lock: OFF)")
 
         except Exception as scan_err:
             time.sleep(5)
@@ -2413,24 +2399,45 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             ), reply_markup=reply_markup)
             return
 
-    # ── 7. SELF-LEARNING HUB (/learn, /train) ──
+    # ── 7. SELF-LEARNING & CLOSED TRADES JOURNAL (/learn, /trades, /train) ──
     if cmd == "/learn":
         if args_lower.strip() in ("train", "calibrate", "fit"):
             cmd = "/train"
         else:
             if LEARNING_AVAILABLE and learning_engine:
+                try:
+                    learning_engine.sync_all_closed_trades(live_broker=live_broker, safety_manager=safety_manager)
+                except Exception as e:
+                    pass
+                trades_card = learning_engine.format_recent_trades_card(limit=3)
                 summary = learning_engine.get_summary_text()
-                send_message(token, sender_id, f"```\n{summary}\n```")
+                send_message(token, sender_id, f"{trades_card}\n\n```\n{summary}\n```\n💡 _To retrain on history: `/learn train` | To view full trade journal: `/trades`_")
             else:
                 send_message(token, sender_id, "⚠️ Self-Learning module not available.")
             return
 
-    if cmd == "/train":
-        send_message(token, sender_id, "🧠 Initiating walk-forward self-calibration across past 180 days...")
+    if cmd in ("/trades", "/recent_trades", "/history"):
         if LEARNING_AVAILABLE and learning_engine:
+            try:
+                learning_engine.sync_all_closed_trades(live_broker=live_broker, safety_manager=safety_manager)
+            except Exception as e:
+                pass
+            trades_card = learning_engine.format_recent_trades_card(limit=8)
+            send_message(token, sender_id, trades_card)
+        else:
+            send_message(token, sender_id, "⚠️ Trade journal module not available.")
+        return
+
+    if cmd == "/train":
+        send_message(token, sender_id, "🧠 *Initiating institutional walk-forward self-calibration across past 180 days...*\n• Synchronizing recent closed trades first...")
+        if LEARNING_AVAILABLE and learning_engine:
+            try:
+                learning_engine.sync_all_closed_trades(live_broker=live_broker, safety_manager=safety_manager)
+            except Exception as e:
+                pass
             trades, wins = learning_engine.train_on_historical_data(lookback_days=180, verbose=False)
             win_pct = (wins / trades * 100) if trades > 0 else 0
-            send_message(token, sender_id, f"✅ Self-Training complete!\n• Setups Evaluated: `{trades}`\n• Win Rate: `{win_pct:.1f}%`\nType `/learn` to see updated rankings.")
+            send_message(token, sender_id, f"✅ *Self-Training Complete!*\n• Setups Evaluated: `{trades}`\n• Historical Win Rate: `{win_pct:.1f}%` ({wins}W / {trades-wins}L)\n• Type `/learn` or `/trades` to review updated rankings and trade journal.")
         else:
             send_message(token, sender_id, "⚠️ Self-Learning module not available.")
         return
@@ -2514,8 +2521,6 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
         curr_mode = safety_manager.get_trading_mode() if RISK_ENGINE_AVAILABLE else "PAPER"
         kill_act, _ = safety_manager.is_kill_switch_active() if RISK_ENGINE_AVAILABLE else (False, "")
         kill_str = "LOCKED 🚨 (Halted)" if kill_act else "ARMED ✅"
-        g_lock = "LOCKED 🔒 (/unlock_gold)" if is_setup_locked("GOLD") else "IDLE 🟢"
-        b_lock = "LOCKED 🔒 (/unlock_btc)" if is_setup_locked("BTC") else "IDLE 🟢"
 
         status_msg = (
             f"🤖 *SYSTEM & ENGINE HEALTH*\n"
@@ -2524,8 +2529,8 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             f"• Emergency Kill-Switch   : `{kill_str}`\n"
             f"• Daily Loss Circuit Brk  : `ARMED ✅ (-2.0% daily halt)`\n"
             f"• Max Open Positions Cap  : `2 Positions Max`\n"
-            f"• 1-Minute Candle Scanner : `ACTIVE (Every 60s)` 🟢\n"
-            f"• Scanner Setup Locks     : Gold: `{g_lock}` | BTC: `{b_lock}`\n"
+            f"• 1-Minute Candle Scanner : `ACTIVE & CONTINUOUS (Every 60s)` 🟢\n"
+            f"• Anti-Spam Protection    : `Intelligent Deduplication (15m window, zero locks)`\n"
             f"• MT5 Broker Connection   : `{broker_line}`\n"
             f"• Live Account Equity     : `{eq_line}`\n"
             f"• Active Strategy         : `{strat['name']}` (`{strat['code']}`) 🎯\n"

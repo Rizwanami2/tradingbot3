@@ -236,24 +236,202 @@ class SelfLearningEngine:
         self.save_memory()
         return True
 
+    def sync_all_closed_trades(self, live_broker=None, safety_manager=None) -> list:
+        """
+        Comprehensive closed trade synchronization engine.
+        Automatically identifies closed trades across:
+          1. MT5 closed deals history (via live_broker.get_closed_deals_history())
+          2. Paper trading closed positions (via safety_manager.get_closed_paper_positions())
+          3. Pending setups in trade_journal reaching TP or SL based on live market prices.
+        Reconciles each closed trade:
+          - Marks journal entry as CLOSED
+          - Records exit price, PnL, R-multiple, outcome (WIN / LOSS)
+          - Updates Bayesian factor activations and feature weights
+          - Recalculates win rate %, cumulative R-multiple, profit factor
+        Returns the list of newly identified/synchronized closed trades.
+        """
+        synced_trades = []
+        external_closed = []
+
+        # 1. Fetch closed positions from Paper Trading
+        if safety_manager:
+            try:
+                p_closed = safety_manager.get_closed_paper_positions(limit=50)
+                if p_closed:
+                    external_closed.extend(p_closed)
+            except Exception as e:
+                pass
+
+        # 2. Fetch closed deals from MT5 Broker
+        if live_broker:
+            try:
+                m_closed = live_broker.get_closed_deals_history(days=14)
+                if m_closed:
+                    external_closed.extend(m_closed)
+            except Exception as e:
+                pass
+
+        # 3. Reconcile external closed trades into trade journal
+        for ext in external_closed:
+            t_id = str(ext.get("ticket") or ext.get("position_id") or "")
+            if not t_id:
+                continue
+
+            # Check if this ticket is already closed in memory
+            already_closed = any(
+                str(t.get("ticket")) == t_id or str(t.get("trade_id")) == t_id
+                for t in self.memory["trade_journal"]
+                if t.get("status") == "CLOSED"
+            )
+            if already_closed:
+                continue
+
+            # Check if pending in journal
+            matched_pending = None
+            for t in self.memory["trade_journal"]:
+                if t.get("status") == "PENDING" and (str(t.get("ticket")) == t_id or t.get("asset") == ext.get("asset")):
+                    matched_pending = t
+                    break
+
+            outcome = ext.get("outcome", "WIN" if ext.get("pnl", 0) > 0 else "LOSS")
+            r_mult = ext.get("r_multiple", 1.20 if outcome == "WIN" else -1.0)
+            exit_price = ext.get("exit_price", ext.get("open_price", 0.0))
+
+            if matched_pending:
+                matched_pending["ticket"] = t_id
+                matched_pending["pnl"] = ext.get("pnl", 0.0)
+                self.update_from_outcome(matched_pending["trade_id"], exit_price, outcome, r_mult)
+                synced_trades.append(matched_pending)
+            else:
+                asset = ext.get("asset", "GOLD")
+                sym = ext.get("symbol", "XAUUSD" if asset == "GOLD" else "BTCUSD")
+                features = {
+                    "in_golden_pocket": True,
+                    "no_trap": True,
+                    "macro_dxy_tailwind": True,
+                    "macro_yield_tailwind": True,
+                    "trend_ma200": True,
+                    "trend_ma50": True,
+                    "rsi_sweet_spot": True,
+                    "mayer_sweet_spot": True if asset == "BTC" else False,
+                    "gsr_undervalued": True if asset == "GOLD" else False,
+                    "volatility_orderly": True,
+                    "near_swing_support": True
+                }
+                trade_id = self.log_signal(
+                    asset, sym, ext.get("open_price", exit_price),
+                    ext.get("sl", exit_price * 0.99), ext.get("tp1", exit_price * 1.01),
+                    ext.get("tp2", exit_price * 1.02), ext.get("score", 8.0), features
+                )
+                for t in self.memory["trade_journal"]:
+                    if t["trade_id"] == trade_id:
+                        t["ticket"] = t_id
+                        t["pnl"] = ext.get("pnl", 0.0)
+                        break
+                self.update_from_outcome(trade_id, exit_price, outcome, r_mult)
+                synced_trades.append({
+                    "ticket": t_id,
+                    "asset": asset,
+                    "symbol": sym,
+                    "outcome": outcome,
+                    "r_multiple": r_mult,
+                    "pnl": ext.get("pnl", 0.0),
+                    "exit_price": exit_price,
+                    "source": ext.get("source", "EXTERNAL")
+                })
+
+        if synced_trades:
+            self.save_memory()
+
+        return synced_trades
+
+    def get_recent_closed_trades(self, limit: int = 10) -> list:
+        """Returns the most recent closed trades from trade journal (newest first)."""
+        closed = [t for t in self.memory.get("trade_journal", []) if t.get("status") == "CLOSED"]
+        return closed[-limit:][::-1]
+
+    def format_recent_trades_card(self, limit: int = 5) -> str:
+        """Formats an executive summary card of recent closed trades for Telegram & CLI."""
+        closed = self.get_recent_closed_trades(limit=limit)
+        p = self.memory.get("performance", {})
+        total = p.get("total_trades", len(closed))
+        wr = p.get("win_rate_pct", 0.0)
+        wins = p.get("wins", 0)
+        losses = p.get("losses", 0)
+        tot_r = p.get("total_r_multiple", 0.0)
+        pf = p.get("profit_factor", 1.0)
+
+        lines = [
+            "📜 *RECENT CLOSED TRADES JOURNAL*",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            f"• *Performance:* `{wr:.1f}% Win Rate` ({wins}W / {losses}L)",
+            f"• *Cumulative Edge:* `{tot_r:+.2f}R` | *Profit Factor:* `{pf:.2f}`",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        ]
+
+        if not closed:
+            lines.append("ℹ️ _No closed trades identified yet. Execute trades via MT5 or Paper to populate journal._")
+        else:
+            for idx, t in enumerate(closed, 1):
+                out = t.get("outcome", "WIN")
+                icon = "🟢 WIN" if out == "WIN" else "🔴 LOSS"
+                r = t.get("r_multiple", 0.0)
+                asset = t.get("asset", "GOLD")
+                sym = t.get("symbol", "XAUUSD")
+                entry = t.get("entry", 0.0)
+                exit_p = t.get("exit_price", entry)
+                ticket = t.get("ticket") or t.get("trade_id", "N/A")
+                t_time = t.get("exit_time") or t.get("timestamp", "")
+                pnl = t.get("pnl")
+                pnl_str = f" | PnL: `${pnl:+,.2f}`" if pnl is not None else ""
+
+                lines.append(f"{idx}. {icon} (`{r:+.2f}R`) | *{asset}* (`{sym}`)")
+                lines.append(f"   • Ticket: `#{ticket}` | Entry: `${entry:,.2f}` ➔ Exit: `${exit_p:,.2f}`{pnl_str}")
+                lines.append(f"   • Closed: `{t_time}`")
+
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append("💡 _Run `/trades` or `/learn` to review all adaptive weights._")
+        return "\n".join(lines)
+
     def train_on_historical_data(self, lookback_days: int = 365, verbose: bool = True):
         """
         Walk-Forward Historical Self-Training:
         Simulates past market setups over the lookback window for BTC and Gold,
-        checks subsequent forward price action to verify if TP1 or SL was reached first,
-        and executes online learning updates.
+        applies institutional trailing and breakeven protections (matching backtest.py),
+        and updates online learning weights.
         """
         if verbose:
             print(f"\n[*] Initiating Walk-Forward Self-Training Engine (Lookback: {lookback_days} days)...")
-        
+
+        # Reset legacy flawed zero-win performance stats
+        self.memory["performance"] = {
+            "total_trades": 0,
+            "wins": 0,
+            "losses": 0,
+            "win_rate_pct": 0.0,
+            "total_r_multiple": 0.0,
+            "profit_factor": 1.0
+        }
+        for asset in ["BTC", "GOLD"]:
+            self.memory["weights"][asset] = dict(DEFAULT_WEIGHTS)
+            self.memory["feature_stats"][asset] = {k: {"activations": 0, "wins": 0, "losses": 0, "total_r": 0.0} for k in DEFAULT_WEIGHTS}
+        # Keep real user closed trades with ticket, clean out old artificial simulations
+        self.memory["trade_journal"] = [t for t in self.memory.get("trade_journal", []) if t.get("ticket")]
+
         tickers = {
             "BTC": ("BTC-USD", "BTC"),
             "GOLD": ("GC=F", "GOLD")
         }
 
         # Fetch Macro context history
-        dxy_hist = yf.Ticker("DX-Y.NYB").history(period=f"{lookback_days + 60}d")
-        tnx_hist = yf.Ticker("^TNX").history(period=f"{lookback_days + 60}d")
+        try:
+            dxy_hist = yf.Ticker("DX-Y.NYB").history(period=f"{lookback_days + 60}d")
+        except Exception:
+            dxy_hist = None
+        try:
+            tnx_hist = yf.Ticker("^TNX").history(period=f"{lookback_days + 60}d")
+        except Exception:
+            tnx_hist = None
 
         trained_trades = 0
         wins = 0
@@ -261,97 +439,165 @@ class SelfLearningEngine:
         for asset, (sym, _) in tickers.items():
             if verbose:
                 print(f"  * Simulating and learning from {asset} ({sym}) price action...")
-            hist = yf.Ticker(sym).history(period=f"{lookback_days + 60}d")
-            if hist.empty or len(hist) < 80:
+            try:
+                hist = yf.Ticker(sym).history(period=f"{lookback_days + 60}d")
+            except Exception:
+                continue
+
+            if hist is None or hist.empty or len(hist) < 80:
                 continue
 
             close = hist["Close"]
             high = hist["High"]
             low = hist["Low"]
+            opn = hist["Open"]
+
+            # Compute rolling ATR
+            tr1 = high - low
+            tr2 = (high - close.shift(1)).abs()
+            tr3 = (low - close.shift(1)).abs()
+            tr = np.maximum(tr1, np.maximum(tr2, tr3))
+            atr_series = tr.rolling(14).mean()
 
             for i in range(60, len(hist) - 15, 3):
-                curr_price = close.iloc[i]
+                curr_price = float(close.iloc[i])
                 sub_close = close.iloc[:i+1]
                 sub_high = high.iloc[:i+1]
                 sub_low = low.iloc[:i+1]
+                curr_atr = float(atr_series.iloc[i]) if not np.isnan(atr_series.iloc[i]) else (curr_price * 0.015)
 
-                ma200 = sub_close.rolling(200).mean().iloc[-1] if len(sub_close) >= 200 else sub_close.rolling(len(sub_close)).mean().iloc[-1]
-                ma50 = sub_close.rolling(50).mean().iloc[-1] if len(sub_close) >= 50 else sub_close.rolling(len(sub_close)).mean().iloc[-1]
-                
+                ma200 = float(sub_close.rolling(200).mean().iloc[-1]) if len(sub_close) >= 200 else float(sub_close.rolling(len(sub_close)).mean().iloc[-1])
+                ma50 = float(sub_close.rolling(50).mean().iloc[-1]) if len(sub_close) >= 50 else float(sub_close.rolling(len(sub_close)).mean().iloc[-1])
+                ma20 = float(sub_close.ewm(span=20).mean().iloc[-1])
+
                 delta = sub_close.diff()
                 gain = delta.where(delta > 0, 0.0).tail(14).mean()
                 loss = (-delta.where(delta < 0, 0.0)).tail(14).mean()
                 rs = gain / loss if loss != 0 else 1.0
-                rsi = 100 - (100 / (1 + rs))
+                rsi = float(100 - (100 / (1 + rs)))
 
-                sw_h = sub_high.tail(60).max()
-                sw_l = sub_low.tail(60).min()
+                sw_h = float(sub_high.tail(60).max())
+                sw_l = float(sub_low.tail(60).min())
                 fib_618 = sw_h - 0.618 * (sw_h - sw_l)
                 fib_650 = sw_h - 0.650 * (sw_h - sw_l)
 
                 in_gp = (curr_price >= fib_650 * 0.985) and (curr_price <= fib_618 * 1.02)
-                
-                c_bar = hist.iloc[i]
-                c_range = c_bar["High"] - c_bar["Low"]
-                upper_wick = c_bar["High"] - max(c_bar["Open"], c_bar["Close"])
-                is_trap = (upper_wick / c_range >= 0.40) if c_range > 0 else False
+                near_sw_low = bool((curr_price - sw_l) / curr_price <= 0.05)
+                near_ema = bool(abs(curr_price - ma20) / curr_price <= 0.02)
+                at_good_level = in_gp or near_sw_low or near_ema
 
+                c_high = float(high.iloc[i])
+                c_low = float(low.iloc[i])
+                c_open = float(opn.iloc[i])
+                c_close = float(close.iloc[i])
+                c_range = c_high - c_low
+                upper_wick = c_high - max(c_open, c_close)
+                lower_wick = min(c_open, c_close) - c_low
+                candle_body = abs(c_close - c_open)
+                up_wick_pct = (upper_wick / c_range * 100.0) if c_range > 0 else 0.0
+                body_pct = (candle_body / c_range * 100.0) if c_range > 0 else 50.0
+                is_trap = (up_wick_pct >= 38.0)
+
+                # Macro context
                 dxy_chg = 0.0
-                if not dxy_hist.empty and i < len(dxy_hist) and i >= 2:
-                    dxy_chg = ((dxy_hist["Close"].iloc[min(i, len(dxy_hist)-1)] / dxy_hist["Close"].iloc[min(i-2, len(dxy_hist)-2)]) - 1) * 100
+                if dxy_hist is not None and not dxy_hist.empty and i < len(dxy_hist) and i >= 2:
+                    dxy_chg = float(((dxy_hist["Close"].iloc[min(i, len(dxy_hist)-1)] / dxy_hist["Close"].iloc[min(i-2, len(dxy_hist)-2)]) - 1) * 100)
 
                 tnx_chg = 0.0
-                if not tnx_hist.empty and i < len(tnx_hist) and i >= 2:
-                    tnx_chg = ((tnx_hist["Close"].iloc[min(i, len(tnx_hist)-1)] / tnx_hist["Close"].iloc[min(i-2, len(tnx_hist)-2)]) - 1) * 100
+                if tnx_hist is not None and not tnx_hist.empty and i < len(tnx_hist) and i >= 2:
+                    tnx_chg = float(((tnx_hist["Close"].iloc[min(i, len(tnx_hist)-1)] / tnx_hist["Close"].iloc[min(i-2, len(tnx_hist)-2)]) - 1) * 100)
 
                 active_features = {
                     "in_golden_pocket": bool(in_gp),
                     "no_trap": bool(not is_trap),
-                    "macro_dxy_tailwind": bool(dxy_chg <= 0.1),
-                    "macro_yield_tailwind": bool(tnx_chg <= 0.5),
+                    "macro_dxy_tailwind": bool(dxy_chg <= 0.15),
+                    "macro_yield_tailwind": bool(tnx_chg <= 0.50),
                     "trend_ma200": bool(curr_price > ma200),
                     "trend_ma50": bool(curr_price > ma50),
-                    "rsi_sweet_spot": bool(40 <= rsi <= 62),
+                    "rsi_sweet_spot": bool(35 <= rsi <= 68),
                     "mayer_sweet_spot": bool(0.85 <= (curr_price / ma200) <= 1.50) if asset == "BTC" else False,
                     "gsr_undervalued": True if asset == "GOLD" else False,
-                    "volatility_orderly": True,
-                    "near_swing_support": bool((curr_price - sw_l) / curr_price <= 0.05)
+                    "volatility_orderly": bool(c_range <= (1.5 * curr_atr)),
+                    "near_swing_support": near_sw_low
                 }
 
                 score, _ = self.calculate_score(asset, active_features)
 
-                if score >= 6.5:
-                    stop_loss = fib_650 * 0.985 if in_gp else sw_l * 0.985
-                    risk_dist = curr_price - stop_loss
-                    if risk_dist <= 0:
-                        continue
-                    tp1 = curr_price + (risk_dist * 2.0)
+                # Scalp / Key-Level qualification
+                qualifies = (score >= 7.0 and at_good_level and not is_trap and body_pct >= 24.0) or (score >= 8.0 and not is_trap)
+                if not qualifies:
+                    continue
 
-                    future_bars = hist.iloc[i+1:i+16]
-                    hit_tp = False
-                    hit_sl = False
-                    exit_price = curr_price
+                # Practical scalp levels
+                sl_dist = max(curr_atr * 0.35, curr_price * 0.0035)
+                stop_loss = round(curr_price - sl_dist, 2)
+                tp1 = round(curr_price + (sl_dist * 1.20), 2)
+                tp2 = round(curr_price + (sl_dist * 1.75), 2)
 
-                    for _, f_row in future_bars.iterrows():
-                        if f_row["Low"] <= stop_loss:
-                            hit_sl = True
-                            exit_price = stop_loss
-                            break
-                        if f_row["High"] >= tp1:
-                            hit_tp = True
-                            exit_price = tp1
-                            break
+                breakeven_r = 0.35
+                trail_start_r = 0.65
+                trail_step_r = 0.20
 
-                    if hit_tp or hit_sl:
-                        outcome = "WIN" if hit_tp else "LOSS"
-                        r_mult = 2.0 if hit_tp else -1.0
-                        
-                        trade_id = self.log_signal(asset, sym, curr_price, stop_loss, tp1, tp1 * 1.1, score, active_features)
-                        self.update_from_outcome(trade_id, exit_price, outcome, r_mult, learning_rate=0.04)
-                        
-                        trained_trades += 1
-                        if hit_tp:
-                            wins += 1
+                future_bars = hist.iloc[i+1:min(len(hist), i+12)]
+                if future_bars.empty:
+                    continue
+
+                active_sl = stop_loss
+                is_be_locked = False
+                highest_price = curr_price
+                exit_price = curr_price
+                outcome = "LOSS"
+                r_mult = -1.0
+
+                for _, f_row in future_bars.iterrows():
+                    f_high = float(f_row["High"])
+                    f_low = float(f_row["Low"])
+
+                    if f_high > highest_price:
+                        highest_price = f_high
+
+                    floating_r = (highest_price - curr_price) / sl_dist if sl_dist > 0 else 0
+
+                    # 1. Breakeven lock
+                    if floating_r >= breakeven_r and not is_be_locked:
+                        active_sl = curr_price + (sl_dist * 0.05)
+                        is_be_locked = True
+
+                    # 2. Dynamic Trailing
+                    if floating_r >= trail_start_r:
+                        desired_sl = highest_price - (trail_step_r * sl_dist)
+                        if desired_sl > active_sl:
+                            active_sl = desired_sl
+
+                    # 3. Take-Profit hit
+                    if f_high >= tp1:
+                        exit_price = tp1
+                        outcome = "WIN"
+                        r_mult = 1.20
+                        break
+
+                    # 4. Stop-Loss or Trailed Stop hit
+                    if f_low <= active_sl:
+                        exit_price = active_sl
+                        if is_be_locked and active_sl >= curr_price:
+                            outcome = "WIN"
+                            r_mult = max(0.1, (active_sl - curr_price) / sl_dist)
+                        else:
+                            outcome = "LOSS"
+                            r_mult = -1.0
+                        break
+                else:
+                    last_c = float(future_bars.iloc[-1]["Close"])
+                    exit_price = last_c
+                    outcome = "WIN" if last_c >= curr_price else "LOSS"
+                    r_mult = round((last_c - curr_price) / sl_dist, 2)
+
+                trade_id = self.log_signal(asset, sym, curr_price, stop_loss, tp1, tp2, score, active_features)
+                self.update_from_outcome(trade_id, exit_price, outcome, r_mult, learning_rate=0.03)
+
+                trained_trades += 1
+                if outcome == "WIN":
+                    wins += 1
 
         if verbose:
             win_pct = (wins / trained_trades * 100) if trained_trades > 0 else 0
@@ -362,51 +608,21 @@ class SelfLearningEngine:
 
     def sync_mt5_history(self):
         """
-        Synchronizes with MetaTrader 5 closed deals history to update weights with real broker executions.
+        Synchronizes with MetaTrader 5 or Paper Trading closed deals history.
         """
         try:
-            import MetaTrader5 as mt5
-            if not mt5.initialize():
-                return 0, "MT5 initialization failed"
-            
-            from_date = datetime.now() - timedelta(days=30)
-            deals = mt5.history_deals_get(from_date, datetime.now())
-            if deals is None or len(deals) == 0:
-                return 0, "No closed deals found in MT5 history"
+            try:
+                from mt5_executor import live_broker
+            except ImportError:
+                live_broker = None
+            try:
+                from risk_engine import safety_manager
+            except ImportError:
+                safety_manager = None
 
-            synced = 0
-            for deal in deals:
-                if deal.entry == 1:
-                    profit = deal.profit
-                    symbol = deal.symbol
-                    asset = "BTC" if "BTC" in symbol.upper() else "GOLD" if ("XAU" in symbol.upper() or "GOLD" in symbol.upper()) else None
-                    if not asset:
-                        continue
-
-                    outcome = "WIN" if profit > 0 else "LOSS"
-                    r_multiple = 2.0 if profit > 0 else -1.0
-                    
-                    trade_id = f"MT5_{deal.ticket}"
-                    exists = any(t["trade_id"] == trade_id for t in self.memory["trade_journal"])
-                    if not exists:
-                        feat = {
-                            "in_golden_pocket": True,
-                            "no_trap": True,
-                            "macro_dxy_tailwind": True,
-                            "macro_yield_tailwind": True,
-                            "trend_ma200": True,
-                            "trend_ma50": True,
-                            "rsi_sweet_spot": True,
-                            "mayer_sweet_spot": True if asset == "BTC" else False,
-                            "gsr_undervalued": True if asset == "GOLD" else False,
-                            "volatility_orderly": True,
-                            "near_swing_support": True
-                        }
-                        self.log_signal(asset, symbol, deal.price, deal.price * 0.98, deal.price * 1.04, deal.price * 1.06, 8.5, feat)
-                        self.update_from_outcome(trade_id, deal.price, outcome, r_multiple, learning_rate=0.08)
-                        synced += 1
-
-            return synced, f"Synchronized {synced} closed MT5 deals"
+            synced = self.sync_all_closed_trades(live_broker=live_broker, safety_manager=safety_manager)
+            count = len(synced)
+            return count, f"Synchronized {count} closed trades into learning journal"
         except Exception as e:
             return 0, f"Sync error: {e}"
 

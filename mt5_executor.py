@@ -23,7 +23,7 @@ if hasattr(sys.stdout, "reconfigure"):
 import os
 import math
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 try:
     import MetaTrader5 as mt5
@@ -788,6 +788,135 @@ class MT5LiveBroker:
             "closed_count": closed,
             "total_pnl": total_pnl
         }
+
+    def get_closed_deals_history(self, days: int = 14) -> list:
+        """
+        Fetches closed deals from MetaTrader 5 deal history or Paper Trading history.
+        Returns a structured list of closed trades:
+          [{"ticket": str, "asset": str, "symbol": str, "action": str, "lots": float,
+            "open_price": float, "exit_price": float, "pnl": float, "r_multiple": float,
+            "outcome": "WIN"|"LOSS", "time": str, "source": "MT5"|"PAPER"}]
+        """
+        mode = safety_manager.get_trading_mode() if safety_manager else "LIVE"
+        if mode == "PAPER":
+            return safety_manager.get_closed_paper_positions(limit=50) if safety_manager else []
+
+        if not self.ensure_connected():
+            return []
+
+        try:
+            from_date = datetime.now() - timedelta(days=days)
+            deals = mt5.history_deals_get(from_date, datetime.now())
+            if deals is None or len(deals) == 0:
+                return []
+
+            results = []
+            for d in deals:
+                # MT5 DEAL_ENTRY_OUT = 1 (exit deal), DEAL_ENTRY_INOUT = 2 (reversal)
+                if getattr(d, "entry", None) in (1, 2):
+                    symbol = d.symbol
+                    asset = "BTC" if "BTC" in symbol.upper() else "GOLD" if ("XAU" in symbol.upper() or "GOLD" in symbol.upper()) else None
+                    if not asset:
+                        continue
+                    # If closing deal was BUY, original position was SELL; if closing deal was SELL, original was BUY
+                    is_buy_exit = d.type == mt5.DEAL_TYPE_BUY
+                    action = "SELL" if is_buy_exit else "BUY"
+                    pnl = float(d.profit)
+                    outcome = "WIN" if pnl > 0 else "LOSS"
+                    r_mult = 1.20 if pnl > 0 else -1.0
+
+                    results.append({
+                        "ticket": str(d.ticket),
+                        "position_id": str(getattr(d, "position_id", d.ticket)),
+                        "asset": asset,
+                        "symbol": symbol,
+                        "action": action,
+                        "lots": float(d.volume),
+                        "open_price": float(d.price),
+                        "exit_price": float(d.price),
+                        "pnl": round(pnl, 2),
+                        "r_multiple": r_mult,
+                        "outcome": outcome,
+                        "time": datetime.fromtimestamp(d.time).strftime("%Y-%m-%d %H:%M:%S") if d.time else "",
+                        "source": "MT5"
+                    })
+            return results
+        except Exception as e:
+            print(f"[!] Error fetching MT5 closed deals: {e}")
+            return []
+
+    def close_position(self, ticket: str | int, exit_price: float = None, reason: str = "MANUAL_CLOSE") -> dict:
+        """Closes a single specific position (Paper or MT5)."""
+        str_ticket = str(ticket)
+        mode = safety_manager.get_trading_mode() if safety_manager else "LIVE"
+
+        # 1. Paper Position Close
+        if str_ticket.startswith("PAPER-") or mode == "PAPER":
+            if safety_manager:
+                target_p = None
+                for p in safety_manager.get_paper_positions():
+                    if str(p["ticket"]) == str_ticket:
+                        target_p = p
+                        break
+                price = exit_price or (target_p["open_price"] if target_p else 0.0)
+                return safety_manager.close_paper_position(str_ticket, price, reason=reason)
+            return {"success": False, "error": "SafetyManager unavailable for Paper trade close."}
+
+        # 2. Live MT5 Position Close
+        if not self.ensure_connected():
+            return {"success": False, "error": "MT5 is disconnected."}
+
+        try:
+            num_ticket = int(str_ticket)
+        except ValueError:
+            return {"success": False, "error": f"Invalid MT5 ticket format: {ticket}"}
+
+        positions = mt5.positions_get(ticket=num_ticket)
+        if not positions or len(positions) == 0:
+            return {"success": False, "error": f"Position #{num_ticket} not found in MT5."}
+
+        p = positions[0]
+        symbol = p.symbol
+        tick = mt5.symbol_info_tick(symbol)
+        if not tick:
+            return {"success": False, "error": f"Failed to get price tick for {symbol}"}
+
+        order_type = mt5.ORDER_TYPE_SELL if p.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
+        price = tick.bid if p.type == mt5.ORDER_TYPE_BUY else tick.ask
+
+        req = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "position": p.ticket,
+            "symbol": symbol,
+            "volume": p.volume,
+            "type": order_type,
+            "price": price,
+            "deviation": 35,
+            "magic": 999888,
+            "comment": reason,
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_IOC
+        }
+        res = mt5.order_send(req)
+        if res is None or res.retcode != mt5.TRADE_RETCODE_DONE:
+            for filling in [mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN]:
+                req["type_filling"] = filling
+                res = mt5.order_send(req)
+                if res is not None and res.retcode == mt5.TRADE_RETCODE_DONE:
+                    break
+
+        if res is not None and res.retcode == mt5.TRADE_RETCODE_DONE:
+            if safety_manager:
+                safety_manager.record_pnl(p.profit)
+                safety_manager.log_order_audit({
+                    "event": "POSITION_CLOSED_MT5",
+                    "ticket": p.ticket,
+                    "symbol": symbol,
+                    "pnl_usd": p.profit,
+                    "reason": reason
+                })
+            return {"success": True, "ticket": p.ticket, "closed_pnl": p.profit, "symbol": symbol}
+        return {"success": False, "error": f"MT5 close error code {getattr(res, 'retcode', 'UNKNOWN')}"}
 
     def has_open_position(self, asset: str) -> bool:
         """Returns True if a position for this asset is open in MT5 or Paper."""

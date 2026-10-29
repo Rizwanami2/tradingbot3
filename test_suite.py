@@ -347,7 +347,7 @@ class TestHardAssetProject(unittest.TestCase):
             "/status",
             "/health",
 
-            # Priority Alert Actions & Scanner Lock Hubs
+            # Priority Alert Actions & Scanner Hubs
             "/lock_status",
             "/unlock",
             "/unlock_gold",
@@ -356,7 +356,9 @@ class TestHardAssetProject(unittest.TestCase):
             "/approve_gold",
             "/approve_btc",
             "/ignore_gold",
-            "/ignore_btc"
+            "/ignore_btc",
+            "/trades",
+            "/recent_trades"
         ]
 
         for cmd in test_commands:
@@ -719,18 +721,38 @@ class TestHardAssetProject(unittest.TestCase):
         print("    ✅ Higher Timeframe Bias & Institutional Alignment: ALL PASSED")
 
     def test_11_interactive_alert_approval_and_locks(self):
-        """Verify interactive alert generation, lock/unlock state machine, and approve/ignore workflows."""
-        print("\n[*] 11. Testing Interactive Alert Approval, Inline Callbacks & Scanner Locks...")
+        """Verify zero-lock architecture, anti-spam deduplication, and approve/dismiss workflows."""
+        print("\n[*] 11. Testing Interactive Alert Approval, Inline Callbacks & Anti-Spam Deduplication...")
         token = "TEST_TOKEN"
         sender_id = "12345"
         sender_name = "Trader"
 
-        # 1. Verify clean initial unlock state
+        # 1. Verify zero-lock state (scanner never locks up)
         telegram_bot.clear_all_setups()
         self.assertFalse(telegram_bot.is_setup_locked("GOLD"))
         self.assertFalse(telegram_bot.is_setup_locked("BTC"))
 
-        # 2. Register mock active setup for Gold
+        # 2. Test intelligent anti-spam deduplication without locks
+        first_alert = telegram_bot.should_send_alert("GOLD", "BUY", 2740.0, 8.0, cooldown_seconds=900)
+        self.assertTrue(first_alert)
+
+        # Duplicate alert on same candle (<0.35% price shift within 15m) -> SUPPRESSED
+        dup_alert = telegram_bot.should_send_alert("GOLD", "BUY", 2742.0, 8.0, cooldown_seconds=900)
+        self.assertFalse(dup_alert)
+
+        # Breakout price movement (>0.35% shift) -> DISPATCHED IMMEDIATELY
+        breakout_alert = telegram_bot.should_send_alert("GOLD", "BUY", 2760.0, 8.0, cooldown_seconds=900)
+        self.assertTrue(breakout_alert)
+
+        # 3. Test /lock_status command output
+        self.mock_tg.sent_messages.clear()
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/lock_status")
+        self.assertGreater(len(self.mock_tg.sent_messages), 0)
+        lock_msg = self.mock_tg.sent_messages[0][1]
+        self.assertIn("ZERO LOCKS", lock_msg)
+        self.assertIn("Deduplication", lock_msg)
+
+        # 4. Test format_elite_alert returning interactive reply_markup (NO unlock button)
         now = time.time()
         mock_gold_setup = {
             "asset": "GOLD",
@@ -748,26 +770,15 @@ class TestHardAssetProject(unittest.TestCase):
             "ticket": None,
             "status": "PENDING"
         }
-        telegram_bot.set_active_setup("GOLD", mock_gold_setup)
-        self.assertTrue(telegram_bot.is_setup_locked("GOLD"))
-
-        # 3. Test /lock_status command output
-        self.mock_tg.sent_messages.clear()
-        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/lock_status")
-        self.assertGreater(len(self.mock_tg.sent_messages), 0)
-        lock_msg = self.mock_tg.sent_messages[0][1]
-        self.assertIn("LOCKED", lock_msg)
-        self.assertIn("Gold", lock_msg)
-
-        # 4. Test format_elite_alert returning interactive reply_markup
+        telegram_bot.set_pending_setup("GOLD", mock_gold_setup)
         data = telegram_bot.run_full_pipeline()
         alert_text, markup = telegram_bot.format_elite_alert("GOLD", data, mock_gold_setup, exec_result=None, is_auto_trade=False)
-        self.assertIn("PENDING MANUAL APPROVAL", alert_text)
+        self.assertIn("HIGH-CONFLUENCE SIGNAL", alert_text)
         self.assertIn("inline_keyboard", markup)
         callbacks = [btn["callback_data"] for row in markup["inline_keyboard"] for btn in row]
         self.assertIn("exec_gold", callbacks)
         self.assertIn("ignore_gold", callbacks)
-        self.assertIn("unlock_gold", callbacks)
+        self.assertNotIn("unlock_gold", callbacks)  # Unlock button completely removed!
 
         # 5. Test inline callback click: 'exec_gold' (Approve)
         self.mock_tg.sent_messages.clear()
@@ -781,28 +792,22 @@ class TestHardAssetProject(unittest.TestCase):
         approve_reply = self.mock_tg.sent_messages[0][1]
         self.assertTrue("APPROVED" in approve_reply or "EXECUTED" in approve_reply or "Confirmation" in approve_reply or "Execution Failed" in approve_reply)
 
-        # 6. Test inline callback click: 'unlock_gold'
+        # 6. Test inline callback click: 'ignore_gold' (Dismiss)
         self.mock_tg.sent_messages.clear()
-        cq_unlock = {
+        cq_ignore = {
             "id": "cb_002",
             "from": {"id": int(sender_id), "first_name": sender_name},
-            "data": "unlock_gold"
+            "data": "ignore_gold"
         }
-        telegram_bot.handle_callback_query(token, cq_unlock)
-        self.assertFalse(telegram_bot.is_setup_locked("GOLD"))
+        telegram_bot.handle_callback_query(token, cq_ignore)
+        self.assertIsNone(telegram_bot.get_pending_setup("GOLD"))
 
-        # 7. Test /ignore_btc and /unlock commands
-        mock_btc_setup = {
-            "asset": "BTC", "symbol": "BTC-USD", "entry": 68000.0, "sl": 67700.0, "tp1": 68350.0, "tp2": 68800.0,
-            "lots": 0.05, "risk_usd": 15.0, "score": 8, "time": now, "strategy": "SCALP",
-            "executed": False, "ticket": None, "status": "PENDING"
-        }
-        telegram_bot.set_active_setup("BTC", mock_btc_setup)
-        self.assertTrue(telegram_bot.is_setup_locked("BTC"))
-
+        # 7. Test /unlock command (confirms locks removed)
         self.mock_tg.sent_messages.clear()
-        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/ignore_btc")
-        self.assertFalse(telegram_bot.is_setup_locked("BTC"))
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/unlock")
+        self.assertGreater(len(self.mock_tg.sent_messages), 0)
+        unlock_reply = self.mock_tg.sent_messages[0][1]
+        self.assertIn("Locks Completely Removed", unlock_reply)
 
         # 8. Test auto-executed alert formatting when auto_trade is active
         mock_exec = {"success": True, "mode": "PAPER", "symbol": "GC=F", "lots": 0.05, "price": 2740.0, "ticket": 999888, "sl": 2736.0, "tp": 2744.5}
@@ -810,9 +815,10 @@ class TestHardAssetProject(unittest.TestCase):
         self.assertTrue("AUTO-EXECUTION" in auto_text or "AUTO-PUSH" in auto_text)
         self.assertIn("999888", auto_text)
         auto_callbacks = [btn["callback_data"] for row in auto_markup["inline_keyboard"] for btn in row]
-        self.assertIn("unlock_gold", auto_callbacks)
+        self.assertIn("positions", auto_callbacks)
+        self.assertNotIn("unlock_gold", auto_callbacks)
 
-        print("    ✅ Interactive Alert Approval, Inline Callbacks & Scanner Locks: ALL PASSED")
+        print("    ✅ Interactive Alert Approval, Inline Callbacks & Anti-Spam Deduplication: ALL PASSED")
 
     def test_12_scalp_score_7_execution(self):
         """Verify that SCALP strategy setups with Score >= 7 qualify for execution."""
@@ -991,13 +997,62 @@ class TestHardAssetProject(unittest.TestCase):
         self.assertIn("EXECUTED ON BROKER", alert_text)
         self.assertIn(str(res_exec["ticket"]), alert_text)
         callbacks = [btn["callback_data"] for row in markup["inline_keyboard"] for btn in row]
-        self.assertIn("unlock_gold", callbacks)
+        self.assertIn("positions", callbacks)
         self.assertIn("trail", callbacks)
 
         # Clean up
         risk_engine.safety_manager.close_paper_position(res_exec["ticket"], 2742.0)
         risk_engine.safety_manager.set_trading_mode(orig_mode)
         print("    ✅ Trailing Stop Engine & Auto-Push Pipeline: ALL PASSED")
+
+    def test_14_closed_trades_and_self_learning_sync(self):
+        """Verify closed trades retention, identification, and self-learning synchronization."""
+        print("\n[*] 14. Testing Closed Trades Retention & Self-Learning Synchronization...")
+        token = "TEST_TOKEN"
+        sender_id = "12345"
+        sender_name = "Trader"
+
+        # 1. Execute a paper order
+        order_res = risk_engine.safety_manager.execute_paper_order(
+            asset="GOLD", action="BUY", price=2740.0, stop_loss=2736.0,
+            tp1=2746.0, tp2=2750.0, lots=0.10, risk_usd=40.0, risk_pct=0.40,
+            strategy="SCALP", score=8
+        )
+        self.assertTrue(order_res["success"])
+        ticket = order_res["ticket"]
+
+        # 2. Close the paper order at TP1
+        close_res = risk_engine.safety_manager.close_paper_position(ticket, exit_price=2746.0, reason="TP1_TARGET_HIT")
+        self.assertTrue(close_res["success"])
+        self.assertGreater(close_res["closed_pnl"], 0)
+        self.assertEqual(close_res["outcome"], "WIN")
+
+        # 3. Verify closed position is retained in closed_history
+        history = risk_engine.safety_manager.get_closed_paper_positions(limit=10)
+        self.assertGreater(len(history), 0)
+        last_closed = history[-1]
+        self.assertEqual(last_closed["ticket"], ticket)
+        self.assertEqual(last_closed["outcome"], "WIN")
+        self.assertGreater(last_closed["r_multiple"], 0)
+
+        # 4. Synchronize into Self-Learning Engine
+        synced = telegram_bot.learning_engine.sync_all_closed_trades(safety_manager=risk_engine.safety_manager)
+        self.assertIsInstance(synced, list)
+
+        # 5. Verify recent closed trades card
+        card = telegram_bot.learning_engine.format_recent_trades_card(limit=5)
+        self.assertIn("RECENT CLOSED TRADES JOURNAL", card)
+        self.assertIn("Win Rate", card)
+
+        # 6. Verify Telegram /trades command
+        self.mock_tg.sent_messages.clear()
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/trades")
+        self.assertGreater(len(self.mock_tg.sent_messages), 0)
+        trades_reply = self.mock_tg.sent_messages[0][1]
+        self.assertIn("RECENT CLOSED TRADES JOURNAL", trades_reply)
+
+        print("    ✅ Closed Trades Retention & Self-Learning Sync: ALL PASSED")
+
 
 
 if __name__ == "__main__":
