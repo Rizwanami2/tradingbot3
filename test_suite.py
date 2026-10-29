@@ -1066,6 +1066,119 @@ class TestHardAssetProject(unittest.TestCase):
 
         print("    ✅ Closed Trades Retention & Self-Learning Sync: ALL PASSED")
 
+    def test_15_neuro_symbolic_prediction_and_forensic_council(self):
+        """Verify Neuro-Symbolic Jump-Diffusion Outcome Predictor, 4-Agent Post-Mortem Forensic Council, Bayesian factor penalties, dynamic SL calibration, and Telegram commands."""
+        print("\n[*] 15. Testing Neuro-Symbolic Outcome Predictor & 4-Agent Post-Mortem Council...")
+        import institutional_engine
+        import self_learning
+
+        token = "TEST_TOKEN"
+        sender_id = "12345"
+        sender_name = "Trader"
+
+        # 1. Test 1,000-Path Monte Carlo Jump-Diffusion Simulation
+        predictor = institutional_engine.NeuroSymbolicPredictor()
+        mc_res = predictor.run_monte_carlo_jump_diffusion(
+            current_price=2750.0,
+            sl_price=2742.0,
+            tp_price=2762.0,
+            atr=25.0,
+            action="BUY",
+            num_paths=1000,
+            horizon_steps=60
+        )
+        self.assertIn("mc_hit_rate", mc_res)
+        self.assertIn("mae_predicted", mc_res)
+        self.assertGreater(mc_res["mc_hit_rate"], 0.0)
+        self.assertGreaterEqual(mc_res["mae_predicted"], 0.0)
+
+        # 2. Test Multi-Factor Outcome Prediction Gatekeeper
+        active_feats = {
+            "in_golden_pocket": True,
+            "no_trap": True,
+            "macro_dxy_tailwind": True,
+            "trend_ma200": True
+        }
+        pred = predictor.predict_trade_outcome(
+            asset="GOLD",
+            current_price=2750.0,
+            sl_price=2744.0,
+            tp_price=2760.0,
+            atr=25.0,
+            active_features=active_feats,
+            opposing_levels=[2770.0, 2780.0],
+            action="BUY",
+            is_scalp=True
+        )
+        self.assertIn("win_probability", pred)
+        self.assertIn("expected_value_r", pred)
+        self.assertIn("approved", pred)
+        self.assertIn("badge", pred)
+
+        # 3. Test 4-Agent Post-Mortem Forensic Council
+        council = institutional_engine.ForensicCouncil()
+        trade_rec = {
+            "trade_id": "MOCK-LOSS-999",
+            "asset": "GOLD",
+            "action": "BUY",
+            "entry": 2750.0,
+            "sl": 2744.0,
+            "tp": 2760.0,
+            "exit_price": 2743.20,
+            "exit_reason": "STOP_LOSS_HIT",
+            "features": {"in_golden_pocket": True, "macro_dxy_tailwind": False}
+        }
+        market_data = {
+            "atr": 25.0,
+            "adx": 16.0,
+            "regime": "LOW_VOLATILITY_CHOP",
+            "macro": {"dxy_chg": 0.45, "tnx_chg": 0.85},
+            "levels": {"in_golden_pocket": True, "sw_low": 2740.0}
+        }
+        pm_report = council.conduct_post_mortem(trade_rec, market_data)
+        self.assertIn("agent_findings", pm_report)
+        self.assertIn("root_cause", pm_report)
+        self.assertIn("adaptations", pm_report)
+        self.assertIn("risk_officer", pm_report["agent_findings"])
+
+        # 4. Test Self-Learning Engine Post-Mortem Integration & Dynamic SL Buffer
+        sle = self_learning.SelfLearningEngine()
+        pm_rep, card_text = sle.trigger_post_mortem(trade_rec, market_data)
+        self.assertIn("4-Agent Forensic Council", card_text)
+        self.assertIn("Root Cause", card_text)
+
+        # Dynamic SL buffer should have expanded by 0.15
+        dynamic_buf = sle.get_dynamic_sl_buffer("GOLD")
+        self.assertGreaterEqual(dynamic_buf, 0.15)
+
+        # Post-mortem history retrieval
+        history = sle.get_post_mortem_history(limit=5)
+        self.assertGreater(len(history), 0)
+        last_ticket = history[-1].get("ticket") or history[-1].get("trade_id")
+        self.assertEqual(last_ticket, "MOCK-LOSS-999")
+
+        # 5. Test Dynamic SL Buffer Integration in risk_engine.py
+        strat_calc = risk_engine.calculate_strategy_levels("GOLD", 2750.0, atr=25.0, action="BUY", strategy="SCALP")
+        self.assertIn("dynamic_sl_buffer", strat_calc)
+        self.assertGreaterEqual(strat_calc["dynamic_sl_buffer"], 0.15)
+        self.assertLess(strat_calc["stop_loss"], 2750.0)
+
+        # 6. Test Telegram Commands: /forensics and /predict
+        self.mock_tg.sent_messages.clear()
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/forensics")
+        self.assertGreater(len(self.mock_tg.sent_messages), 0)
+        forensics_reply = "".join([m[1] for m in self.mock_tg.sent_messages])
+        self.assertIn("POST-MORTEM FORENSIC COUNCIL", forensics_reply)
+
+        self.mock_tg.sent_messages.clear()
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/predict gold")
+        self.assertGreater(len(self.mock_tg.sent_messages), 0)
+        predict_reply = "".join([m[1] for m in self.mock_tg.sent_messages])
+        self.assertIn("DIGITAL TWIN FORECAST", predict_reply)
+        self.assertIn("1,000-Path Jump-Diffusion", predict_reply)
+
+        print("    ✅ Neuro-Symbolic Prediction & Forensic Council: ALL PASSED")
+
 
 
 if __name__ == "__main__":

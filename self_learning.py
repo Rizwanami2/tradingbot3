@@ -71,7 +71,12 @@ class SelfLearningEngine:
         if os.path.exists(self.memory_path):
             try:
                 with open(self.memory_path, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    mem = json.load(f)
+                    if "post_mortem_journal" not in mem:
+                        mem["post_mortem_journal"] = []
+                    if "dynamic_sl_buffers" not in mem:
+                        mem["dynamic_sl_buffers"] = {"GOLD": 0.0, "BTC": 0.0}
+                    return mem
             except Exception as e:
                 print(f"[!] Error loading memory file: {e}. Reinitializing default state.")
         
@@ -97,7 +102,9 @@ class SelfLearningEngine:
                 "total_r_multiple": 0.0,
                 "profit_factor": 1.0
             },
-            "trade_journal": []
+            "trade_journal": [],
+            "post_mortem_journal": [],
+            "dynamic_sl_buffers": {"GOLD": 0.0, "BTC": 0.0}
         }
 
     @property
@@ -204,6 +211,13 @@ class SelfLearningEngine:
             p["wins"] += 1
         else:
             p["losses"] += 1
+            # Auto-trigger 4-Agent Post-Mortem Forensic Council on trade stop-out
+            try:
+                from institutional_engine import forensic_council
+                pm_report = forensic_council.conduct_post_mortem(target_trade)
+                self.record_post_mortem(pm_report)
+            except Exception as err:
+                print(f"⚠️ Forensic post-mortem execution error: {err}")
         p["win_rate_pct"] = round((p["wins"] / p["total_trades"]) * 100, 1)
         p["total_r_multiple"] = round(p["total_r_multiple"] + r_multiple, 2)
         
@@ -392,6 +406,85 @@ class SelfLearningEngine:
         lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         lines.append("💡 _Run `/trades` or `/learn` to review all adaptive weights._")
         return "\n".join(lines)
+
+    def trigger_post_mortem(self, trade_rec: dict, market_data: dict = None) -> tuple:
+        """Runs the 4-Agent Forensic Council on a stopped-out trade, saves to memory, and returns (pm_report, card_text)."""
+        try:
+            from institutional_engine import forensic_council
+            pm_report = forensic_council.conduct_post_mortem(trade_rec, current_market=market_data)
+            self.record_post_mortem(pm_report)
+            card = self.format_post_mortem_card(pm_report)
+            return pm_report, card
+        except Exception as err:
+            print(f"⚠️ Error in trigger_post_mortem: {err}")
+            return {}, ""
+
+    def record_post_mortem(self, pm_report: dict):
+        """Records forensic post-mortem analysis and applies dynamic parameter calibrations."""
+        if "post_mortem_journal" not in self.memory:
+            self.memory["post_mortem_journal"] = []
+        if "dynamic_sl_buffers" not in self.memory:
+            self.memory["dynamic_sl_buffers"] = {"GOLD": 0.0, "BTC": 0.0}
+
+        self.memory["post_mortem_journal"].append(pm_report)
+        if len(self.memory["post_mortem_journal"]) > 50:
+            self.memory["post_mortem_journal"] = self.memory["post_mortem_journal"][-50:]
+
+        asset = pm_report.get("asset", "GOLD").upper()
+        adaptations = pm_report.get("adaptations", {})
+
+        # Dynamic SL buffer calibration
+        sl_delta = adaptations.get("sl_buffer_delta", 0.0)
+        if sl_delta > 0:
+            curr_buf = self.memory["dynamic_sl_buffers"].get(asset, 0.0)
+            self.memory["dynamic_sl_buffers"][asset] = round(min(curr_buf + sl_delta, 0.50), 2)
+
+        # Bayesian factor penalty
+        penalized = adaptations.get("penalized_features", [])
+        weights = self.memory["weights"].get(asset, {})
+        for feat in penalized:
+            if feat in weights:
+                weights[feat] = max(round(weights[feat] - 0.08, 4), 0.35)
+
+        self.save_memory()
+        return pm_report
+
+    def get_dynamic_sl_buffer(self, asset: str) -> float:
+        """Returns the dynamic SL buffer multiplier learned from post-mortem forensics (0.0 to 0.50x ATR)."""
+        asset_norm = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
+        return self.memory.get("dynamic_sl_buffers", {}).get(asset_norm, 0.0)
+
+    def get_post_mortem_history(self, limit: int = 5) -> list:
+        """Returns recent post-mortem records (newest first)."""
+        journal = self.memory.get("post_mortem_journal", [])
+        return journal[-limit:][::-1]
+
+    def format_post_mortem_card(self, pm: dict) -> str:
+        """Formats an institutional Telegram debrief card from a post-mortem report."""
+        findings = pm.get("agent_findings", {})
+        adapt = pm.get("adaptations", {})
+        curr_buf = self.get_dynamic_sl_buffer(pm.get("asset", "GOLD"))
+        sl_delta_str = f"+{adapt.get('sl_buffer_delta', 0)}x ATR" if adapt.get('sl_buffer_delta', 0) > 0 else "Unchanged"
+        return (
+            f"🛑 *TRADE STOP-LOSS POST-MORTEM & ADAPTATION AUDIT*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"• Ticket / Setup : `#{pm.get('ticket', 'N/A')}` | `{pm.get('asset')}` ({pm.get('action')})\n"
+            f"• Strategy       : `{pm.get('strategy', 'SCALP')}` | Outcome: `LOSS (-1.0R)`\n"
+            f"• Entry / SL     : `${pm.get('entry', 0.0):,.2f}` ──► SL: `${pm.get('sl', 0.0):,.2f}`\n"
+            f"• Exit Fill      : `${pm.get('exit_price', 0.0):,.2f}` ({pm.get('date', '')})\n\n"
+            f"🕵️ *4-Agent Forensic Council Findings:*\n"
+            f"• 📐 Microstructure : {findings.get('microstructure', 'Normal auction')}\n"
+            f"• 🌐 Macro Radar    : {findings.get('macro', 'Orderly conditions')}\n"
+            f"• 📊 Orderflow FVG  : {findings.get('orderflow', 'Normal orderflow')}\n"
+            f"• 🛡️ Chief Risk Off : *{findings.get('risk_officer', pm.get('root_cause', 'Normal Variance'))}*\n\n"
+            f"🔬 *Primary Root Cause:*\n"
+            f"\"{pm.get('root_cause', 'Normal Structural Stop')}\"\n\n"
+            f"🧠 *Autonomous Adaptations Applied:*\n"
+            f"• Factors Penalized : `{', '.join(adapt.get('penalized_features', ['Confluence Weights']))}`\n"
+            f"• Dynamic SL Buffer : `{sl_delta_str}` (Current: `+{curr_buf:.2f}x ATR`)\n"
+            f"• Memory State      : `Persisted to learning_memory.json` ✅\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        )
 
     def train_on_historical_data(self, lookback_days: int = 365, verbose: bool = True):
         """
@@ -658,6 +751,10 @@ class SelfLearningEngine:
 
         lines.append("=" * 70)
         return "\n".join(lines)
+
+
+# Global Singleton Instance
+self_learning_engine = SelfLearningEngine()
 
 
 if __name__ == "__main__":

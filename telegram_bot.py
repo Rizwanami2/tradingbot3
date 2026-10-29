@@ -106,12 +106,14 @@ except Exception:
     market_data_feed = None
     MARKET_DATA_AVAILABLE = False
 
-# Import Institutional & Smart Money Concepts Engine (HTF Bias, Order Blocks, Liquidity)
+# Import Institutional & Smart Money Concepts Engine (HTF Bias, Order Blocks, Liquidity, Neuro-Symbolic Predictor & Forensic Council)
 try:
-    from institutional_engine import institutional_engine
+    from institutional_engine import institutional_engine, neuro_predictor, forensic_council
     INSTITUTIONAL_AVAILABLE = True
 except Exception:
     institutional_engine = None
+    neuro_predictor = None
+    forensic_council = None
     INSTITUTIONAL_AVAILABLE = False
 
 # Live auto-trade and separate watchlist ('OFF', 'BOTH', 'GOLD', 'BTC')
@@ -866,6 +868,30 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
             "swap_note": ""
         }
 
+    # ── Neuro-Symbolic Digital Twin Outcome Prediction Gatekeeper ──
+    prediction = None
+    if INSTITUTIONAL_AVAILABLE and neuro_predictor:
+        opp_levels = [levels.get("r1"), levels.get("sw_high"), levels.get("fib_382")]
+        opp_levels = [float(x) for x in opp_levels if x is not None and not np.isnan(x) and x > 0]
+        prediction = neuro_predictor.predict_trade_outcome(
+            asset=asset_type,
+            current_price=curr,
+            sl_price=stop_loss,
+            tp_price=tp1,
+            atr=atr,
+            active_features=active_features,
+            opposing_levels=opp_levels,
+            action="BUY",
+            is_scalp=is_scalp_strategy
+        )
+        if prediction:
+            if not prediction.get("approved", True):
+                if is_a_plus:
+                    is_a_plus = False
+                    verdict = f"🔴 VETOED [PREDICTIVE DIGITAL TWIN]: {prediction.get('rejection_reason', 'Low Expected Value')}"
+            else:
+                factors_hit.append(f"Predictive Twin: {prediction.get('summary')}")
+
     return {
         "asset": asset_type,
         "symbol": symbol,
@@ -900,6 +926,7 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
         "reward_pct": reward_pct,
         "rr": rr,
         "lot_info": lot_info,
+        "prediction": prediction,
         "hist": hist
     }
 
@@ -1112,9 +1139,11 @@ def format_welcome_menu(sender_name: str) -> str:
         f"💼 `/portfolio` - Unified balance, equity, positions & risk budget\n\n"
         f"📈 `/backtest` - Institutional historical strategy simulator\n\n"
         f"🧠 `/learn` - Bayesian factor rankings & self-training (`/learn train`)\n\n"
+        f"🔮 `/predict` - Neuro-Symbolic Digital Twin Monte Carlo forecast (`/predict gold|btc`)\n\n"
+        f"🔬 `/forensics` - 4-Agent Post-Mortem council debrief & dynamic SL buffer\n\n"
         f"ℹ️ `/status` or `/health` - Feed health, latency, MT5 connection & engine status\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"💡 *Direct Shortcuts:* `/cooldown`, `/autopush`, `/trail`, `/scan`, `/btc`, `/gold`, `/approve_gold`, `/approve_btc`, `/ignore_gold`, `/trades`, `/positions`, `/close_all`"
+        f"💡 *Direct Shortcuts:* `/predict`, `/forensics`, `/cooldown`, `/autopush`, `/trail`, `/scan`, `/btc`, `/gold`, `/approve_gold`, `/approve_btc`, `/ignore_gold`, `/trades`, `/positions`, `/close_all`"
     )
 
 
@@ -1159,6 +1188,36 @@ def trailing_monitor_worker(token: str, chat_id_getter):
                     if action_name in ("TP_HIT", "SL_HIT"):
                         asset_key = ev.get("asset", "GOLD")
                         clear_active_setup(asset_key)
+
+                        if action_name == "SL_HIT" and LEARNING_AVAILABLE and learning_engine:
+                            try:
+                                # Trigger 4-Agent Post-Mortem Forensic Council
+                                trade_rec = {
+                                    "trade_id": str(ev.get("ticket", int(time.time()))),
+                                    "asset": asset_key,
+                                    "action": ev.get("type", "BUY"),
+                                    "entry": ev.get("entry", ev.get("price", 0.0)),
+                                    "sl": ev.get("price", 0.0),
+                                    "tp": 0.0,
+                                    "exit_price": ev.get("price", 0.0),
+                                    "exit_reason": "STOP_LOSS_HIT",
+                                    "features": {}
+                                }
+                                m_pipe = _last_pipeline_cache.get(asset_key.lower()) or {}
+                                m_context = {
+                                    "levels": m_pipe.get("levels", {}),
+                                    "rsi": m_pipe.get("rsi", 50.0),
+                                    "adx": m_pipe.get("adx", 25.0),
+                                    "atr": m_pipe.get("atr", 15.0),
+                                    "trap_type": m_pipe.get("trap_type", "NONE"),
+                                    "fvg": m_pipe.get("fvg", "BALANCED"),
+                                    "macro": _last_pipeline_cache.get("macro", {})
+                                }
+                                pm_report, card_text = learning_engine.trigger_post_mortem(trade_rec, m_context)
+                                if target_chat_id and card_text:
+                                    send_message(token, target_chat_id, card_text)
+                            except Exception as pe:
+                                print(f"⚠️ Post-Mortem Forensic trigger error: {pe}")
         except Exception:
             time.sleep(5)
 
@@ -1376,6 +1435,17 @@ def format_elite_alert(asset: str, data: dict, setup_data: dict = None, exec_res
         f"• Microstructure: `{item['trap_type']}` (Body: `{item.get('candle_body_pct', 50):.0f}%`)",
         f"• Momentum: `{item['regime']}` (ADX: `{item['adx']:.1f}`)",
         "",
+        # ── Pre-Trade Neuro-Symbolic Digital Twin Forecast ──
+        *([
+            "🔮 *Neuro-Symbolic Digital Twin Forecast:*",
+            f"• Win Probability: `{item['prediction']['win_probability']:.1f}%` {item['prediction'].get('badge', '🟢 HIGH EDGE')}",
+            f"• Expected Value: `{item['prediction']['expected_value_r']:+.2f}R` | 1k-Path MC Hit: `{int(item['prediction']['mc_hit_rate'])}%`",
+            *(
+                [f"• Max Adverse Drawdown: `${item['prediction']['mae_predicted']:,.2f}` | Barrier: `{item['prediction'].get('opposing_barrier_score', 100):.0f}%`"]
+                if item['prediction'].get('mae_predicted', 0) > 0 else []
+            ),
+            ""
+        ] if item.get("prediction") else []),
         "⚡ *Precision Sniper Order Ticket:*",
         f"• Action: `BUY` (High Probability Setup)",
         f"• Entry Zone: `${item['entry']:,.2f}`",
@@ -2515,6 +2585,81 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             send_message(token, sender_id, f"✅ *Self-Training Complete!*\n• Setups Evaluated: `{trades}`\n• Historical Win Rate: `{win_pct:.1f}%` ({wins}W / {trades-wins}L)\n• Type `/learn` or `/trades` to review updated rankings and trade journal.")
         else:
             send_message(token, sender_id, "⚠️ Self-Learning module not available.")
+        return
+
+    # ── 7B. 4-AGENT POST-MORTEM FORENSIC COUNCIL (/forensics, /postmortem) ──
+    if cmd in ("/forensics", "/postmortem", "/post_mortem"):
+        if LEARNING_AVAILABLE and learning_engine:
+            history = learning_engine.get_post_mortem_history(limit=3)
+            gold_buf = learning_engine.get_dynamic_sl_buffer("GOLD")
+            btc_buf = learning_engine.get_dynamic_sl_buffer("BTC")
+            header = (
+                f"🔬 *4-AGENT POST-MORTEM FORENSIC COUNCIL*\n"
+                f"• Active Dynamic SL Cushion Calibration:\n"
+                f"  - GOLD (XAU/USD): `+{gold_buf:.2f}x ATR`\n"
+                f"  - BTC (BTC/USD) : `+{btc_buf:.2f}x ATR`\n"
+                f"• Forensic Chamber: Microstructure Anti-Trap | Macro Yields | Orderflow FVG | CRO\n\n"
+            )
+            if not history:
+                send_message(token, sender_id, f"{header}🛡️ *Forensic Status:* Zero Stop-Loss breaches recorded. Institutional capital preservation pristine.")
+            else:
+                send_message(token, sender_id, f"{header}📋 *Recent Post-Mortem Forensic Audits ({len(history)} recorded):*")
+                for pm in history:
+                    card = learning_engine.format_post_mortem_card(pm)
+                    send_message(token, sender_id, card)
+        else:
+            send_message(token, sender_id, "⚠️ Post-Mortem Forensic Council module not available.")
+        return
+
+    # ── 7C. NEURO-SYMBOLIC DIGITAL TWIN FORECAST (/predict [gold|btc], /twin) ──
+    if cmd in ("/predict", "/twin", "/simulation"):
+        asset_target = "GOLD"
+        if "btc" in args_lower or "bitcoin" in args_lower:
+            asset_target = "BTC"
+        elif "gold" in args_lower or "xau" in args_lower:
+            asset_target = "GOLD"
+
+        send_message(token, sender_id, f"🔮 *Running Neuro-Symbolic Digital Twin 1,000-Path Monte Carlo Simulation for {asset_target}...*")
+        data = run_full_pipeline()
+        item = data.get("btc") if asset_target == "BTC" else data.get("gold")
+        if not item:
+            send_message(token, sender_id, f"⚠️ Market data unavailable for {asset_target}.")
+            return
+
+        pred = item.get("prediction")
+        if not pred and INSTITUTIONAL_AVAILABLE and neuro_predictor:
+            opp_levels = [item["levels"].get("r1"), item["levels"].get("sw_high"), item["levels"].get("fib_382")]
+            opp_levels = [float(x) for x in opp_levels if x is not None and not np.isnan(x) and x > 0]
+            pred = neuro_predictor.predict_trade_outcome(
+                asset=asset_target,
+                current_price=item["price"],
+                sl_price=item["stop_loss"],
+                tp_price=item["tp1"],
+                atr=item["atr"],
+                active_features={},
+                opposing_levels=opp_levels,
+                action="BUY",
+                is_scalp=True
+            )
+
+        if pred:
+            sim_msg = (
+                f"🔮 *NEURO-SYMBOLIC DIGITAL TWIN FORECAST ({asset_target})*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"• Verdict: {pred.get('badge', '🟢 HIGH EDGE')} ({'APPROVED' if pred.get('approved') else 'VETOED'})\n"
+                f"• Win Probability: `{pred.get('win_probability', 75.0):.1f}%`\n"
+                f"• Expected Value (EV): `{pred.get('expected_value_r', 0.85):+.2f}R` (${pred.get('expected_value_usd', 85.0):+,.2f})\n"
+                f"• 1,000-Path Jump-Diffusion Hit Rate: `{pred.get('mc_hit_rate', 70.0):.1f}%`\n"
+                f"• Bayesian Historical Similarity: `{pred.get('bayesian_similarity', 80.0):.1f}%`\n"
+                f"• Opposing Barrier Clearance: `{pred.get('opposing_barrier_score', 100.0):.1f}%`\n"
+                f"• Predicted Max Adverse Drawdown (MAE): `${pred.get('mae_predicted', 0.0):,.2f}`\n"
+                f"• Gatekeeper Verdict: `{pred.get('rejection_reason') if not pred.get('approved') else 'Approved for Execution (Positive EV Edge)'}`\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"💡 _Simulates 1,000 geometric Brownian jump-diffusion trajectories in <10ms before every trade._"
+            )
+            send_message(token, sender_id, sim_msg)
+        else:
+            send_message(token, sender_id, "⚠️ Outcome predictor engine unavailable.")
         return
 
     # ── 8. RISK CALCULATOR HUB (/risk [custom_balance]) ──

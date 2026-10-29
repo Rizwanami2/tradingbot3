@@ -1131,18 +1131,31 @@ def calculate_strategy_levels(asset: str, current_price: float, atr: float = 0.0
 
     target_risk = risk_pct if (risk_pct is not None and risk_pct > 0) else strat.get("risk_pct", 1.0)
     base_atr = atr if atr > 0 else (28.0 if asset_key == "GOLD" else 2200.0)
-    sl_mult = strat["sl_mult"]
+
+    # Dynamic Post-Mortem SL Buffer Calibration (Self-Healing)
+    dynamic_buffer = 0.0
+    try:
+        from self_learning import self_learning_engine
+        dynamic_buffer = self_learning_engine.get_dynamic_sl_buffer(asset_key)
+    except Exception:
+        dynamic_buffer = 0.0
+
+    sl_mult = strat["sl_mult"] + dynamic_buffer
 
     # 1. Strategy-Specific Stop-Loss Distance (Tight, Low Practical Scalping Bounds)
     if asset_key == "GOLD":
         raw_sl_dist = base_atr * sl_mult
         min_bound = 2.40 if strat_key == "SCALP" else 6.00 if strat_key == "SWING" else 3.50
         max_bound = 3.50 if strat_key == "SCALP" else 35.00 if strat_key == "SWING" else 15.00
+        if dynamic_buffer > 0:
+            max_bound += round(base_atr * dynamic_buffer, 2)
         sl_dist = max(min_bound, min(raw_sl_dist, max_bound))
     else:
         raw_sl_dist = base_atr * sl_mult
         min_bound = 190.0 if strat_key == "SCALP" else 800.0 if strat_key == "SWING" else 400.0
         max_bound = 300.0 if strat_key == "SCALP" else 3500.0 if strat_key == "SWING" else 1800.0
+        if dynamic_buffer > 0:
+            max_bound += round(base_atr * dynamic_buffer, 2)
         sl_dist = max(min_bound, min(raw_sl_dist, max_bound))
 
     sl_dist = round(sl_dist, 2)
@@ -1212,7 +1225,8 @@ def calculate_strategy_levels(asset: str, current_price: float, atr: float = 0.0
         "risk_pct": lot_info["actual_risk_pct"],
         "holding_time": strat["holding_time"],
         "win_rate_focus": strat["description"],
-        "swap_note": swap_note
+        "swap_note": swap_note,
+        "dynamic_sl_buffer": dynamic_buffer
     }
 
 
