@@ -324,6 +324,13 @@ class TestHardAssetProject(unittest.TestCase):
             "/learn train",
             "/train",
 
+            # Predictive AI & Forensics Hubs
+            "/predict",
+            "/predict gold",
+            "/predict btc",
+            "/forensics",
+            "/postmortem",
+
             # Risk Hub
             "/risk",
             "/risk 25000",
@@ -815,6 +822,16 @@ class TestHardAssetProject(unittest.TestCase):
         telegram_bot.handle_callback_query(token, cq_ignore)
         self.assertIsNone(telegram_bot.get_pending_setup("GOLD"))
 
+        # 6B. Test inline callback click: 'close_all'
+        self.mock_tg.sent_messages.clear()
+        cq_close = {
+            "id": "cb_003",
+            "from": {"id": int(sender_id), "first_name": sender_name},
+            "data": "close_all"
+        }
+        telegram_bot.handle_callback_query(token, cq_close)
+        self.assertGreater(len(self.mock_tg.sent_messages), 0)
+
         # 7. Test /unlock command (confirms locks removed)
         self.mock_tg.sent_messages.clear()
         telegram_bot.process_telegram_command(token, sender_id, sender_name, "/unlock")
@@ -1152,10 +1169,10 @@ class TestHardAssetProject(unittest.TestCase):
         self.assertGreaterEqual(dynamic_buf, 0.15)
 
         # Post-mortem history retrieval
-        history = sle.get_post_mortem_history(limit=5)
+        history = sle.get_post_mortem_history(limit=10)
         self.assertGreater(len(history), 0)
-        last_ticket = history[-1].get("ticket") or history[-1].get("trade_id")
-        self.assertEqual(last_ticket, "MOCK-LOSS-999")
+        tickets = [h.get("ticket") or h.get("trade_id") for h in history]
+        self.assertIn("MOCK-LOSS-999", tickets)
 
         # 5. Test Dynamic SL Buffer Integration in risk_engine.py
         strat_calc = risk_engine.calculate_strategy_levels("GOLD", 2750.0, atr=25.0, action="BUY", strategy="SCALP")

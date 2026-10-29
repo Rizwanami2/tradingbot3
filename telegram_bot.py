@@ -1109,41 +1109,52 @@ def format_welcome_menu(sender_name: str) -> str:
     trail_st = "ACTIVE 🛡️" if TRAILING_STOP_ENABLED else "DISABLED ⚪"
     curr_mode = safety_manager.get_trading_mode() if RISK_ENGINE_AVAILABLE else "PAPER"
     mode_badge = "⚪ PAPER" if curr_mode == "PAPER" else "🟡 DEMO" if curr_mode == "DEMO" else "🔴 LIVE"
+    gold_buf = learning_engine.get_dynamic_sl_buffer("GOLD") if (LEARNING_AVAILABLE and learning_engine) else 0.0
+    btc_buf = learning_engine.get_dynamic_sl_buffer("BTC") if (LEARNING_AVAILABLE and learning_engine) else 0.0
 
     return (
-        f"⚡ *INSTITUTIONAL QUANTITATIVE HARD-ASSET ENGINE*\n"
+        f"🏛️ *INSTITUTIONAL QUANTITATIVE HARD-ASSET COCKPIT*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"Welcome {sender_name}! High-probability quantitative engine for Gold (`XAU/USD`) & Bitcoin (`BTC/USD`).\n\n"
+        f"Welcome {sender_name}! High-probability quantitative execution engine for Gold (`XAU/USD`) & Bitcoin (`BTC/USD`).\n\n"
         f"🎛️ *System State:*\n"
-        f"• Trading Mode       : `{mode_badge}` (Simulation / Demo / Live)\n"
+        f"• Execution Mode     : `{mode_badge}` (Simulation / Demo / Live)\n"
         f"• Continuous Scanner : `1-MIN CANDLE CLOSE` 🟢\n"
         f"• MT5 Live Broker    : `{mt5_status}` (Auto-Managed Leverage)\n"
         f"• Active Strategy    : `{strat['name']}` (`{strat['code']}`) 🎯\n"
         f"• Auto-Push Mode     : `{auto_desc}`\n"
-        f"• Auto-Trailing & BE : `{trail_st}` (+{strat.get('breakeven_r', 0.35):.2f}R BE / +{strat.get('trail_start_r', 0.65):.2f}R Trail)\n\n"
-        f"🗂️ *MODERN COMMAND HUBS:*\n"
-        f"⚡ `/autopush` (or `/push`) - Automated order push controller (`/autopush on|off|gold|btc`)\n\n"
-        f"🛡️ `/trail` - Automated trailing stop & breakeven hub (`/trail on|off|status`)\n\n"
-        f"📊 `/market` - Institutional analysis & MT5 visual charts\n"
-        f"   └ Options: `/market btc`, `/market gold`, `/market macro`, `/market levels`\n\n"
-        f"⚡ `/trade` - Broker execution & watchlist selector\n"
-        f"   └ Options: `/trade buy gold`, `/trade sell btc`, `/trade close`, `/trade auto [gold|btc|both|off]`\n\n"
-        f"📜 `/trades` - Recent closed trades journal & PnL history\n"
-        f"   └ Options: `/trades`, `/recent_trades`\n\n"
-        f"🛡️ `/safety` - Safety & circuit breaker controller dashboard\n"
-        f"   └ Options: `/mode [paper|demo|live]`, `/enable_live CONFIRM`, `/confirm_trade YES`\n\n"
-        f"🚨 `/kill` - Emergency Kill-Switch: Liquidate all & halt trading\n"
-        f"   └ Options: `/kill_reset CONFIRM` to resume\n\n"
-        f"🎯 `/strategy` - Modular trade strategy selector\n"
-        f"   └ Options: `/strategy scalp`, `/strategy swing`, `/strategy balance`, `/strategy swap`\n\n"
-        f"💼 `/portfolio` - Unified balance, equity, positions & risk budget\n\n"
-        f"📈 `/backtest` - Institutional historical strategy simulator\n\n"
-        f"🧠 `/learn` - Bayesian factor rankings & self-training (`/learn train`)\n\n"
-        f"🔮 `/predict` - Neuro-Symbolic Digital Twin Monte Carlo forecast (`/predict gold|btc`)\n\n"
-        f"🔬 `/forensics` - 4-Agent Post-Mortem council debrief & dynamic SL buffer\n\n"
-        f"ℹ️ `/status` or `/health` - Feed health, latency, MT5 connection & engine status\n"
+        f"• Auto-Trailing & BE : `{trail_st}` (+{strat.get('breakeven_r', 0.35):.2f}R BE / +{strat.get('trail_start_r', 0.65):.2f}R Trail)\n"
+        f"• Dynamic SL Cushion : `GOLD +{gold_buf:.2f}x` | `BTC +{btc_buf:.2f}x ATR` 🛡️\n\n"
+        f"🗂️ *ORGANIZED COMMAND HUBS:*\n\n"
+        f"📊 *Market Radar & Analysis:*\n"
+        f"• `/scan` (or `/market`)   ──► Dual-asset quantitative scan with MT5 visual charts\n"
+        f"• `/gold` & `/btc`         ──► Dedicated single-asset multi-factor quantitative audit\n"
+        f"• `/macro`                 ──► US Dollar (DXY), 10Y Yields (^TNX), GSR & VIX radar\n"
+        f"• `/levels`                ──► Institutional Key Levels, Pivots & Fibonacci Golden Pocket\n"
+        f"• `/traps`                 ──► Wyckoff liquidity sweeps, springs & Fair Value Gaps\n"
+        f"• `/debate`                ──► Adversarial Bull vs. Bear dialectical debate thesis\n\n"
+        f"🔮 *Predictive AI & Self-Healing:*\n"
+        f"• `/predict [gold|btc]`    ──► 1,000-path jump-diffusion Monte Carlo forecast & EV gatekeeper\n"
+        f"• `/forensics`             ──► 4-Agent Post-Mortem Forensic Council debrief & root cause\n"
+        f"• `/learn`                 ──► Bayesian factor rankings & active probability weights\n"
+        f"• `/train`                 ──► Institutional walk-forward self-calibration on history\n"
+        f"• `/trades`                ──► Closed trades journal & realized PnL performance history\n\n"
+        f"⚡ *Execution & Order Controls:*\n"
+        f"• `/trade`                 ──► Execution hub (`/trade buy gold`, `/trade sell btc`)\n"
+        f"• `/autopush` (or `/push`) ──► Automated order push controller (`/autopush on|off|gold|btc`)\n"
+        f"• `/trail`                 ──► Automated profile trailing & breakeven hub (`/trail on|off`)\n"
+        f"• `/approve_gold` / `_btc` ──► One-click manual approval for high-confluence alerts\n"
+        f"• `/close_all`             ──► Immediate close for all open broker/paper positions\n\n"
+        f"🛡️ *Risk Governance & Safety Controls:*\n"
+        f"• `/portfolio`             ──► Unified equity, open positions & risk allocation dashboard\n"
+        f"• `/strategy`              ──► Modular strategy selector (`scalp|swing|balance|swap`)\n"
+        f"• `/safety`                ──► Multi-layer circuit breakers & trading mode controller\n"
+        f"• `/mode [paper|demo|live]`──► Switch execution modes with safety safeguards\n"
+        f"• `/risk [custom_balance]` ──► Dynamic position sizing calculator for target equity\n"
+        f"• `/backtest`              ──► Institutional historical strategy simulator\n"
+        f"• `/kill`                  ──► Emergency Kill-Switch: Liquidate all & halt engine\n"
+        f"• `/status` (or `/health`) ──► Feed health, latency, MT5 connection & engine diagnostics\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"💡 *Direct Shortcuts:* `/predict`, `/forensics`, `/cooldown`, `/autopush`, `/trail`, `/scan`, `/btc`, `/gold`, `/approve_gold`, `/approve_btc`, `/ignore_gold`, `/trades`, `/positions`, `/close_all`"
+        f"💡 _Tap the interactive buttons below or type any command directly._"
     )
 
 
@@ -1368,6 +1379,16 @@ def handle_callback_query(token: str, cq: dict):
         ignore_active_setup(token, sender_id, "GOLD")
     elif data in ("ignore_btc", "dismiss_btc"):
         ignore_active_setup(token, sender_id, "BTC")
+    elif data in ("close_all", "close"):
+        process_telegram_command(token, sender_id, sender_name, "/close_all")
+    elif data in ("buy_gold", "order_buy_gold"):
+        process_telegram_command(token, sender_id, sender_name, "/buy_gold")
+    elif data in ("buy_btc", "order_buy_btc"):
+        process_telegram_command(token, sender_id, sender_name, "/buy_btc")
+    elif data in ("sell_gold", "order_sell_gold"):
+        process_telegram_command(token, sender_id, sender_name, "/sell_gold")
+    elif data in ("sell_btc", "order_sell_btc"):
+        process_telegram_command(token, sender_id, sender_name, "/sell_btc")
     elif data == "unlock_gold":
         unlock_scanners(token, sender_id, "GOLD")
     elif data == "unlock_btc":
@@ -1390,12 +1411,50 @@ def handle_callback_query(token: str, cq: dict):
         process_telegram_command(token, sender_id, sender_name, "/trail off")
     elif data in ("trail", "trail_status"):
         process_telegram_command(token, sender_id, sender_name, "/trail")
+    elif data in ("scan", "market"):
+        process_telegram_command(token, sender_id, sender_name, "/scan")
+    elif data in ("predict", "twin"):
+        process_telegram_command(token, sender_id, sender_name, "/predict")
+    elif data == "predict_gold":
+        process_telegram_command(token, sender_id, sender_name, "/predict gold")
+    elif data == "predict_btc":
+        process_telegram_command(token, sender_id, sender_name, "/predict btc")
+    elif data in ("forensics", "postmortem"):
+        process_telegram_command(token, sender_id, sender_name, "/forensics")
+    elif data in ("trades", "history"):
+        process_telegram_command(token, sender_id, sender_name, "/trades")
+    elif data == "strategy":
+        process_telegram_command(token, sender_id, sender_name, "/strategy")
+    elif data.startswith("strat_"):
+        strat_key = data.replace("strat_", "").lower()
+        process_telegram_command(token, sender_id, sender_name, f"/strategy {strat_key}")
+    elif data.startswith("mode_"):
+        mode_key = data.replace("mode_", "").lower()
+        process_telegram_command(token, sender_id, sender_name, f"/mode {mode_key}")
+    elif data in ("safety", "modes"):
+        process_telegram_command(token, sender_id, sender_name, "/safety")
+    elif data in ("kill", "emergency"):
+        process_telegram_command(token, sender_id, sender_name, "/kill")
+    elif data in ("menu", "start", "help"):
+        process_telegram_command(token, sender_id, sender_name, "/menu")
     elif data == "confirm_trade":
         process_telegram_command(token, sender_id, sender_name, "/confirm_trade YES")
-    elif data == "positions":
+    elif data in ("positions", "portfolio", "account"):
         process_telegram_command(token, sender_id, sender_name, "/positions")
-    elif data == "status":
+    elif data in ("status", "health"):
         process_telegram_command(token, sender_id, sender_name, "/status")
+    elif data in ("macro", "dxy", "yields"):
+        process_telegram_command(token, sender_id, sender_name, "/macro")
+    elif data in ("levels", "fib"):
+        process_telegram_command(token, sender_id, sender_name, "/levels")
+    elif data in ("traps", "fvg"):
+        process_telegram_command(token, sender_id, sender_name, "/traps")
+    elif data in ("debate", "bullbear"):
+        process_telegram_command(token, sender_id, sender_name, "/debate")
+    elif data in ("btc", "bitcoin"):
+        process_telegram_command(token, sender_id, sender_name, "/btc")
+    elif data in ("gold", "xau"):
+        process_telegram_command(token, sender_id, sender_name, "/gold")
 
 
 def format_elite_alert(asset: str, data: dict, setup_data: dict = None, exec_result: dict = None, is_auto_trade: bool = False):
@@ -1676,7 +1735,31 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
     # ── 1. WELCOME & HELP HUB ──
     if cmd in ("/start", "/help", "/menu"):
         welcome = format_welcome_menu(sender_name)
-        send_message(token, sender_id, welcome)
+        welcome_markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "📊 Live Scan", "callback_data": "scan"},
+                    {"text": "🔮 Digital Twin", "callback_data": "predict"}
+                ],
+                [
+                    {"text": "⚡ Auto-Push", "callback_data": "autopush"},
+                    {"text": "🛡️ Trail Hub", "callback_data": "trail"}
+                ],
+                [
+                    {"text": "💼 Portfolio", "callback_data": "positions"},
+                    {"text": "🎯 Strategy", "callback_data": "strategy"}
+                ],
+                [
+                    {"text": "🔬 Forensics", "callback_data": "forensics"},
+                    {"text": "📜 Trades", "callback_data": "trades"}
+                ],
+                [
+                    {"text": "🚨 Kill Switch", "callback_data": "kill"},
+                    {"text": "ℹ️ System Health", "callback_data": "status"}
+                ]
+            ]
+        }
+        send_message(token, sender_id, welcome, reply_markup=welcome_markup)
         return
 
     # ── 2. MODERN MARKET HUB (/market [btc|gold|macro|levels|traps|debate]) ──
@@ -1885,13 +1968,16 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
 
         # Sub-branch: Close All / Liquidate
         if action_mode in ("close", "close_all", "close all"):
-            if not (MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected):
+            curr_mode = safety_manager.get_trading_mode() if safety_manager else "LIVE"
+            if curr_mode != "PAPER" and not (MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected):
                 send_message(token, sender_id, "❌ MT5 is disconnected. Please ensure MT5 terminal is open on VPS.")
+            elif not (MT5_EXECUTOR_AVAILABLE and live_broker):
+                send_message(token, sender_id, "❌ MT5 executor module not available.")
             else:
-                send_message(token, sender_id, "⚠️ Closing all active live MT5 positions...")
+                send_message(token, sender_id, f"⚠️ Closing all active {curr_mode} positions...")
                 res = live_broker.close_all_positions()
                 if res.get("success") and res.get("closed_count", 0) > 0:
-                    send_message(token, sender_id, f"🚨 *EMERGENCY CLOSE-ALL COMPLETED!*\n• Closed: `{res['closed_count']}` positions\n• Total Realized PnL: `${res['total_pnl']:+,.2f}`")
+                    send_message(token, sender_id, f"🚨 *EMERGENCY CLOSE-ALL COMPLETED! [{curr_mode}]*\n• Closed: `{res['closed_count']}` positions\n• Total Realized PnL: `${res['total_pnl']:+,.2f}`")
                 else:
                     send_message(token, sender_id, f"ℹ️ {res.get('msg') or res.get('error', 'No open positions to close.')}")
             return
@@ -2133,21 +2219,37 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             f"   • Profile Risk: `1.00%` | Target Win Rate: `~68-75%`\n"
             f"   • SL: `1.20x ATR` | Targets: `2.5R` / `3.5R`\n"
             f"   • Trail: BE at `+1.00R` | Trail at `+1.50R` (0.70R step)\n"
-            f"   • Accuracy: ADX >= 22 (+DI > -DI), Above 50 & 200 SMA\n\n"
+            f"   • Accuracy: 50/200 Trend alignment, ADX > 22, RSI 35-65\n\n"
             f"3. ⚖️ *BALANCE* (`/strategy balance`)\n"
-            f"   • Profile Risk: `0.75%` | Target Win Rate: `~78-83%`\n"
-            f"   • SL: `0.75x ATR` | Target: `1.8R` to 0.50 Fib Equilibrium\n"
-            f"   • Trail: BE at `+0.60R` | Trail at `+1.05R` (0.35R step)\n"
-            f"   • Accuracy: ADX <= 25 (Chop/Range), Extreme GP/S1 location\n\n"
-            f"4. 🔄 *SWAP* (`/strategy swap`)\n"
             f"   • Profile Risk: `0.75%` | Target Win Rate: `~72-78%`\n"
-            f"   • SL: `0.90x ATR` | Targets: `2.0R` / `3.0R`\n"
-            f"   • Trail: BE at `+0.80R` | Trail at `+1.30R` (0.60R step)\n"
-            f"   • Accuracy: Favorable rollover carry, VIX <= 22, Wed 3x check\n"
+            f"   • SL: `0.75x ATR` | Targets: Equilibrium 0.50 Fib (`1.8R`)\n"
+            f"   • Trail: BE at `+0.50R` | Trail at `+0.85R` (0.40R step)\n"
+            f"   • Accuracy: In Golden Pocket (0.618-0.650) or S/R flip\n\n"
+            f"4. 🔄 *SWAP* (`/strategy swap`)\n"
+            f"   • Profile Risk: `0.75%` | Target Win Rate: `~70-75%`\n"
+            f"   • SL: `0.90x ATR` | Targets: `2.0R` with Positive Carry\n"
+            f"   • Trail: BE at `+0.50R` | Trail at `+1.00R` (0.45R step)\n"
+            f"   • Accuracy: Positive rollover carry financing side only\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Switch anytime: `/strategy scalp`, `/strategy swing`, `/strategy balance`, `/strategy swap`"
+            f"💡 _Tap an option below to switch profile instantly._"
         )
-        send_message(token, sender_id, table)
+        strategy_markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "⚡ Scalp Sniper", "callback_data": "strat_scalp"},
+                    {"text": "🌊 Swing Extension", "callback_data": "strat_swing"}
+                ],
+                [
+                    {"text": "⚖️ Balance Equilibrium", "callback_data": "strat_balance"},
+                    {"text": "🔄 Swap Carry", "callback_data": "strat_swap"}
+                ],
+                [
+                    {"text": "📊 Live Scan", "callback_data": "scan"},
+                    {"text": "🔮 Digital Twin", "callback_data": "predict"}
+                ]
+            ]
+        }
+        send_message(token, sender_id, table, reply_markup=strategy_markup)
         return
 
     # ── MODERN TRADING MODE CONTROLLER (/mode [paper|demo|live]) ──
@@ -2217,6 +2319,7 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
     if cmd in ("/kill", "/killswitch", "/emergency"):
         AUTO_TRADE_MODE = "OFF"
         AUTO_TRADE_LIVE = False
+        set_auto_push_mode("OFF")
         kill_info = safety_manager.trigger_kill_switch("Telegram Emergency Kill Command") if RISK_ENGINE_AVAILABLE else {}
         close_res = live_broker.close_all_positions() if (MT5_EXECUTOR_AVAILABLE and live_broker) else {}
         send_message(token, sender_id, (
@@ -2248,7 +2351,23 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             acc_data = live_broker.get_live_account_data() if (MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected) else None
             eq = acc_data.get("equity") if acc_data else None
             dash = safety_manager.get_safety_dashboard_text(current_equity=eq)
-            send_message(token, sender_id, dash)
+            safety_markup = {
+                "inline_keyboard": [
+                    [
+                        {"text": "⚪ Paper Mode", "callback_data": "mode_paper"},
+                        {"text": "🟡 Demo Mode", "callback_data": "mode_demo"}
+                    ],
+                    [
+                        {"text": "🔴 Live Mode", "callback_data": "mode_live"},
+                        {"text": "🚨 Kill Switch", "callback_data": "kill"}
+                    ],
+                    [
+                        {"text": "💼 Portfolio", "callback_data": "positions"},
+                        {"text": "ℹ️ Health", "callback_data": "status"}
+                    ]
+                ]
+            }
+            send_message(token, sender_id, dash, reply_markup=safety_markup)
         else:
             send_message(token, sender_id, "🛡️ Safety manager unavailable.")
         return
@@ -2288,7 +2407,21 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             else:
                 lines.append("No active open paper positions.")
             lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nSwitch mode anytime: `/mode demo` or `/enable_live CONFIRM`")
-            send_message(token, sender_id, "\n".join(lines))
+            pos_markup = {
+                "inline_keyboard": [
+                    [
+                        {"text": "🛑 Close All Positions", "callback_data": "close_all"}
+                    ] if positions else [
+                        {"text": "📊 Live Scan", "callback_data": "scan"},
+                        {"text": "🔮 Digital Twin", "callback_data": "predict"}
+                    ],
+                    [
+                        {"text": "🛡️ Trail Hub", "callback_data": "trail"},
+                        {"text": "⚡ Auto-Push", "callback_data": "autopush"}
+                    ]
+                ]
+            }
+            send_message(token, sender_id, "\n".join(lines), reply_markup=pos_markup)
             return
 
         if not acc:
@@ -2600,13 +2733,27 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
                 f"  - BTC (BTC/USD) : `+{btc_buf:.2f}x ATR`\n"
                 f"• Forensic Chamber: Microstructure Anti-Trap | Macro Yields | Orderflow FVG | CRO\n\n"
             )
+            forensics_markup = {
+                "inline_keyboard": [
+                    [
+                        {"text": "🔮 Digital Twin", "callback_data": "predict"},
+                        {"text": "📊 Live Scan", "callback_data": "scan"}
+                    ],
+                    [
+                        {"text": "📜 Closed Trades", "callback_data": "trades"},
+                        {"text": "🛡️ Trail Hub", "callback_data": "trail"}
+                    ]
+                ]
+            }
             if not history:
-                send_message(token, sender_id, f"{header}🛡️ *Forensic Status:* Zero Stop-Loss breaches recorded. Institutional capital preservation pristine.")
+                send_message(token, sender_id, f"{header}🛡️ *Forensic Status:* Zero Stop-Loss breaches recorded. Institutional capital preservation pristine.", reply_markup=forensics_markup)
             else:
                 send_message(token, sender_id, f"{header}📋 *Recent Post-Mortem Forensic Audits ({len(history)} recorded):*")
-                for pm in history:
+                for i, pm in enumerate(history):
                     card = learning_engine.format_post_mortem_card(pm)
-                    send_message(token, sender_id, card)
+                    # Attach markup to the final card
+                    mk = forensics_markup if (i == len(history) - 1) else None
+                    send_message(token, sender_id, card, reply_markup=mk)
         else:
             send_message(token, sender_id, "⚠️ Post-Mortem Forensic Council module not available.")
         return
@@ -2657,7 +2804,19 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"💡 _Simulates 1,000 geometric Brownian jump-diffusion trajectories in <10ms before every trade._"
             )
-            send_message(token, sender_id, sim_msg)
+            predict_markup = {
+                "inline_keyboard": [
+                    [
+                        {"text": "🥇 Predict Gold", "callback_data": "predict_gold"},
+                        {"text": "₿ Predict Bitcoin", "callback_data": "predict_btc"}
+                    ],
+                    [
+                        {"text": "📊 Live Scan", "callback_data": "scan"},
+                        {"text": "🔬 Forensics", "callback_data": "forensics"}
+                    ]
+                ]
+            }
+            send_message(token, sender_id, sim_msg, reply_markup=predict_markup)
         else:
             send_message(token, sender_id, "⚠️ Outcome predictor engine unavailable.")
         return
@@ -2737,10 +2896,13 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
         eq_line = f"${acc_data['equity']:,.2f} {acc_data['currency']}" if acc_data else "N/A"
         strat = get_active_strategy() if RISK_ENGINE_AVAILABLE else {"name": "Scalp Sniper", "code": "SCALP"}
         auto_desc = f"ENABLED 🟢 ({AUTO_TRADE_MODE})" if AUTO_TRADE_MODE != "OFF" else "DISABLED ⚪"
+        auto_push_desc = f"ENABLED 🟢 ({AUTO_PUSH_MODE})" if AUTO_PUSH_MODE != "OFF" else "DISABLED ⚪"
         trail_desc = "ACTIVE 🛡️" if TRAILING_STOP_ENABLED else "DISABLED ⚪"
         curr_mode = safety_manager.get_trading_mode() if RISK_ENGINE_AVAILABLE else "PAPER"
         kill_act, _ = safety_manager.is_kill_switch_active() if RISK_ENGINE_AVAILABLE else (False, "")
         kill_str = "LOCKED 🚨 (Halted)" if kill_act else "ARMED ✅"
+        gold_buf = learning_engine.get_dynamic_sl_buffer("GOLD") if (LEARNING_AVAILABLE and learning_engine) else 0.0
+        btc_buf = learning_engine.get_dynamic_sl_buffer("BTC") if (LEARNING_AVAILABLE and learning_engine) else 0.0
 
         status_msg = (
             f"🤖 *SYSTEM & ENGINE HEALTH*\n"
@@ -2755,7 +2917,10 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             f"• Live Account Equity     : `{eq_line}`\n"
             f"• Active Strategy         : `{strat['name']}` (`{strat['code']}`) 🎯\n"
             f"• 1M Auto-Trade Watchlist : `{auto_desc}`\n"
+            f"• 1M Auto-Push Execution  : `{auto_push_desc}`\n"
             f"• Trailing & Breakeven    : `{trail_desc}`\n"
+            f"• Neuro-Symbolic Twin AI  : `{'ONLINE 🟢' if INSTITUTIONAL_AVAILABLE else 'OFFLINE ⚪'}`\n"
+            f"• Dynamic SL Cushion      : `GOLD +{gold_buf:.2f}x | BTC +{btc_buf:.2f}x ATR` 🛡️\n"
             f"• Visual MT5 Charts       : `{'ONLINE 🟢' if CHARTS_AVAILABLE else 'OFFLINE ⚪'}`\n"
             f"• Bayesian Self-Learning  : `{'ONLINE 🟢' if LEARNING_AVAILABLE else 'OFFLINE ⚪'}`\n"
             f"• Server Time             : `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`\n"
@@ -2763,7 +2928,19 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             f"{(market_data_feed.format_health_dashboard() if (MARKET_DATA_AVAILABLE and market_data_feed) else '')}\n"
             f"Send `/safety` for safety limits or `/menu` for commands."
         )
-        send_message(token, sender_id, status_msg)
+        status_markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "📊 Live Scan", "callback_data": "scan"},
+                    {"text": "💼 Portfolio", "callback_data": "positions"}
+                ],
+                [
+                    {"text": "🛡️ Safety Hub", "callback_data": "safety"},
+                    {"text": "🎯 Strategy", "callback_data": "strategy"}
+                ]
+            ]
+        }
+        send_message(token, sender_id, status_msg, reply_markup=status_markup)
         return
 
     # Fallback for unrecognized commands
