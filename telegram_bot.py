@@ -104,6 +104,14 @@ except Exception:
     market_data_feed = None
     MARKET_DATA_AVAILABLE = False
 
+# Import Institutional & Smart Money Concepts Engine (HTF Bias, Order Blocks, Liquidity)
+try:
+    from institutional_engine import institutional_engine
+    INSTITUTIONAL_AVAILABLE = True
+except Exception:
+    institutional_engine = None
+    INSTITUTIONAL_AVAILABLE = False
+
 # Live auto-trade state and separate watchlist ('OFF', 'BOTH', 'GOLD', 'BTC')
 AUTO_TRADE_MODE = "OFF"
 AUTO_TRADE_LIVE = False
@@ -575,6 +583,17 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
 
     active_strat = get_active_strategy() if RISK_ENGINE_AVAILABLE else {"code": "SCALP", "name": "Sniper Scalp"}
 
+    # Higher Timeframe (HTF) Bias Detection (Institutional SMC)
+    htf_bias = institutional_engine.compute_htf_bias(hist, asset_type) if (INSTITUTIONAL_AVAILABLE and institutional_engine) else {
+        "bias": "NEUTRAL", "simple_bias": "Neutral", "summary": "⚪ Neutral", "details": ""
+    }
+    htf_eval = institutional_engine.evaluate_htf_alignment(htf_bias, action="BUY", strategy=active_strat["code"]) if (INSTITUTIONAL_AVAILABLE and institutional_engine) else {
+        "aligned": True, "status": "NEUTRAL", "confluence_delta": 0, "risk_multiplier": 1.0, "veto": False, "display_badge": "⚪ Neutral"
+    }
+
+    if htf_eval.get("confluence_delta", 0) > 0:
+        factors_hit.append(f"HTF Trend: Aligned {htf_bias['simple_bias']} ({htf_bias['summary']})")
+
     # Profile-Specific Strategy Accuracy Verification
     strat_accuracy = {"passed": True, "veto_reasons": []}
     if RISK_ENGINE_AVAILABLE:
@@ -612,10 +631,13 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
                     (levels.get("ma20_ema") and abs(curr - levels["ma20_ema"]) / curr <= 0.02)
     can_execute_scalp = (active_strat["code"] == "SCALP" and final_score >= 7 and at_good_level and strat_accuracy["passed"] and trap_type != "BULL_TRAP")
 
-    # VETO conditions: Anti-Trap & Strategy-Specific Accuracy Filters
+    # VETO conditions: Anti-Trap, HTF Bias & Strategy Accuracy Filters
     if trap_type == "BULL_TRAP":
         is_a_plus = False
         verdict = "🔴 VETOED: Bull Trap at Resistance! Stand Aside or Fade."
+    elif htf_eval.get("veto"):
+        is_a_plus = False
+        verdict = f"🔴 VETOED [HTF BIAS]: {htf_eval['veto_reason']}"
     elif not strat_accuracy["passed"]:
         is_a_plus = False
         verdict = f"🔴 VETOED [{active_strat['code']}]: {strat_accuracy['veto_reasons'][0]}"
@@ -630,7 +652,7 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
         verdict = f"🔴 VETOED (Score: {final_score}/10) - Insufficient Confluence"
 
     account_balance, base_risk = get_risk_config()
-    target_risk = base_risk if is_a_plus else (base_risk * 0.5)
+    target_risk = (base_risk if is_a_plus else (base_risk * 0.5)) * htf_eval.get("risk_multiplier", 1.0)
 
     # Multi-Strategy Parameter Calculation (SCALP, SWING, BALANCE, SWAP)
     if RISK_ENGINE_AVAILABLE:
@@ -682,6 +704,8 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
         "symbol": symbol,
         "price": curr,
         "levels": levels,
+        "htf_bias": htf_bias,
+        "htf_eval": htf_eval,
         "rsi": rsi,
         "atr": atr,
         "adx": adx,
@@ -822,12 +846,14 @@ def format_scan_summary(data: dict) -> str:
         "",
         f"₿ *Bitcoin (BTC-USD):* `${b['price']:,.2f}`",
         f"• Score: `{b['base_score']}/10` (Learned: `{b['adaptive_score']:.1f}/10`) ──► {b['verdict']}",
+        f"• HTF Bias: `{b.get('htf_bias', {}).get('summary', 'Neutral')}`",
         f"• Regime: `{b['regime']}` (ADX: `{b['adx']:.1f}` | DI: +{b.get('plus_di', 0):.0f}/-{b.get('minus_di', 0):.0f})",
         f"• Golden Pocket: {b_gp_str}",
         f"• Microstructure: `{b['trap_type']}` | Body: `{b.get('candle_body_pct', 50):.0f}%`",
         "",
         f"🥇 *Gold (XAU/USD):* `${g['price']:,.2f}`",
         f"• Score: `{g['base_score']}/10` (Learned: `{g['adaptive_score']:.1f}/10`) ──► {g['verdict']}",
+        f"• HTF Bias: `{g.get('htf_bias', {}).get('summary', 'Neutral')}`",
         f"• Regime: `{g['regime']}` (ADX: `{g['adx']:.1f}` | DI: +{g.get('plus_di', 0):.0f}/-{g.get('minus_di', 0):.0f})",
         f"• Golden Pocket: {g_gp_str}",
         f"• Microstructure: `{g['trap_type']}` | Body: `{g.get('candle_body_pct', 50):.0f}%`",
@@ -957,6 +983,7 @@ def format_elite_alert(asset: str, data: dict) -> str:
         f"• Strategy Profile: `{strat.get('name', strat_code)} ({strat_code})` 🎯",
         f"• Win-Rate Edge: `{target_wr}` ({session_info['badge'] if session_info else '🌐'} {session_info['name'] if session_info else 'Active'})",
         f"• Live Price: `${item['price']:,.2f}`",
+        f"• Higher TF Bias: `{item.get('htf_bias', {}).get('summary', 'Aligned')}`",
         f"• Confluence: {'✅ Golden Pocket Active' if lv['in_golden_pocket'] else 'Key S/R Flip Level'}",
         f"• Microstructure: `{item['trap_type']}` (Body: `{item.get('candle_body_pct', 50):.0f}%`)",
         f"• Momentum: `{item['regime']}` (ADX: `{item['adx']:.1f}`)",

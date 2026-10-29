@@ -61,6 +61,14 @@ try:
 except Exception:
     market_data_feed = None
     MARKET_DATA_AVAILABLE = False
+
+# Import Institutional & Smart Money Engine (HTF Bias)
+try:
+    from institutional_engine import institutional_engine
+    INSTITUTIONAL_AVAILABLE = True
+except Exception:
+    institutional_engine = None
+    INSTITUTIONAL_AVAILABLE = False
     learning_engine = None
 
 # Import Multi-Strategy Risk Engine for Practical TP/SL
@@ -102,6 +110,10 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
         hist = t.history(period="350d")
     if hist.empty or len(hist) < 30:
         return None
+
+    htf_bias = institutional_engine.compute_htf_bias(hist, asset_type) if (INSTITUTIONAL_AVAILABLE and institutional_engine) else {
+        "bias": "NEUTRAL", "summary": "⚪ Neutral"
+    }
 
     # STAGE 1: LOCATION & STRUCTURE
     curr = hist["Close"].iloc[-1]
@@ -273,6 +285,7 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
     return {
         "asset": asset_type,
         "symbol": symbol,
+        "htf_bias": htf_bias,
         "price": curr,
         "ma200": ma200,
         "ma50": ma50,
@@ -349,7 +362,9 @@ def run_pipeline():
 
         gp_low, gp_high = res['golden_pocket']
         loc_str = f"✅ INSIDE Golden Pocket (${gp_low:,.0f} - ${gp_high:,.0f})" if res['in_golden_pocket'] else "Outside Golden Pocket"
+        htf_str = res.get('htf_bias', {}).get('summary', 'Neutral')
         print(f"\n{icon} {asset_type} ({sym}) ──► Price: ${res['price']:,.2f}")
+        print(f"   • Higher TF Bias      : {htf_str}")
         print(f"   • Structural Location : {loc_str}")
         print(f"   • Microstructure Trap : {res['trap_state']}")
         print(f"   • Trend & Momentum    : 200 SMA: ${res['ma200']:,.0f} | RSI: {res['rsi']:.1f}" + (f" | Mayer: {res['mayer']:.2f}x" if asset_type == 'BTC' else ""))

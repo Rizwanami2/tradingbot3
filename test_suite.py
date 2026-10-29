@@ -27,6 +27,7 @@ import autotrader_pipeline
 import self_learning
 import telegram_bot
 import market_data
+import institutional_engine
 import numpy as np
 import pandas as pd
 
@@ -617,6 +618,79 @@ class TestHardAssetProject(unittest.TestCase):
         self.assertIn("MULTI-SOURCE MARKET DATA FEED HEALTH", dash)
         self.assertIn("Provider Feed Statistics", dash)
         print("    ✅ Multi-Source Data Feed, Fallbacks, Anomaly Filters & Cache: ALL PASSED")
+
+
+    def test_10_higher_timeframe_bias(self):
+        """Verify Higher Timeframe (HTF) bias detection, swing structure & directional vetoes."""
+        print("\n[*] 10. Testing Higher Timeframe Bias (50/200 EMA & Swing Structure)...")
+        from institutional_engine import institutional_engine, InstitutionalEngine
+
+        engine = InstitutionalEngine(ema_fast_period=50, ema_slow_period=200)
+
+        # 1. Bullish Golden Stack Simulation (Price > 50 EMA > 200 EMA)
+        bull_prices = [100.0 + i * 2.0 for i in range(250)]  # Consistent upward expansion
+        bull_df = pd.DataFrame({
+            "Open": [p - 0.5 for p in bull_prices],
+            "High": [p + 1.0 for p in bull_prices],
+            "Low": [p - 1.0 for p in bull_prices],
+            "Close": bull_prices,
+            "Volume": [1000.0] * len(bull_prices)
+        })
+        bull_res = engine.compute_htf_bias(bull_df, "GOLD")
+        self.assertIn(bull_res["bias"], ("BULLISH", "STRONG_BULLISH"))
+        self.assertEqual(bull_res["simple_bias"], "Bullish")
+        self.assertGreater(bull_res["price"], bull_res["ema50"])
+        self.assertGreater(bull_res["ema50"], bull_res["ema200"])
+
+        # 2. Bearish Death Stack Simulation (Price < 50 EMA < 200 EMA)
+        bear_prices = [500.0 - i * 1.5 for i in range(250)]  # Consistent downward expansion
+        bear_df = pd.DataFrame({
+            "Open": [p + 0.5 for p in bear_prices],
+            "High": [p + 1.0 for p in bear_prices],
+            "Low": [p - 1.0 for p in bear_prices],
+            "Close": bear_prices,
+            "Volume": [1000.0] * len(bear_prices)
+        })
+        bear_res = engine.compute_htf_bias(bear_df, "GOLD")
+        self.assertIn(bear_res["bias"], ("BEARISH", "STRONG_BEARISH"))
+        self.assertEqual(bear_res["simple_bias"], "Bearish")
+        self.assertLess(bear_res["price"], bear_res["ema50"])
+
+        # 3. Directional Alignment & Veto Guardrail Testing
+        # A) BUY + Bullish HTF Bias -> Aligned (+1 Confluence)
+        eval_buy_bull = engine.evaluate_htf_alignment(bull_res, action="BUY", strategy="SCALP")
+        self.assertTrue(eval_buy_bull["aligned"])
+        self.assertEqual(eval_buy_bull["confluence_delta"], 1)
+        self.assertFalse(eval_buy_bull["veto"])
+        self.assertEqual(eval_buy_bull["risk_multiplier"], 1.0)
+
+        # B) BUY + Bearish HTF Bias -> Counter-Trend Warning (Half Size, Confluence -1)
+        eval_buy_bear = engine.evaluate_htf_alignment(bear_res, action="BUY", strategy="SCALP")
+        self.assertFalse(eval_buy_bear["aligned"])
+        self.assertEqual(eval_buy_bear["confluence_delta"], -2)
+        self.assertEqual(eval_buy_bear["risk_multiplier"], 0.5)
+
+        # C) BUY + Strong Bearish HTF Bias for SWING -> Hard VETO
+        eval_swing_veto = engine.evaluate_htf_alignment(bear_res, action="BUY", strategy="SWING")
+        self.assertTrue(eval_swing_veto["veto"])
+        self.assertIn("vetoed", eval_swing_veto["veto_reason"].lower())
+
+        # D) SELL + Bearish HTF Bias -> Aligned (+1 Confluence)
+        eval_sell_bear = engine.evaluate_htf_alignment(bear_res, action="SELL", strategy="SWING")
+        self.assertTrue(eval_sell_bear["aligned"])
+        self.assertEqual(eval_sell_bear["confluence_delta"], 1)
+        self.assertFalse(eval_sell_bear["veto"])
+
+        # 4. Live Pipeline Integration check
+        data = telegram_bot.run_full_pipeline()
+        self.assertIsNotNone(data["btc"].get("htf_bias"))
+        self.assertIsNotNone(data["gold"].get("htf_bias"))
+        self.assertIn(data["btc"]["htf_bias"]["simple_bias"], ("Bullish", "Bearish", "Neutral"))
+        self.assertIn(data["gold"]["htf_bias"]["simple_bias"], ("Bullish", "Bearish", "Neutral"))
+
+        scan_text = telegram_bot.format_scan_summary(data)
+        self.assertIn("HTF Bias", scan_text)
+        print("    ✅ Higher Timeframe Bias & Institutional Alignment: ALL PASSED")
 
 
 if __name__ == "__main__":
