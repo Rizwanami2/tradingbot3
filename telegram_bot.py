@@ -94,6 +94,16 @@ try:
 except Exception:
     BACKTEST_AVAILABLE = False
 
+# Import Multi-Source Market Data Engine (Priority: MT5 -> Yahoo -> Secondary -> Cache)
+try:
+    from market_data import market_data_feed
+    MARKET_DATA_AVAILABLE = True
+    if MT5_EXECUTOR_AVAILABLE and live_broker:
+        market_data_feed.set_broker(live_broker)
+except Exception:
+    market_data_feed = None
+    MARKET_DATA_AVAILABLE = False
+
 # Live auto-trade state and separate watchlist ('OFF', 'BOTH', 'GOLD', 'BTC')
 AUTO_TRADE_MODE = "OFF"
 AUTO_TRADE_LIVE = False
@@ -411,6 +421,9 @@ def fetch_fear_greed():
 
 
 def fetch_macro_context():
+    if MARKET_DATA_AVAILABLE and market_data_feed:
+        return market_data_feed.get_macro_snapshot()
+
     dxy = yf.Ticker("DX-Y.NYB").history(period="5d")
     tnx = yf.Ticker("^TNX").history(period="5d")
     silver = yf.Ticker("SI=F").history(period="5d")
@@ -441,9 +454,12 @@ def fetch_macro_context():
 # ==============================================================================
 
 def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
-    t = yf.Ticker(symbol)
-    hist = t.history(period="350d")
-    if hist.empty or len(hist) < 40:
+    if MARKET_DATA_AVAILABLE and market_data_feed:
+        hist = market_data_feed.get_historical_bars(asset_type, period="350d", min_bars=30)
+    else:
+        t = yf.Ticker(symbol)
+        hist = t.history(period="350d")
+    if hist.empty or len(hist) < 30:
         return None
 
     levels = compute_key_levels(hist)
@@ -883,7 +899,7 @@ def format_welcome_menu(sender_name: str) -> str:
         f"💼 `/portfolio` - Unified balance, equity, positions & risk budget\n\n"
         f"📈 `/backtest` - Institutional historical strategy simulator\n\n"
         f"🧠 `/learn` - Bayesian factor rankings & self-training (`/learn train`)\n\n"
-        f"ℹ️ `/status` - Live server latency, MT5 connection & engine health\n"
+        f"ℹ️ `/status` or `/health` - Feed health, latency, MT5 connection & engine status\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"💡 *Direct Shortcuts:* `/scan`, `/btc`, `/gold`, `/buy_gold`, `/sell_gold`, `/buy_btc`, `/sell_btc`, `/positions`, `/close_all`"
     )
@@ -1813,7 +1829,7 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
         return
 
     # ── 10. STATUS HUB (/status) ──
-    if cmd == "/status":
+    if cmd in ("/status", "/health"):
         acc_data = live_broker.get_live_account_data() if (MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected) else None
         broker_line = f"🟢 Connected (#{acc_data['login']} on {acc_data['broker']})" if acc_data else "⚪ Disconnected (Open MT5 on VPS)"
         eq_line = f"${acc_data['equity']:,.2f} {acc_data['currency']}" if acc_data else "N/A"
@@ -1840,7 +1856,8 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             f"• Visual MT5 Charts       : `{'ONLINE 🟢' if CHARTS_AVAILABLE else 'OFFLINE ⚪'}`\n"
             f"• Bayesian Self-Learning  : `{'ONLINE 🟢' if LEARNING_AVAILABLE else 'OFFLINE ⚪'}`\n"
             f"• Server Time             : `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"{(market_data_feed.format_health_dashboard() if (MARKET_DATA_AVAILABLE and market_data_feed) else '')}\n"
             f"Send `/safety` for safety limits or `/menu` for commands."
         )
         send_message(token, sender_id, status_msg)

@@ -26,6 +26,9 @@ import chart_generator
 import autotrader_pipeline
 import self_learning
 import telegram_bot
+import market_data
+import numpy as np
+import pandas as pd
 
 
 class MockTelegramSender:
@@ -324,8 +327,9 @@ class TestHardAssetProject(unittest.TestCase):
             "/kill",
             "/kill_reset CONFIRM",
 
-            # Status Hub
-            "/status"
+            # Status & Health Hubs
+            "/status",
+            "/health"
         ]
 
         for cmd in test_commands:
@@ -521,6 +525,98 @@ class TestHardAssetProject(unittest.TestCase):
         self.assertIn("Trading Mode", dash)
         self.assertIn("Kill-Switch", dash)
         print("    ✅ Stale Data, Spread/Slippage Guards & Paper Audit: ALL PASSED")
+
+
+    def test_09_multi_source_data_robustness_and_anomalies(self):
+        """Verify Priority 2 multi-source fallback feed, anomaly filters & caching."""
+        print("\n[*] 9. Testing Multi-Source Data Feed, Fallbacks, Anomaly Filters & Cache...")
+        from market_data import MarketDataFeed, market_data_feed
+
+        feed = MarketDataFeed()
+
+        # 1. Live Price Ingestion (Primary or Secondary)
+        btc_price = feed.get_live_price("BTC")
+        self.assertIsNotNone(btc_price)
+        self.assertGreater(btc_price["price"], 20000.0)
+        self.assertIn(btc_price["source"], ("MT5", "YFINANCE", "BINANCE", "COINBASE", "CACHE", "DISK_CACHE"))
+
+        gold_price = feed.get_live_price("GOLD")
+        self.assertIsNotNone(gold_price)
+        self.assertGreater(gold_price["price"], 1800.0)
+        self.assertIn(gold_price["source"], ("MT5", "YFINANCE", "CURRENCY_API", "CACHE", "DISK_CACHE"))
+
+        # 2. Priority Fallback Simulation (Yahoo Down -> Secondary Feed)
+        fallback_feed = MarketDataFeed()
+        fallback_feed._fetch_yfinance_price = lambda asset: None  # Simulate Yahoo failure
+
+        sec_btc = fallback_feed.get_live_price("BTC")
+        self.assertIsNotNone(sec_btc)
+        self.assertIn(sec_btc["source"], ("BINANCE", "COINBASE", "CACHE", "DISK_CACHE"))
+        self.assertGreater(sec_btc["price"], 20000.0)
+
+        sec_gold = fallback_feed.get_live_price("GOLD")
+        self.assertIsNotNone(sec_gold)
+        self.assertIn(sec_gold["source"], ("CURRENCY_API", "CACHE", "DISK_CACHE"))
+        self.assertGreater(sec_gold["price"], 1800.0)
+
+        # 3. Complete Network Blackout Simulation -> Cache Fallback
+        blackout_feed = MarketDataFeed()
+        blackout_feed._fetch_yfinance_price = lambda asset: None
+        blackout_feed._fetch_secondary_price = lambda asset: None
+
+        cached_btc = blackout_feed.get_live_price("BTC")
+        self.assertIsNotNone(cached_btc)
+        self.assertIn(cached_btc["source"], ("CACHE", "DISK_CACHE", "BASELINE"))
+
+        # 4. Anomaly & Extreme Jump Filters
+        self.assertFalse(feed._validate_price("BTC", 999999.0, 80000.0))
+        self.assertFalse(feed._validate_price("BTC", 5000.0, 80000.0))
+        self.assertFalse(feed._validate_price("GOLD", 10000.0, 4000.0))
+        self.assertFalse(feed._validate_price("GOLD", 500.0, 4000.0))
+        self.assertFalse(feed._validate_price("BTC", -50.0, 80000.0))
+        self.assertFalse(feed._validate_price("BTC", np.nan, 80000.0))
+
+        # Single-tick jump > 15% rejection
+        self.assertFalse(feed._validate_price("GOLD", 4800.0, 4000.0))
+        self.assertTrue(feed._validate_price("GOLD", 4020.0, 4000.0))
+
+        # 5. DataFrame Sanitization (NaNs, duplicate index, missing volume)
+        raw_df = pd.DataFrame({
+            "Open": [4000.0, np.nan, 4030.0],
+            "High": [4010.0, 4025.0, 4035.0],
+            "Low": [3990.0, 4005.0, 4020.0],
+            "Close": [4005.0, 4020.0, 4032.0],
+            "Volume": [100.0, np.nan, 200.0]
+        }, index=["2026-10-01", "2026-10-02", "2026-10-03"])
+
+        clean_df = feed._sanitize_dataframe(raw_df)
+        self.assertEqual(len(clean_df), 3)
+        self.assertFalse(clean_df.isnull().any().any())
+        self.assertEqual(clean_df["Open"].iloc[1], 4000.0)    # Forward-filled from row 0
+        self.assertEqual(clean_df["Volume"].iloc[1], 0.0)    # Missing volume zero-filled
+
+        # Duplicate index dropping test
+        dup_df = pd.DataFrame({
+            "Open": [10.0, 12.0], "High": [11.0, 13.0], "Low": [9.0, 11.0],
+            "Close": [10.5, 12.5], "Volume": [5.0, 6.0]
+        }, index=["2026-10-01", "2026-10-01"])
+        clean_dup = feed._sanitize_dataframe(dup_df)
+        self.assertEqual(len(clean_dup), 1)
+
+        # 6. Macro Snapshot
+        macro = feed.get_macro_snapshot()
+        self.assertIn("dxy", macro)
+        self.assertIn("tnx", macro)
+        self.assertIn("vix", macro)
+        self.assertIn("gsr", macro)
+        self.assertIn("fg_val", macro)
+        self.assertGreater(macro["dxy"], 80.0)
+
+        # 7. Feed Health Dashboard
+        dash = feed.format_health_dashboard()
+        self.assertIn("MULTI-SOURCE MARKET DATA FEED HEALTH", dash)
+        self.assertIn("Provider Feed Statistics", dash)
+        print("    ✅ Multi-Source Data Feed, Fallbacks, Anomaly Filters & Cache: ALL PASSED")
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ config_telegram.local.json
 Thumbs.db
 learning_memory.json
 safety_state.json
+market_data_cache.json
 *.jsonl
 
 # Never create or track README files

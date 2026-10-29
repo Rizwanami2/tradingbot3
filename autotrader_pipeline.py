@@ -53,6 +53,14 @@ try:
     learning_engine = SelfLearningEngine()
 except Exception:
     LEARNING_AVAILABLE = False
+
+# Import Multi-Source Market Data Engine
+try:
+    from market_data import market_data_feed
+    MARKET_DATA_AVAILABLE = True
+except Exception:
+    market_data_feed = None
+    MARKET_DATA_AVAILABLE = False
     learning_engine = None
 
 # Import Multi-Strategy Risk Engine for Practical TP/SL
@@ -87,8 +95,11 @@ def fetch_fear_greed():
 
 
 def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg: float, gsr: float, fg_val: int):
-    t = yf.Ticker(symbol)
-    hist = t.history(period="350d")
+    if MARKET_DATA_AVAILABLE and market_data_feed:
+        hist = market_data_feed.get_historical_bars(asset_type, period="350d", min_bars=30)
+    else:
+        t = yf.Ticker(symbol)
+        hist = t.history(period="350d")
     if hist.empty or len(hist) < 30:
         return None
 
@@ -298,20 +309,30 @@ def run_pipeline():
         print(f"  🧠 Self-Learning Adaptive Engine: ACTIVE (Memory: learning_memory.json)")
     print("═" * 78)
 
-    # Global Macro Inputs
-    dxy = yf.Ticker("DX-Y.NYB").history(period="5d")
-    tnx = yf.Ticker("^TNX").history(period="5d")
-    silver = yf.Ticker("SI=F").history(period="5d")
-    gold_5d = yf.Ticker("GC=F").history(period="5d")
+    # Global Macro Inputs (Multi-Source Resilient Feed)
+    if MARKET_DATA_AVAILABLE and market_data_feed:
+        macro = market_data_feed.get_macro_snapshot()
+        dxy_val = macro["dxy"]
+        dxy_chg = macro["dxy_chg"]
+        tnx_val = macro["tnx"]
+        tnx_chg = macro["tnx_chg"]
+        gsr = macro["gsr"]
+        fg_val = macro["fg_val"]
+        fg_label = macro["fg_label"]
+    else:
+        dxy = yf.Ticker("DX-Y.NYB").history(period="5d")
+        tnx = yf.Ticker("^TNX").history(period="5d")
+        silver = yf.Ticker("SI=F").history(period="5d")
+        gold_5d = yf.Ticker("GC=F").history(period="5d")
 
-    dxy_val = dxy["Close"].iloc[-1] if not dxy.empty else 100.0
-    dxy_chg = (((dxy_val / dxy["Close"].iloc[-2]) - 1) * 100) if len(dxy) >= 2 else 0.0
+        dxy_val = dxy["Close"].iloc[-1] if not dxy.empty else 100.0
+        dxy_chg = (((dxy_val / dxy["Close"].iloc[-2]) - 1) * 100) if len(dxy) >= 2 else 0.0
 
-    tnx_val = tnx["Close"].iloc[-1] if not tnx.empty else 4.0
-    tnx_chg = (((tnx_val / tnx["Close"].iloc[-2]) - 1) * 100) if len(tnx) >= 2 else 0.0
+        tnx_val = tnx["Close"].iloc[-1] if not tnx.empty else 4.0
+        tnx_chg = (((tnx_val / tnx["Close"].iloc[-2]) - 1) * 100) if len(tnx) >= 2 else 0.0
 
-    gsr = (gold_5d["Close"].iloc[-1] / silver["Close"].iloc[-1]) if (not gold_5d.empty and not silver.empty) else 80.0
-    fg_val, fg_label = fetch_fear_greed()
+        gsr = (gold_5d["Close"].iloc[-1] / silver["Close"].iloc[-1]) if (not gold_5d.empty and not silver.empty) else 80.0
+        fg_val, fg_label = fetch_fear_greed()
 
     print(f"  MACRO RADAR: DXY: {dxy_val:.2f} ({dxy_chg:+.2f}%) | 10Y Yield: {tnx_val:.2f}% ({tnx_chg:+.2f}%) | GSR: {gsr:.1f}x | F&G: {fg_val} ({fg_label})")
     print("─" * 78)
