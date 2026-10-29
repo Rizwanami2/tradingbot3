@@ -331,6 +331,15 @@ class TestHardAssetProject(unittest.TestCase):
             "/forensics",
             "/postmortem",
 
+            # Omniscient Quantitative Matrix Hubs
+            "/matrix",
+            "/matrix all",
+            "/matrix gold",
+            "/matrix btc",
+            "/matrix agents",
+            "/matrix status",
+            "/omniscient",
+
             # Risk Hub
             "/risk",
             "/risk 25000",
@@ -832,6 +841,17 @@ class TestHardAssetProject(unittest.TestCase):
         telegram_bot.handle_callback_query(token, cq_close)
         self.assertGreater(len(self.mock_tg.sent_messages), 0)
 
+        # 6C. Test inline callback click: 'matrix' & 'matrix_gold'
+        self.mock_tg.sent_messages.clear()
+        cq_mat = {
+            "id": "cb_004",
+            "from": {"id": int(sender_id), "first_name": sender_name},
+            "data": "matrix"
+        }
+        telegram_bot.handle_callback_query(token, cq_mat)
+        self.assertGreater(len(self.mock_tg.sent_messages), 0)
+        self.assertIn("OMNISCIENT QUANTITATIVE MATRIX", self.mock_tg.sent_messages[0][1])
+
         # 7. Test /unlock command (confirms locks removed)
         self.mock_tg.sent_messages.clear()
         telegram_bot.process_telegram_command(token, sender_id, sender_name, "/unlock")
@@ -1195,6 +1215,97 @@ class TestHardAssetProject(unittest.TestCase):
         self.assertIn("1,000-Path Jump-Diffusion", predict_reply)
 
         print("    ✅ Neuro-Symbolic Prediction & Forensic Council: ALL PASSED")
+
+    def test_16_omniscient_quantitative_matrix_and_background_worker(self):
+        """Tests the Omniscient Quantitative Matrix and multi-agent background synergy."""
+        print("\n[*] 16. Testing Omniscient Quantitative Matrix & Multi-Agent Synergy...")
+
+        from institutional_engine import omniscient_matrix, OmniscientQuantitativeMatrix
+        self.assertIsNotNone(omniscient_matrix)
+
+        # 1. Test Dummy & Live Matrix Evaluation
+        token, sender_id, sender_name = "123456:TEST_TOKEN", "12345", "InstitutionalTrader"
+        m_state = omniscient_matrix.get_latest_matrix()
+        self.assertIn("gold", m_state)
+        self.assertIn("btc", m_state)
+        self.assertIn("regime", m_state)
+
+        g_res = m_state["gold"]
+        b_res = m_state["btc"]
+        self.assertGreater(g_res["oci"], 50.0)
+        self.assertGreater(b_res["oci"], 50.0)
+        self.assertEqual(len(g_res["agents"]), 7)
+        self.assertEqual(len(b_res["agents"]), 7)
+
+        # Check all 7 agents exist in the matrix
+        expected_agents = ["macro", "structure", "microstructure", "debate", "neuro_prediction", "risk_volatility", "self_learning"]
+        for ag_code in expected_agents:
+            self.assertIn(ag_code, g_res["agents"])
+            self.assertIn("score", g_res["agents"][ag_code])
+            self.assertIn("vote", g_res["agents"][ag_code])
+
+        # 2. Test Formatters
+        dash = omniscient_matrix.format_matrix_dashboard(m_state)
+        self.assertIn("OMNISCIENT QUANTITATIVE MATRIX", dash)
+        self.assertIn("Cross-Asset Regime", dash)
+        self.assertIn("GOLD (XAU/USD)", dash)
+        self.assertIn("BITCOIN (BTC/USD)", dash)
+
+        deep_dive_gold = omniscient_matrix.format_asset_matrix("GOLD", m_state)
+        self.assertIn("OMNISCIENT MATRIX DEEP DIVE: GOLD", deep_dive_gold)
+        self.assertIn("7 SPECIALIZED AGENT BALLOT AUDITS", deep_dive_gold)
+
+        ballot = omniscient_matrix.format_agents_ballot(m_state)
+        self.assertIn("OMNISCIENT MULTI-AGENT BALLOT COUNCIL", ballot)
+
+        status_txt = omniscient_matrix.format_matrix_status(m_state)
+        self.assertIn("OMNISCIENT QUANTITATIVE MATRIX TELEMETRY", status_txt)
+
+        # 3. Test Background Worker Lifecycle
+        call_count = {"val": 0}
+        def dummy_provider():
+            call_count["val"] += 1
+            return {
+                "macro": {"dxy": 102.0, "dxy_chg": 0.0, "tnx": 4.5, "tnx_chg": 0.0, "vix": 18.0, "gsr": 80.0, "fg_val": 50},
+                "gold": {"price": 2750.0, "atr": 25.0, "adx": 28.0, "candle_body_pct": 65.0, "rr": 1.6, "risk_pct": 1.0},
+                "btc": {"price": 82000.0, "atr": 1500.0, "adx": 30.0, "candle_body_pct": 70.0, "rr": 1.8, "risk_pct": 1.0}
+            }
+
+        custom_matrix = OmniscientQuantitativeMatrix()
+        custom_matrix.start_background_worker(dummy_provider, interval_sec=1)
+        time.sleep(0.1)
+        self.assertTrue(custom_matrix._is_running)
+        custom_matrix.stop_background_worker()
+        self.assertFalse(custom_matrix._is_running)
+
+        # 4. Test Telegram Commands: /matrix, /matrix gold, /matrix btc, /matrix agents, /matrix status
+        self.mock_tg.sent_messages.clear()
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/matrix")
+        self.assertGreater(len(self.mock_tg.sent_messages), 0)
+        self.assertIn("OMNISCIENT QUANTITATIVE MATRIX", self.mock_tg.sent_messages[-1][1])
+
+        self.mock_tg.sent_messages.clear()
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/matrix gold")
+        self.assertGreater(len(self.mock_tg.sent_messages), 0)
+        self.assertIn("OMNISCIENT MATRIX DEEP DIVE: GOLD", self.mock_tg.sent_messages[-1][1])
+
+        self.mock_tg.sent_messages.clear()
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/matrix btc")
+        self.assertGreater(len(self.mock_tg.sent_messages), 0)
+        self.assertIn("OMNISCIENT MATRIX DEEP DIVE: BTC", self.mock_tg.sent_messages[-1][1])
+
+        self.mock_tg.sent_messages.clear()
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/matrix agents")
+        self.assertGreater(len(self.mock_tg.sent_messages), 0)
+        self.assertIn("OMNISCIENT MULTI-AGENT BALLOT COUNCIL", self.mock_tg.sent_messages[-1][1])
+
+        self.mock_tg.sent_messages.clear()
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/matrix status")
+        self.assertGreater(len(self.mock_tg.sent_messages), 0)
+        self.assertIn("OMNISCIENT QUANTITATIVE MATRIX TELEMETRY", self.mock_tg.sent_messages[-1][1])
+
+        print("    ✅ Omniscient Quantitative Matrix & Multi-Agent Synergy: ALL PASSED")
+
 
 
 

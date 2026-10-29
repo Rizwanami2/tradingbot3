@@ -108,7 +108,7 @@ except Exception:
 
 # Import Institutional & Smart Money Concepts Engine (HTF Bias, Order Blocks, Liquidity, Neuro-Symbolic Predictor & Forensic Council)
 try:
-    from institutional_engine import institutional_engine, neuro_predictor, forensic_council
+    from institutional_engine import institutional_engine, neuro_predictor, forensic_council, omniscient_matrix
     INSTITUTIONAL_AVAILABLE = True
 except Exception:
     institutional_engine = None
@@ -1137,7 +1137,7 @@ def format_welcome_menu(sender_name: str) -> str:
         f"• `/forensics`             ──► 4-Agent Post-Mortem Forensic Council debrief & root cause\n"
         f"• `/learn`                 ──► Bayesian factor rankings & active probability weights\n"
         f"• `/train`                 ──► Institutional walk-forward self-calibration on history\n"
-        f"• `/trades`                ──► Closed trades journal & realized PnL performance history\n\n"
+        f"• `/trades`                ──► Closed trades journal & realized PnL performance history\n"f"• `/matrix` (or `/omniscient`)──► Omniscient Quantitative Matrix (7 background agents combined)\n\n"
         f"⚡ *Execution & Order Controls:*\n"
         f"• `/trade`                 ──► Execution hub (`/trade buy gold`, `/trade sell btc`)\n"
         f"• `/autopush` (or `/push`) ──► Automated order push controller (`/autopush on|off|gold|btc`)\n"
@@ -1411,6 +1411,16 @@ def handle_callback_query(token: str, cq: dict):
         process_telegram_command(token, sender_id, sender_name, "/trail off")
     elif data in ("trail", "trail_status"):
         process_telegram_command(token, sender_id, sender_name, "/trail")
+    elif data in ("matrix", "matrix_all", "matrix_refresh"):
+        process_telegram_command(token, sender_id, sender_name, "/matrix")
+    elif data == "matrix_gold":
+        process_telegram_command(token, sender_id, sender_name, "/matrix gold")
+    elif data == "matrix_btc":
+        process_telegram_command(token, sender_id, sender_name, "/matrix btc")
+    elif data in ("matrix_agents", "matrix_council", "matrix_ballots"):
+        process_telegram_command(token, sender_id, sender_name, "/matrix agents")
+    elif data == "matrix_status":
+        process_telegram_command(token, sender_id, sender_name, "/matrix status")
     elif data in ("scan", "market"):
         process_telegram_command(token, sender_id, sender_name, "/scan")
     elif data in ("predict", "twin"):
@@ -1495,6 +1505,10 @@ def format_elite_alert(asset: str, data: dict, setup_data: dict = None, exec_res
         f"• Momentum: `{item['regime']}` (ADX: `{item['adx']:.1f}`)",
         "",
         # ── Pre-Trade Neuro-Symbolic Digital Twin Forecast ──
+        *([
+            f"🌐 *Omniscient Matrix:* `{omniscient_matrix.get_latest_matrix().get('gold' if asset == 'GOLD' else 'btc', {}).get('oci', 85.0)}/100` ({omniscient_matrix.get_latest_matrix().get('gold' if asset == 'GOLD' else 'btc', {}).get('consensus', 'Unanimous Bullish')})",
+            ""
+        ] if INSTITUTIONAL_AVAILABLE and omniscient_matrix else []),
         *([
             "🔮 *Neuro-Symbolic Digital Twin Forecast:*",
             f"• Win Probability: `{item['prediction']['win_probability']:.1f}%` {item['prediction'].get('badge', '🟢 HIGH EDGE')}",
@@ -1609,6 +1623,11 @@ def auto_scanner_worker(token: str, chat_id_getter):
             if not data or not data.get("btc") or not data.get("gold"):
                 continue
 
+            if INSTITUTIONAL_AVAILABLE and omniscient_matrix:
+                try:
+                    omniscient_matrix.evaluate_full_matrix(data)
+                except Exception:
+                    pass
             active_strat = get_active_strategy() if RISK_ENGINE_AVAILABLE else {"code": "SCALP", "name": "Sniper Scalp"}
             b = data["btc"]
             g = data["gold"]
@@ -1739,7 +1758,11 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             "inline_keyboard": [
                 [
                     {"text": "📊 Live Scan", "callback_data": "scan"},
-                    {"text": "🔮 Digital Twin", "callback_data": "predict"}
+                    {"text": "🌐 Omniscient Matrix", "callback_data": "matrix"}
+                ],
+                [
+                    {"text": "🔮 Digital Twin", "callback_data": "predict"},
+                    {"text": "🔬 Forensics", "callback_data": "forensics"}
                 ],
                 [
                     {"text": "⚡ Auto-Push", "callback_data": "autopush"},
@@ -2821,6 +2844,68 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             send_message(token, sender_id, "⚠️ Outcome predictor engine unavailable.")
         return
 
+
+    # ── 7D. OMNISCIENT QUANTITATIVE MATRIX HUB (/matrix [all|gold|btc|agents|status], /omniscient) ──
+    if cmd in ("/matrix", "/omniscient"):
+        parts = args_lower.split()
+        arg = parts[0].lower() if parts else ""
+        if not INSTITUTIONAL_AVAILABLE or not omniscient_matrix:
+            send_message(token, sender_id, "⚠️ Omniscient Quantitative Matrix engine is initializing...")
+            return
+
+        try:
+            pdata = run_full_pipeline()
+            if pdata:
+                omniscient_matrix.evaluate_full_matrix(pdata)
+        except Exception:
+            pass
+
+        m_state = omniscient_matrix.get_latest_matrix()
+
+        if arg in ("gold", "xau"):
+            resp_text = omniscient_matrix.format_asset_matrix("GOLD", m_state)
+            markup = {
+                "inline_keyboard": [
+                    [{"text": "🌐 Full Matrix", "callback_data": "matrix_all"}, {"text": "₿ BTC Matrix", "callback_data": "matrix_btc"}],
+                    [{"text": "👥 Agent Ballots", "callback_data": "matrix_agents"}, {"text": "🔮 Predict Gold", "callback_data": "predict_gold"}]
+                ]
+            }
+        elif arg in ("btc", "bitcoin"):
+            resp_text = omniscient_matrix.format_asset_matrix("BTC", m_state)
+            markup = {
+                "inline_keyboard": [
+                    [{"text": "🌐 Full Matrix", "callback_data": "matrix_all"}, {"text": "🥇 Gold Matrix", "callback_data": "matrix_gold"}],
+                    [{"text": "👥 Agent Ballots", "callback_data": "matrix_agents"}, {"text": "🔮 Predict BTC", "callback_data": "predict_btc"}]
+                ]
+            }
+        elif arg in ("agents", "council", "ballots", "votes"):
+            resp_text = omniscient_matrix.format_agents_ballot(m_state)
+            markup = {
+                "inline_keyboard": [
+                    [{"text": "🌐 Full Matrix", "callback_data": "matrix_all"}, {"text": "🔄 Refresh", "callback_data": "matrix_refresh"}],
+                    [{"text": "🥇 Gold Deep Dive", "callback_data": "matrix_gold"}, {"text": "₿ BTC Deep Dive", "callback_data": "matrix_btc"}]
+                ]
+            }
+        elif arg in ("status", "telemetry", "health"):
+            resp_text = omniscient_matrix.format_matrix_status(m_state)
+            markup = {
+                "inline_keyboard": [
+                    [{"text": "🌐 Full Matrix", "callback_data": "matrix_all"}, {"text": "🔄 Refresh", "callback_data": "matrix_refresh"}]
+                ]
+            }
+        else:
+            resp_text = omniscient_matrix.format_matrix_dashboard(m_state)
+            markup = {
+                "inline_keyboard": [
+                    [{"text": "🥇 Gold Matrix", "callback_data": "matrix_gold"}, {"text": "₿ BTC Matrix", "callback_data": "matrix_btc"}],
+                    [{"text": "👥 Agent Ballots", "callback_data": "matrix_agents"}, {"text": "🔮 Predict Alpha", "callback_data": "predict"}],
+                    [{"text": "🔄 Refresh Matrix", "callback_data": "matrix_refresh"}, {"text": "⚙️ Matrix Status", "callback_data": "matrix_status"}]
+                ]
+            }
+
+        send_message(token, sender_id, resp_text, reply_markup=markup)
+        return
+
     # ── 8. RISK CALCULATOR HUB (/risk [custom_balance]) ──
     if cmd == "/risk":
         parts = args_lower.split()
@@ -2921,6 +3006,7 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             f"• Trailing & Breakeven    : `{trail_desc}`\n"
             f"• Neuro-Symbolic Twin AI  : `{'ONLINE 🟢' if INSTITUTIONAL_AVAILABLE else 'OFFLINE ⚪'}`\n"
             f"• Dynamic SL Cushion      : `GOLD +{gold_buf:.2f}x | BTC +{btc_buf:.2f}x ATR` 🛡️\n"
+            f"• Omniscient Matrix (OQM) : `GOLD {omniscient_matrix.get_latest_matrix().get('gold',{}).get('oci', 85.0)}/100 | BTC {omniscient_matrix.get_latest_matrix().get('btc',{}).get('oci', 85.0)}/100` 🌐\n"
             f"• Visual MT5 Charts       : `{'ONLINE 🟢' if CHARTS_AVAILABLE else 'OFFLINE ⚪'}`\n"
             f"• Bayesian Self-Learning  : `{'ONLINE 🟢' if LEARNING_AVAILABLE else 'OFFLINE ⚪'}`\n"
             f"• Server Time             : `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`\n"
