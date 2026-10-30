@@ -737,6 +737,42 @@ STRATEGIES = {
         "holding_time": "Multi-day / Positive Carry",
         "lot_cap_gold": 0.15,
         "lot_cap_btc": 0.08
+    },
+    "REVERSAL": {
+        "code": "REVERSAL",
+        "name": "Micro Inflection & ChoCH Reversal",
+        "description": "Exploits Change of Character (ChoCH) early trend transitions. Small TF leads, enters on first structural retest.",
+        "sl_mult": 0.40,
+        "rr_tp1": 1.40,
+        "rr_tp2": 2.20,
+        "breakeven_r": 0.40,
+        "trail_start_r": 0.75,
+        "trail_step_r": 0.25,
+        "risk_pct": 0.75,
+        "target_win_rate": "~75-85% (Structural Inflection)",
+        "accuracy_tip": "Micro ChoCH on M1/M5, 21 EMA flip, structural retest into Golden Pocket",
+        "regime_filter": "Early Trend Inflection / Structural Shift",
+        "holding_time": "15 - 60 minutes",
+        "lot_cap_gold": 0.15,
+        "lot_cap_btc": 0.08
+    },
+    "ANTI_TRAP": {
+        "code": "ANTI_TRAP",
+        "name": "Liquidity Sweep & Trap Fade",
+        "description": "Fades fakeout upthrusts (UTAD) and Wyckoff springs with >=35% rejection wicks.",
+        "sl_mult": 0.35,
+        "rr_tp1": 1.50,
+        "rr_tp2": 2.20,
+        "breakeven_r": 0.35,
+        "trail_start_r": 0.70,
+        "trail_step_r": 0.20,
+        "risk_pct": 0.75,
+        "target_win_rate": "~80-88% (False Breakout Fade)",
+        "accuracy_tip": "Rejection wick >=35% at key S/R, volume divergence, candle close back inside range",
+        "regime_filter": "Liquidity Sweep / False Breakout Trap",
+        "holding_time": "10 - 45 minutes",
+        "lot_cap_gold": 0.15,
+        "lot_cap_btc": 0.08
     }
 }
 

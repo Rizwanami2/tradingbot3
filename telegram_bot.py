@@ -108,14 +108,19 @@ except Exception:
     market_data_feed = None
     MARKET_DATA_AVAILABLE = False
 
-# Import Institutional & Smart Money Concepts Engine (HTF Bias, Order Blocks, Liquidity, Neuro-Symbolic Predictor & Forensic Council)
+# Import Institutional & Smart Money Concepts Engine (HTF Bias, MTF Trend Engine, Strategy Orchestrator, Neuro-Symbolic Predictor & Forensic Council)
 try:
-    from institutional_engine import institutional_engine, neuro_predictor, forensic_council, omniscient_matrix
+    from institutional_engine import (
+        institutional_engine, neuro_predictor, forensic_council, omniscient_matrix,
+        mtf_trend_engine, adaptive_strategy_orchestrator, format_multitimeframe_trend_card, format_combined_mtf_card
+    )
     INSTITUTIONAL_AVAILABLE = True
 except Exception:
     institutional_engine = None
     neuro_predictor = None
     forensic_council = None
+    mtf_trend_engine = None
+    adaptive_strategy_orchestrator = None
     INSTITUTIONAL_AVAILABLE = False
 
 # Live auto-trade and separate watchlist ('OFF', 'BOTH', 'GOLD', 'BTC')
@@ -669,7 +674,7 @@ def fetch_macro_context():
 # SKILL 7, 8 & 9: MULTI-FACTOR AUDIT, CONFLUENCE SCORING & RISK SIZING
 # ==============================================================================
 
-def _analyze_single_side(symbol: str, asset_type: str, macro: dict, hist, levels: dict, action: str = "BUY") -> dict:
+def _analyze_single_side(symbol: str, asset_type: str, macro: dict, hist, levels: dict, action: str = "BUY", mtf_trend: dict = None, adapted_strat: dict = None) -> dict:
     curr = levels["curr"]
     ma50 = levels["ma50"]
     ma200 = levels["ma200"]
@@ -850,7 +855,19 @@ def _analyze_single_side(symbol: str, asset_type: str, macro: dict, hist, levels
     free_mrg = acc_data.get("margin_free") if acc_data else None
     swap_info = live_broker.get_swap_rates(asset_type) if (MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected) else None
 
-    active_strat = get_active_strategy() if RISK_ENGINE_AVAILABLE else {"code": "SCALP", "name": "Sniper Scalp"}
+    # Autonomous Strategy Adaptation: Adopt optimal strategy for current market movement
+    if adapted_strat and adapted_strat.get("strategy_code"):
+        active_strat = {
+            "code": adapted_strat["strategy_code"],
+            "name": adapted_strat["strategy_name"],
+            "holding_time": "Adapted to Movement",
+            "sl_mult": adapted_strat.get("sl_multiplier", 0.35),
+            "rr_tp1": adapted_strat.get("target_rr_tp1", 1.40),
+            "rr_tp2": adapted_strat.get("target_rr_tp2", 2.20),
+            "rationale": adapted_strat.get("rationale", "")
+        }
+    else:
+        active_strat = get_active_strategy() if RISK_ENGINE_AVAILABLE else {"code": "SCALP", "name": "Sniper Scalp"}
 
     # Higher Timeframe (HTF) Bias Detection (Institutional SMC)
     htf_bias = institutional_engine.compute_htf_bias(hist, asset_type) if (INSTITUTIONAL_AVAILABLE and institutional_engine) else {
@@ -862,6 +879,25 @@ def _analyze_single_side(symbol: str, asset_type: str, macro: dict, hist, levels
 
     if htf_eval.get("confluence_delta", 0) > 0:
         factors_hit.append(f"HTF Trend: Aligned {htf_bias['simple_bias']} ({htf_bias['summary']})")
+
+    # Multi-Timeframe Trend & Inflection Confluence
+    if mtf_trend:
+        norm_sc = mtf_trend.get("normalized_score", 0.0)
+        mov = mtf_trend.get("market_movement", "")
+        if is_buy and norm_sc >= 0.25:
+            factors_hit.append(f"MTF Alignment: Small-to-High TF Bullish Expansion (+{norm_sc*100:.0f}%)")
+        elif not is_buy and norm_sc <= -0.25:
+            factors_hit.append(f"MTF Alignment: Small-to-High TF Bearish Expansion ({norm_sc*100:.0f}%)")
+        elif mtf_trend.get("shift_detected"):
+            factors_hit.append(f"Market Movement: {mtf_trend.get('movement_badge')}")
+
+        # Veto counter-inflection trades
+        if is_buy and mov == "EARLY_BEARISH_REVERSAL":
+            factors_hit = [f for f in factors_hit if not f.startswith("Trend:")]
+            factors_hit.append("⚠️ Vetoed: Microstructure flipped Bearish (M1/M5 ChoCH Breakout Down)")
+        elif not is_buy and mov == "EARLY_BULLISH_REVERSAL":
+            factors_hit = [f for f in factors_hit if not f.startswith("Trend:")]
+            factors_hit.append("⚠️ Vetoed: Microstructure flipped Bullish (M1/M5 ChoCH Breakout Up)")
 
     # Profile-Specific Strategy Accuracy Verification
     strat_accuracy = {"passed": True, "veto_reasons": []}
@@ -1112,8 +1148,19 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
 
     levels = compute_key_levels(hist)
 
-    buy_setup = _analyze_single_side(symbol, asset_type, macro, hist, levels, action="BUY")
-    sell_setup = _analyze_single_side(symbol, asset_type, macro, hist, levels, action="SELL")
+    # Multi-Timeframe Trend Change & Adaptive Strategy Detection
+    mtf_bars = market_data_feed.get_multitimeframe_bars(asset_type) if (MARKET_DATA_AVAILABLE and market_data_feed) else {}
+    mtf_trend = mtf_trend_engine.analyze_multitimeframe_trend(asset_type, mtf_bars) if (INSTITUTIONAL_AVAILABLE and mtf_trend_engine) else {}
+    adapted_strat = adaptive_strategy_orchestrator.adapt_strategy_to_movement(asset_type, mtf_trend, levels["curr"]) if (INSTITUTIONAL_AVAILABLE and adaptive_strategy_orchestrator) else {}
+
+    buy_setup = _analyze_single_side(symbol, asset_type, macro, hist, levels, action="BUY", mtf_trend=mtf_trend, adapted_strat=adapted_strat)
+    sell_setup = _analyze_single_side(symbol, asset_type, macro, hist, levels, action="SELL", mtf_trend=mtf_trend, adapted_strat=adapted_strat)
+
+    if mtf_trend:
+        buy_setup["mtf_trend"] = mtf_trend
+        sell_setup["mtf_trend"] = mtf_trend
+        buy_setup["adapted_strat"] = adapted_strat
+        sell_setup["adapted_strat"] = adapted_strat
 
     # Select dominant institutional side
     if sell_setup["is_a_plus"] and not buy_setup["is_a_plus"]:
@@ -1132,6 +1179,8 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
     res["sell"] = sell_setup
     res["dominant_side"] = dominant_side
     res["action"] = dominant_side
+    res["mtf_trend"] = mtf_trend
+    res["adapted_strat"] = adapted_strat
     return res
 
 
@@ -1273,6 +1322,13 @@ def format_scan_summary(data: dict) -> str:
     b_dom_act = b.get("dominant_side", "BUY")
     g_dom_act = g.get("dominant_side", "BUY")
 
+    b_mtf = b.get("mtf_trend") or {}
+    g_mtf = g.get("mtf_trend") or {}
+    b_strat = b.get("adapted_strat") or {}
+    g_strat = g.get("adapted_strat") or {}
+    b_tfs = b_mtf.get("timeframes", {})
+    g_tfs = g_mtf.get("timeframes", {})
+
     lines = [
         f"📊 *HARD-ASSET DUAL-SIDED ALL-AGENT SCAN* ({session_badge})",
         f"🌐 *Cross-Asset Flow:* {regime_badge} | Profile: *{strat['name']} ({strat['code']})*",
@@ -1281,9 +1337,15 @@ def format_scan_summary(data: dict) -> str:
         f"• DXY: `{m['dxy']:.2f}` ({m['dxy_chg']:+.2f}%) | 10Y Yield: `{m['tnx']:.2f}%`",
         f"• GSR: `{m['gsr']:.1f}x` | VIX: `{m['vix']:.1f}` | F&G: `{m['fg_val']}` ({m['fg_label']})",
         "",
+        f"🌐 *Multi-Timeframe Trend & Movement Radar:*",
+        f"• 🥇 Gold (M1->D1): `{g_mtf.get('movement_badge', 'Aligned')}` | Strategy: *{g_strat.get('strategy_code', 'SCALP')}* ({g_strat.get('preferred_side', 'DUAL')})",
+        f"• ₿  BTC  (M1->D1): `{b_mtf.get('movement_badge', 'Aligned')}` | Strategy: *{b_strat.get('strategy_code', 'SCALP')}* ({b_strat.get('preferred_side', 'DUAL')})",
+        "",
         f"₿ *Bitcoin (BTC-USD):* `${b['price']:,.2f}`",
         f"• Omniscient Index: *{b_mat.get('oci', b['base_score']*10)}/100* {b_mat.get('bar', '')} ──► *{b_mat.get('consensus', 'Approved')}*",
         f"• HTF Bias: `{b.get('htf_bias', {}).get('summary', 'Neutral')}` | Microstructure: `{b['trap_type']}`",
+        f"• MTF Evolution: M1:{b_tfs.get('m1',{}).get('badge','-')[:2]} M5:{b_tfs.get('m5',{}).get('badge','-')[:2]} M15:{b_tfs.get('m15',{}).get('badge','-')[:2]} H1:{b_tfs.get('h1',{}).get('badge','-')[:2]} D1:{b_tfs.get('d1',{}).get('badge','-')[:2]}",
+        f"• Auto-Adapted Strategy: `{b_strat.get('strategy_name', 'Scalp')}` ({b_strat.get('preferred_side', 'DUAL')})",
         f"• 🟢 BUY  / LONG  (Score: `{b_buy['final_score']}/10`): SL `${b_buy['stop_loss']:,.1f}` | TP1 `${b_buy['tp1']:,.1f}` (1:{b_buy['rr']:.1f}R) ──► {b_buy['verdict'][:28]}",
         f"• 🔴 SELL / SHORT (Score: `{b_sell['final_score']}/10`): SL `${b_sell['stop_loss']:,.1f}` | TP1 `${b_sell['tp1']:,.1f}` (1:{b_sell['rr']:.1f}R) ──► {b_sell['verdict'][:28]}",
         f"• 🎯 Institutional Stance: *{b_dom_act}* ({b['verdict']})",
@@ -1292,6 +1354,8 @@ def format_scan_summary(data: dict) -> str:
         f"🥇 *Gold (XAU/USD):* `${g['price']:,.2f}`",
         f"• Omniscient Index: *{g_mat.get('oci', g['base_score']*10)}/100* {g_mat.get('bar', '')} ──► *{g_mat.get('consensus', 'Approved')}*",
         f"• HTF Bias: `{g.get('htf_bias', {}).get('summary', 'Neutral')}` | Microstructure: `{g['trap_type']}`",
+        f"• MTF Evolution: M1:{g_tfs.get('m1',{}).get('badge','-')[:2]} M5:{g_tfs.get('m5',{}).get('badge','-')[:2]} M15:{g_tfs.get('m15',{}).get('badge','-')[:2]} H1:{g_tfs.get('h1',{}).get('badge','-')[:2]} D1:{g_tfs.get('d1',{}).get('badge','-')[:2]}",
+        f"• Auto-Adapted Strategy: `{g_strat.get('strategy_name', 'Scalp')}` ({g_strat.get('preferred_side', 'DUAL')})",
         f"• 🟢 BUY  / LONG  (Score: `{g_buy['final_score']}/10`): SL `${g_buy['stop_loss']:,.2f}` | TP1 `${g_buy['tp1']:,.2f}` (1:{g_buy['rr']:.1f}R) ──► {g_buy['verdict'][:28]}",
         f"• 🔴 SELL / SHORT (Score: `{g_sell['final_score']}/10`): SL `${g_sell['stop_loss']:,.2f}` | TP1 `${g_sell['tp1']:,.2f}` (1:{g_sell['rr']:.1f}R) ──► {g_sell['verdict'][:28]}",
         f"• 🎯 Institutional Stance: *{g_dom_act}* ({g['verdict']})",
@@ -1716,6 +1780,12 @@ def handle_callback_query(token: str, cq: dict):
         process_telegram_command(token, sender_id, sender_name, "/trail")
     elif data in ("all", "cockpit", "cockpit_refresh", "combined"):
         process_telegram_command(token, sender_id, sender_name, "/all")
+    elif data in ("mtf", "trend", "trends", "mtf_refresh"):
+        process_telegram_command(token, sender_id, sender_name, "/mtf")
+    elif data == "mtf_gold":
+        process_telegram_command(token, sender_id, sender_name, "/mtf gold")
+    elif data == "mtf_btc":
+        process_telegram_command(token, sender_id, sender_name, "/mtf btc")
     elif data in ("matrix", "matrix_all", "matrix_refresh"):
         process_telegram_command(token, sender_id, sender_name, "/matrix")
     elif data == "matrix_gold":
@@ -2047,6 +2117,33 @@ def auto_scanner_worker(token: str, chat_id_getter):
                             daemon=True
                         ).start()
 
+            # ── 3. Multi-Timeframe Trend Shift Monitoring (ChoCH & Inflection Alerts) ──
+            for asset_key, asset_data in [("BTC", b), ("GOLD", g)]:
+                mtf = asset_data.get("mtf_trend") or {}
+                if mtf.get("shift_detected"):
+                    shift_key = f"shift_{asset_key}_{mtf.get('market_movement')}"
+                    last_shift = PENDING_SETUPS.get(shift_key, 0)
+                    if (current_time - last_shift) > 900:  # 15 min cooldown per unique shift
+                        PENDING_SETUPS[shift_key] = current_time
+                        adapted = asset_data.get("adapted_strat") or {}
+                        shift_msg = (
+                            f"⚡ *[{asset_key}] MULTI-TIMEFRAME TREND SHIFT DETECTED!*\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"📊 *Market Movement:* `{mtf.get('movement_badge')}`\n"
+                            f"ℹ️ *Detail:* {mtf.get('movement_desc')}\n"
+                            f"🎯 *Auto-Adapted Strategy:* `{adapted.get('strategy_name', 'Adapted')}`\n"
+                            f"⚡ *Preferred Side:* *{adapted.get('preferred_side', 'DUAL')}* (Target: `1:{adapted.get('target_rr_tp1', 1.5):.2f}R`)\n"
+                            f"💡 *Action:* {adapted.get('rationale')}\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                        )
+                        shift_markup = {
+                            "inline_keyboard": [
+                                [{"text": f"🌐 View {asset_key} MTF", "callback_data": f"mtf_{asset_key.lower()}"}, {"text": "📊 Dual-Sided Scan", "callback_data": "scan"}],
+                                [{"text": "⚡ Cockpit", "callback_data": "all"}]
+                            ]
+                        }
+                        send_message(token, target_chat_id, shift_msg, reply_markup=shift_markup)
+
 
             # ── 3. Clean 1-Minute Console Heartbeat (Zero Spam) ──
             b_pend = get_pending_setup("BTC")
@@ -2130,6 +2227,41 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             ]
         }
         send_message(token, sender_id, welcome, reply_markup=welcome_markup)
+        return
+
+    # ── 2B. MULTI-TIMEFRAME TREND CHANGE & ADAPTIVE STRATEGY HUB (/mtf, /trend, /trends) ──
+    if cmd in ("/mtf", "/trend", "/trends", "/timeframe", "/timeframes"):
+        data = run_full_pipeline()
+        b = data.get("btc")
+        g = data.get("gold")
+        if not b or not g:
+            send_message(token, sender_id, "⚠️ Multi-timeframe trend data is temporarily unavailable. Please retry.")
+            return
+
+        target_asset = args_lower
+        if target_asset in ("gold", "xau", "xauusd"):
+            g_mtf = g.get("mtf_trend", {})
+            g_strat = g.get("adapted_strat", {})
+            msg = format_multitimeframe_trend_card("GOLD", g_mtf, g_strat)
+        elif target_asset in ("btc", "bitcoin", "btcusd"):
+            b_mtf = b.get("mtf_trend", {})
+            b_strat = b.get("adapted_strat", {})
+            msg = format_multitimeframe_trend_card("BTC", b_mtf, b_strat)
+        else:
+            g_mtf = g.get("mtf_trend", {})
+            g_strat = g.get("adapted_strat", {})
+            b_mtf = b.get("mtf_trend", {})
+            b_strat = b.get("adapted_strat", {})
+            msg = format_combined_mtf_card(g_mtf, g_strat, b_mtf, b_strat)
+
+        mtf_markup = {
+            "inline_keyboard": [
+                [{"text": "🔄 Refresh Trends", "callback_data": "mtf_refresh"}, {"text": "📊 Dual-Sided Scan", "callback_data": "scan"}],
+                [{"text": "🥇 Gold MTF", "callback_data": "mtf_gold"}, {"text": "₿ BTC MTF", "callback_data": "mtf_btc"}],
+                [{"text": "⚡ Cockpit", "callback_data": "all"}, {"text": "🎯 Strategy", "callback_data": "strategy"}]
+            ]
+        }
+        send_message(token, sender_id, msg, reply_markup=mtf_markup)
         return
 
     # ── 2. MODERN MARKET HUB (/market [btc|gold|macro|levels|traps|debate]) ──

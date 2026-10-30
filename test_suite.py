@@ -1572,6 +1572,84 @@ class TestHardAssetProject(unittest.TestCase):
         telegram_bot.handle_callback_query(token, {"id": "cb3", "from": {"id": sender_id, "first_name": sender_name}, "data": "memory_patterns"})
 
         print("    ✅ Hierarchical Memory, Regime Brains & Negative Bank: ALL PASSED")
+    def test_19_multitimeframe_trend_detection_and_adaptive_strategy(self):
+        """Tests small-to-high multi-timeframe trend change detection and dynamic strategy adoption."""
+        print("\n[*] 19. Testing Multi-Timeframe Trend Detection (Small to High TF) & Adaptive Strategy...")
+
+        from market_data import market_data_feed
+        from institutional_engine import (
+            mtf_trend_engine, adaptive_strategy_orchestrator,
+            format_multitimeframe_trend_card, format_combined_mtf_card
+        )
+
+        token, sender_id, sender_name = "123456:TEST_TOKEN", "12345", "InstitutionalTrader"
+
+        # 1. Multi-Timeframe Data Fetching
+        mtf_gold = market_data_feed.get_multitimeframe_bars("GOLD")
+        self.assertIn("m1", mtf_gold)
+        self.assertIn("m5", mtf_gold)
+        self.assertIn("m15", mtf_gold)
+        self.assertIn("h1", mtf_gold)
+        self.assertIn("d1", mtf_gold)
+
+        # 2. MTF Trend Engine Analysis
+        res_gold = mtf_trend_engine.analyze_multitimeframe_trend("GOLD", mtf_gold)
+        self.assertIn("normalized_score", res_gold)
+        self.assertIn("market_movement", res_gold)
+        self.assertIn("movement_badge", res_gold)
+        self.assertIn("timeframes", res_gold)
+        self.assertEqual(len(res_gold["timeframes"]), 5)
+
+        # 3. Adaptive Strategy Orchestration
+        strat_gold = adaptive_strategy_orchestrator.adapt_strategy_to_movement("GOLD", res_gold, 4000.0)
+        self.assertIn("strategy_code", strat_gold)
+        self.assertIn("strategy_name", strat_gold)
+        self.assertIn("preferred_side", strat_gold)
+        self.assertIn("target_rr_tp1", strat_gold)
+        self.assertIn("rationale", strat_gold)
+        self.assertIn(strat_gold["strategy_code"], ["SWING", "SCALP", "BALANCE", "REVERSAL", "ANTI_TRAP"])
+
+        # 4. Formatter Verification
+        single_card = format_multitimeframe_trend_card("GOLD", res_gold, strat_gold)
+        self.assertIn("MULTI-TIMEFRAME TREND MATRIX", single_card)
+        self.assertIn("Timeframe Structure Breakdown", single_card)
+        self.assertIn("Auto-Adapted Strategy Profile", single_card)
+
+        mtf_btc = market_data_feed.get_multitimeframe_bars("BTC")
+        res_btc = mtf_trend_engine.analyze_multitimeframe_trend("BTC", mtf_btc)
+        strat_btc = adaptive_strategy_orchestrator.adapt_strategy_to_movement("BTC", res_btc, 80000.0)
+
+        combined_card = format_combined_mtf_card(res_gold, strat_gold, res_btc, strat_btc)
+        self.assertIn("MULTI-TIMEFRAME TREND COCKPIT", combined_card)
+        self.assertIn("Gold (XAU/USD) Trend Evolution", combined_card)
+        self.assertIn("Bitcoin (BTC/USD) Trend Evolution", combined_card)
+
+        # 5. Telegram /mtf Command and Subcommands
+        self.mock_tg.sent_messages.clear()
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/mtf")
+        self.assertGreater(len(self.mock_tg.sent_messages), 0)
+        mtf_resp = self.mock_tg.sent_messages[-1][1]
+        self.assertIn("MULTI-TIMEFRAME TREND COCKPIT", mtf_resp)
+
+        self.mock_tg.sent_messages.clear()
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/mtf gold")
+        self.assertGreater(len(self.mock_tg.sent_messages), 0)
+        gold_resp = self.mock_tg.sent_messages[-1][1]
+        self.assertIn("GOLD MULTI-TIMEFRAME TREND MATRIX", gold_resp)
+
+        self.mock_tg.sent_messages.clear()
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/trend btc")
+        self.assertGreater(len(self.mock_tg.sent_messages), 0)
+        btc_resp = self.mock_tg.sent_messages[-1][1]
+        self.assertIn("BTC MULTI-TIMEFRAME TREND MATRIX", btc_resp)
+
+        # 6. Interactive Callback Navigation
+        telegram_bot.handle_callback_query(token, {"id": "cb_mtf1", "from": {"id": sender_id, "first_name": sender_name}, "data": "mtf"})
+        telegram_bot.handle_callback_query(token, {"id": "cb_mtf2", "from": {"id": sender_id, "first_name": sender_name}, "data": "mtf_gold"})
+        telegram_bot.handle_callback_query(token, {"id": "cb_mtf3", "from": {"id": sender_id, "first_name": sender_name}, "data": "mtf_btc"})
+
+        print("    ✅ Multi-Timeframe Trend Detection & Adaptive Strategy: ALL PASSED")
+
 
 
 if __name__ == "__main__":

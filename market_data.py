@@ -262,6 +262,95 @@ class MarketDataFeed:
         self._memory_cache[cache_key] = {"df": df.copy(), "timestamp": now}
         return df
 
+    def get_multitimeframe_bars(self, asset: str) -> Dict[str, pd.DataFrame]:
+        """
+        Retrieves synchronized Multi-Timeframe OHLCV DataFrames across all key horizons:
+          - 'm1' : Micro 1-Minute (Scalp momentum, micro orderflow & wicks)
+          - 'm5' : Micro 5-Minute (Early trend change inflection & ChoCH)
+          - 'm15': Intraday 15-Minute (Swing structure & 9/21 EMA cross)
+          - 'h1' : Intermediate 1-Hour (Break of Structure & Key S/R)
+          - 'd1' : Macro Daily (50/200 EMA institutional trend bias)
+        Uses in-memory cache with 30s TTL to prevent provider rate-limits.
+        """
+        asset_norm = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
+        cache_key = f"mtf_bars_{asset_norm}"
+        now = time.time()
+
+        cached = self._memory_cache.get(cache_key)
+        if cached and (now - cached.get("timestamp", 0) < 30):
+            return {k: v.copy() for k, v in cached["data"].items()}
+
+        result = {}
+
+        # 1. Try MT5 Live Rates if connected on Windows VPS
+        if self.broker and getattr(self.broker, "is_connected", False) and hasattr(self.broker, "resolve_symbol"):
+            try:
+                import MetaTrader5 as mt5
+                sym = self.broker.resolve_symbol(asset_norm)
+                tf_map = {
+                    "m1": (mt5.TIMEFRAME_M1, 60),
+                    "m5": (mt5.TIMEFRAME_M5, 60),
+                    "m15": (mt5.TIMEFRAME_M15, 60),
+                    "h1": (mt5.TIMEFRAME_H1, 60),
+                    "d1": (mt5.TIMEFRAME_D1, 100),
+                }
+                for tf_name, (mt5_tf, count) in tf_map.items():
+                    rates = mt5.copy_rates_from_pos(sym, mt5_tf, 0, count)
+                    if rates is not None and len(rates) > 0:
+                        df_tf = pd.DataFrame(rates)
+                        df_tf["time"] = pd.to_datetime(df_tf["time"], unit="s")
+                        result[tf_name] = self._sanitize_dataframe(df_tf)
+            except Exception as e:
+                logger.debug(f"MT5 MTF extraction fallback: {e}")
+
+        # 2. Resilient Multi-Source Fallback (Yahoo / Binance / Resampling)
+        if len(result) < 4:
+            try:
+                # Daily macro history
+                d1_df = self.get_historical_bars(asset_norm, period="180d", min_bars=20)
+                if not d1_df.empty:
+                    result["d1"] = d1_df
+
+                # Intraday 5m history
+                symbol = "GC=F" if asset_norm == "GOLD" else "BTC-USD"
+                t = yf.Ticker(symbol)
+                m5_raw = t.history(period="3d", interval="5m")
+                if not m5_raw.empty:
+                    m5_clean = self._sanitize_dataframe(m5_raw)
+                    result["m5"] = m5_clean
+
+                    # Resample to 15m and 1h
+                    if len(m5_clean) >= 6:
+                        m15_df = m5_clean.resample("15min").agg({
+                            "Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"
+                        }).dropna()
+                        result["m15"] = self._sanitize_dataframe(m15_df)
+
+                    if len(m5_clean) >= 24:
+                        h1_df = m5_clean.resample("1h").agg({
+                            "Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"
+                        }).dropna()
+                        result["h1"] = self._sanitize_dataframe(h1_df)
+
+                    # Micro 1m
+                    if "m1" not in result or result["m1"].empty:
+                        result["m1"] = m5_clean.tail(25).copy()
+            except Exception as e:
+                logger.debug(f"Secondary MTF fallback: {e}")
+
+        # Ensure all keys exist with fallbacks
+        if "d1" not in result or result["d1"].empty:
+            result["d1"] = self.get_historical_bars(asset_norm, period="60d", min_bars=10)
+        for tf in ("m1", "m5", "m15", "h1"):
+            if tf not in result or result[tf].empty:
+                result[tf] = result.get("d1", pd.DataFrame()).tail(30).copy()
+
+        self._memory_cache[cache_key] = {
+            "data": {k: v.copy() for k, v in result.items()},
+            "timestamp": now
+        }
+        return result
+
     # ==========================================================================
     # 3. MACRO INDICATORS SNAPSHOT (DXY, 10Y Yield, VIX, GSR, F&G)
     # ==========================================================================

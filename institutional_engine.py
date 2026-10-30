@@ -1454,3 +1454,372 @@ class OmniscientQuantitativeMatrix:
 
 # Global Singleton Instances
 omniscient_matrix = OmniscientQuantitativeMatrix()
+
+
+# ==============================================================================
+# 5. MULTI-TIMEFRAME TREND CHANGE & ADAPTIVE STRATEGY ORCHESTRATION
+# ==============================================================================
+
+class MultiTimeframeTrendEngine:
+    """
+    Institutional Multi-Timeframe Trend Change & Early Inflection Detector.
+    Scans from Micro (M1/M5) to Macro (H1/D1) to identify:
+      1. Microstructure Shifts & Change of Character (ChoCH)
+      2. Multi-Timeframe Trend Alignment & Momentum Confluence
+      3. Trend Exhaustion, Liquidity Sweeps & Impending Reversals
+    """
+
+    TF_WEIGHTS = {
+        "m1": 0.8,
+        "m5": 1.4,
+        "m15": 1.6,
+        "h1": 1.6,
+        "d1": 1.2
+    }
+
+    def analyze_single_timeframe(self, df: pd.DataFrame, tf_name: str) -> Dict[str, Any]:
+        if df is None or len(df) < 10:
+            return {
+                "tf": tf_name.upper(),
+                "direction": "NEUTRAL",
+                "score": 0.0,
+                "rsi": 50.0,
+                "adx": 20.0,
+                "ema9": 0.0,
+                "ema21": 0.0,
+                "choch": None,
+                "badge": "🟡 Neutral",
+                "summary": "Insufficient candle data"
+            }
+
+        c = df["Close"].astype(float)
+        h = df["High"].astype(float)
+        l = df["Low"].astype(float)
+        o = df["Open"].astype(float)
+
+        last_p = float(c.iloc[-1])
+        ema9 = float(c.ewm(span=9, adjust=False).mean().iloc[-1])
+        ema21 = float(c.ewm(span=21, adjust=False).mean().iloc[-1])
+        ema50 = float(c.ewm(span=50, adjust=False).mean().iloc[-1]) if len(c) >= 50 else ema21
+
+        # RSI calculation
+        delta = c.diff()
+        gain = delta.clip(lower=0).rolling(14).mean()
+        loss = (-delta.clip(upper=0)).rolling(14).mean()
+        rs = gain / (loss + 1e-9)
+        rsi = float(100 - (100 / (1 + rs)).iloc[-1])
+        if np.isnan(rsi): rsi = 50.0
+
+        # ADX / Trend Strength approximation
+        tr = np.maximum(h - l, np.maximum(abs(h - c.shift(1)), abs(l - c.shift(1))))
+        atr = float(tr.rolling(14).mean().iloc[-1]) if len(tr) >= 14 else 1.0
+        up_move = h - h.shift(1)
+        down_move = l.shift(1) - l
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        plus_di = float((pd.Series(plus_dm).rolling(14).mean() / (atr + 1e-9) * 100).iloc[-1]) if len(c) >= 14 else 25.0
+        minus_di = float((pd.Series(minus_dm).rolling(14).mean() / (atr + 1e-9) * 100).iloc[-1]) if len(c) >= 14 else 25.0
+        dx = abs(plus_di - minus_di) / (plus_di + minus_di + 1e-9) * 100
+        adx = float(pd.Series(dx).rolling(14).mean().iloc[-1]) if len(c) >= 28 else float(dx)
+        if np.isnan(adx): adx = 22.0
+
+        # Candle wicks
+        curr_range = float(h.iloc[-1] - l.iloc[-1])
+        up_wick = float((h.iloc[-1] - max(o.iloc[-1], c.iloc[-1])) / curr_range * 100) if curr_range > 0 else 0.0
+        low_wick = float((min(o.iloc[-1], c.iloc[-1]) - l.iloc[-1]) / curr_range * 100) if curr_range > 0 else 0.0
+
+        # Change of Character (ChoCH) & Swing Break Detection
+        lookback = min(len(df), 20)
+        recent_h = h.tail(lookback)
+        recent_l = l.tail(lookback)
+        prior_swing_high = float(recent_h.iloc[:-3].max()) if len(recent_h) >= 6 else float(h.max())
+        prior_swing_low = float(recent_l.iloc[:-3].min()) if len(recent_l) >= 6 else float(l.min())
+
+        choch = None
+        if last_p > prior_swing_high and c.iloc[-2] <= prior_swing_high:
+            choch = "BULLISH_CHOCH"
+        elif last_p < prior_swing_low and c.iloc[-2] >= prior_swing_low:
+            choch = "BEARISH_CHOCH"
+
+        # Determine directional score
+        bull_points = 0
+        bear_points = 0
+
+        if last_p > ema21: bull_points += 1
+        else: bear_points += 1
+
+        if ema9 >= ema21: bull_points += 1
+        else: bear_points += 1
+
+        if rsi >= 52: bull_points += 1
+        elif rsi <= 48: bear_points += 1
+
+        if plus_di > minus_di: bull_points += 1
+        elif minus_di > plus_di: bear_points += 1
+
+        if choch == "BULLISH_CHOCH": bull_points += 2
+        elif choch == "BEARISH_CHOCH": bear_points += 2
+
+        if bull_points >= 3 and bull_points > bear_points:
+            direction = "BULLISH"
+            score = 1.0 if bull_points >= 4 else 0.5
+            badge = "🟢 Strong Bullish" if score == 1.0 else "🟢 Bullish"
+        elif bear_points >= 3 and bear_points > bull_points:
+            direction = "BEARISH"
+            score = -1.0 if bear_points >= 4 else -0.5
+            badge = "🔴 Strong Bearish" if score == -1.0 else "🔴 Bearish"
+        else:
+            direction = "NEUTRAL"
+            score = 0.0
+            badge = "🟡 Chop / Neutral"
+
+        summary_parts = [f"RSI {rsi:.1f}", f"ADX {adx:.1f}"]
+        if choch:
+            summary_parts.append(f"⚡ {choch}")
+        elif up_wick >= 35.0:
+            summary_parts.append(f"Upper Wick {up_wick:.0f}%")
+        elif low_wick >= 35.0:
+            summary_parts.append(f"Lower Wick {low_wick:.0f}%")
+
+        return {
+            "tf": tf_name.upper(),
+            "direction": direction,
+            "score": score,
+            "rsi": round(rsi, 1),
+            "adx": round(adx, 1),
+            "ema9": round(ema9, 2),
+            "ema21": round(ema21, 2),
+            "ema50": round(ema50, 2),
+            "last_price": round(last_p, 2),
+            "up_wick": round(up_wick, 1),
+            "low_wick": round(low_wick, 1),
+            "choch": choch,
+            "badge": badge,
+            "summary": " | ".join(summary_parts)
+        }
+
+    def analyze_multitimeframe_trend(self, asset: str, mtf_bars: Dict[str, pd.DataFrame]) -> Dict[str, Any]:
+        """
+        Executes a 5-tier multi-timeframe trend change & inflection audit.
+        """
+        tf_results = {}
+        total_score = 0.0
+        max_possible = sum(self.TF_WEIGHTS.values())
+
+        for tf in ("m1", "m5", "m15", "h1", "d1"):
+            df = mtf_bars.get(tf, pd.DataFrame())
+            res = self.analyze_single_timeframe(df, tf)
+            tf_results[tf] = res
+            weight = self.TF_WEIGHTS.get(tf, 1.0)
+            total_score += res["score"] * weight
+
+        normalized_score = total_score / max_possible  # -1.0 to +1.0
+
+        m1 = tf_results["m1"]
+        m5 = tf_results["m5"]
+        m15 = tf_results["m15"]
+        h1 = tf_results["h1"]
+        d1 = tf_results["d1"]
+
+        # Market Movement & Inflection Classification
+        movement = "NEUTRAL_CHOP"
+        movement_badge = "🟡 Range Consolidation"
+        movement_desc = "Market is in sideways balance; chop rules apply."
+        shift_detected = False
+        shift_alert = ""
+
+        # 1. Early Reversal / Change of Character (ChoCH) from small to high TF
+        if (h1["direction"] == "BEARISH" or d1["direction"] == "BEARISH") and (m1["direction"] == "BULLISH" and m5["direction"] == "BULLISH"):
+            movement = "EARLY_BULLISH_REVERSAL"
+            movement_badge = "🔄 Early Bullish Inflection (M1/M5 Leading)"
+            movement_desc = "Microstructure has flipped Bullish (M1/M5 ChoCH) against high-timeframe downtrend."
+            shift_detected = True
+            shift_alert = f"⚡ *{asset} TREND INFLECTION:* Micro timeframes (M1/M5) flipped BULLISH with ChoCH!"
+        elif (h1["direction"] == "BULLISH" or d1["direction"] == "BULLISH") and (m1["direction"] == "BEARISH" and m5["direction"] == "BEARISH"):
+            movement = "EARLY_BEARISH_REVERSAL"
+            movement_badge = "🔄 Early Bearish Inflection (M1/M5 Leading)"
+            movement_desc = "Microstructure has flipped Bearish (M1/M5 ChoCH) against high-timeframe uptrend."
+            shift_detected = True
+            shift_alert = f"⚡ *{asset} TREND INFLECTION:* Micro timeframes (M1/M5) flipped BEARISH with ChoCH!"
+
+        # 2. Strong Multi-Timeframe Expansion / Power Trend
+        elif normalized_score >= 0.60 and d1["direction"] == "BULLISH":
+            movement = "STRONG_BULL_EXPANSION"
+            movement_badge = "🚀 Power Bull Trend (MTF Alignment)"
+            movement_desc = "All timeframes (M5 -> D1) in aligned upward expansion. High-velocity trend following."
+        elif normalized_score <= -0.60 and d1["direction"] == "BEARISH":
+            movement = "STRONG_BEAR_EXPANSION"
+            movement_badge = "📉 Power Bear Trend (MTF Alignment)"
+            movement_desc = "All timeframes (M5 -> D1) in aligned downward expansion. Aggressive short trend following."
+
+        # 3. Exhaustion & Reversal Traps
+        elif d1["direction"] == "BULLISH" and (m5["up_wick"] >= 35.0 or m1["up_wick"] >= 35.0) and m1["direction"] != "BULLISH":
+            movement = "TOPPING_EXHAUSTION"
+            movement_badge = "⚠️ Bullish Exhaustion / Upthrust Trap"
+            movement_desc = "High timeframe Bullish but micro structure shows rejection wicks >=35% at highs."
+            shift_detected = True
+            shift_alert = f"⚠️ *{asset} EXHAUSTION WARNING:* Bullish Upthrust with heavy upper wick at resistance."
+        elif d1["direction"] == "BEARISH" and (m5["low_wick"] >= 35.0 or m1["low_wick"] >= 35.0) and m1["direction"] != "BEARISH":
+            movement = "BOTTOMING_EXHAUSTION"
+            movement_badge = "⚠️ Bearish Exhaustion / Wyckoff Spring"
+            movement_desc = "High timeframe Bearish but micro structure shows absorption wicks >=35% at lows."
+            shift_detected = True
+            shift_alert = f"⚠️ *{asset} SPRING WARNING:* Wyckoff Spring lower wick sweep at support."
+
+        # Dominant Direction
+        if normalized_score >= 0.30:
+            dominant_dir = "BUY"
+        elif normalized_score <= -0.30:
+            dominant_dir = "SELL"
+        else:
+            dominant_dir = "DUAL"
+
+        return {
+            "asset": asset,
+            "normalized_score": round(normalized_score, 2),
+            "confluence_score": round(total_score, 1),
+            "max_score": round(max_possible, 1),
+            "dominant_direction": dominant_dir,
+            "market_movement": movement,
+            "movement_badge": movement_badge,
+            "movement_desc": movement_desc,
+            "shift_detected": shift_detected,
+            "shift_alert": shift_alert,
+            "timeframes": tf_results
+        }
+
+
+class AdaptiveStrategyOrchestrator:
+    """
+    Dynamically adopts and configures the optimal strategy profile
+    based on real-time market movements, trend transitions, and multi-timeframe states.
+    """
+
+    def adapt_strategy_to_movement(self, asset: str, mtf_state: Dict[str, Any], curr_price: float) -> Dict[str, Any]:
+        movement = mtf_state.get("market_movement", "NEUTRAL_CHOP")
+        dom_dir = mtf_state.get("dominant_direction", "DUAL")
+
+        if movement in ("STRONG_BULL_EXPANSION", "STRONG_BEAR_EXPANSION"):
+            code = "SWING"
+            name = "Macro Trend Expansion (Runner)"
+            pref_side = "BUY" if movement == "STRONG_BULL_EXPANSION" else "SELL"
+            rr_tp1 = 1.60
+            rr_tp2 = 2.60
+            sl_mult = 1.00
+            trailing_mode = "WIDE_TRAIL"
+            rationale = "MTF alignment confirmed across M5, M15, H1, D1. Riding trend with expanded targets and trailing stop."
+
+        elif movement in ("EARLY_BULLISH_REVERSAL", "EARLY_BEARISH_REVERSAL"):
+            code = "REVERSAL"
+            name = "Micro Inflection & ChoCH Reversal"
+            pref_side = "BUY" if movement == "EARLY_BULLISH_REVERSAL" else "SELL"
+            rr_tp1 = 1.40
+            rr_tp2 = 2.20
+            sl_mult = 0.40
+            trailing_mode = "FAST_BREAKEVEN"
+            rationale = "Microstructure shift (ChoCH) detected leading the high-timeframe reversal. Tight SL behind inflection pivot; dying trend vetoed."
+
+        elif movement in ("TOPPING_EXHAUSTION", "BOTTOMING_EXHAUSTION"):
+            code = "ANTI_TRAP"
+            name = "Liquidity Sweep & Trap Fade"
+            pref_side = "SELL" if movement == "TOPPING_EXHAUSTION" else "BUY"
+            rr_tp1 = 1.50
+            rr_tp2 = 2.20
+            sl_mult = 0.35
+            trailing_mode = "TIGHT_TRAIL"
+            rationale = "Rejection wick >=35% sweeps liquidity. Fading fakeout back toward range median with protective stop outside the wick."
+
+        else: # NEUTRAL_CHOP
+            code = "BALANCE"
+            name = "Equilibrium Mean-Reversion (VPOC)"
+            pref_side = "DUAL" # Buy Range Low, Sell Range High
+            rr_tp1 = 1.25
+            rr_tp2 = 1.75
+            sl_mult = 0.30
+            trailing_mode = "SCALP_RATCHET"
+            rationale = "Market in low-ADX range consolidation. Fast scalping between Value Area boundaries; take profit at equilibrium."
+
+        return {
+            "strategy_code": code,
+            "strategy_name": name,
+            "preferred_side": pref_side,
+            "target_rr_tp1": rr_tp1,
+            "target_rr_tp2": rr_tp2,
+            "sl_multiplier": sl_mult,
+            "trailing_mode": trailing_mode,
+            "rationale": rationale,
+            "market_movement": movement
+        }
+
+
+def format_multitimeframe_trend_card(asset: str, mtf_res: dict, strat_res: dict) -> str:
+    """Formats a visual Multi-Timeframe Trend Change and Strategy Card for Telegram."""
+    tf = mtf_res.get("timeframes", {})
+    m1 = tf.get("m1", {})
+    m5 = tf.get("m5", {})
+    m15 = tf.get("m15", {})
+    h1 = tf.get("h1", {})
+    d1 = tf.get("d1", {})
+
+    icon = "🥇" if asset.upper() in ("GOLD", "XAU") else "₿"
+    score = mtf_res.get("normalized_score", 0.0)
+
+    lines = [
+        f"{icon} *{asset.upper()} MULTI-TIMEFRAME TREND MATRIX*",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"📊 *Market Movement:* `{mtf_res.get('movement_badge', 'N/A')}`",
+        f"⚡ *MTF Confluence:* `{score:+.2f}` / `1.00` | Bias: *{mtf_res.get('dominant_direction', 'DUAL')}*",
+        "",
+        "🌐 *Timeframe Structure Breakdown:*",
+        f"  • *M1  (Micro)* : {m1.get('badge', 'N/A')} (`{m1.get('summary', '')}`)",
+        f"  • *M5  (ChoCH)* : {m5.get('badge', 'N/A')} (`{m5.get('summary', '')}`)",
+        f"  • *M15 (Swing)* : {m15.get('badge', 'N/A')} (`{m15.get('summary', '')}`)",
+        f"  • *H1  (Intm)*  : {h1.get('badge', 'N/A')} (`{h1.get('summary', '')}`)",
+        f"  • *D1  (Macro)* : {d1.get('badge', 'N/A')} (`{d1.get('summary', '')}`)",
+        "",
+        "🎯 *Auto-Adapted Strategy Profile:*",
+        f"  • *Adopted Strategy:* `{strat_res.get('strategy_name', 'N/A')}`",
+        f"  • *Preferred Vector:* *{strat_res.get('preferred_side', 'DUAL')}*",
+        f"  • *Dynamic Target:* `1:{strat_res.get('target_rr_tp1', 1.5):.2f}` -> `1:{strat_res.get('target_rr_tp2', 2.0):.2f}` R:R",
+        f"  • *Trailing Engine:* `{strat_res.get('trailing_mode', 'NORMAL')}`",
+        f"  • *Execution Logic:* {strat_res.get('rationale', '')}",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    ]
+    if mtf_res.get("shift_detected"):
+        lines.insert(4, f"🔔 *INFLECTION ALERT:* `{mtf_res.get('shift_alert', '')}`")
+    return "\n".join(lines)
+
+
+def format_combined_mtf_card(gold_mtf: dict, gold_strat: dict, btc_mtf: dict, btc_strat: dict) -> str:
+    """Formats a master dual-asset multi-timeframe dashboard."""
+    g_score = gold_mtf.get("normalized_score", 0.0)
+    b_score = btc_mtf.get("normalized_score", 0.0)
+
+    g_tf = gold_mtf.get("timeframes", {})
+    b_tf = btc_mtf.get("timeframes", {})
+
+    lines = [
+        "🌐 *INSTITUTIONAL MULTI-TIMEFRAME TREND COCKPIT*",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "🥇 *Gold (XAU/USD) Trend Evolution:*",
+        f"   • Movement: *{gold_mtf.get('movement_badge', 'N/A')}*",
+        f"   • Alignment: `{g_score:+.2f}` | Strategy: *{gold_strat.get('strategy_code', 'SCALP')}* ({gold_strat.get('preferred_side', 'DUAL')})",
+        f"   • M1:{g_tf.get('m1',{}).get('badge','-')[:2]} M5:{g_tf.get('m5',{}).get('badge','-')[:2]} M15:{g_tf.get('m15',{}).get('badge','-')[:2]} H1:{g_tf.get('h1',{}).get('badge','-')[:2]} D1:{g_tf.get('d1',{}).get('badge','-')[:2]}",
+        "",
+        "₿ *Bitcoin (BTC/USD) Trend Evolution:*",
+        f"   • Movement: *{btc_mtf.get('movement_badge', 'N/A')}*",
+        f"   • Alignment: `{b_score:+.2f}` | Strategy: *{btc_strat.get('strategy_code', 'SCALP')}* ({btc_strat.get('preferred_side', 'DUAL')})",
+        f"   • M1:{b_tf.get('m1',{}).get('badge','-')[:2]} M5:{b_tf.get('m5',{}).get('badge','-')[:2]} M15:{b_tf.get('m15',{}).get('badge','-')[:2]} H1:{b_tf.get('h1',{}).get('badge','-')[:2]} D1:{b_tf.get('d1',{}).get('badge','-')[:2]}",
+        "",
+        "⚡ *Autonomous Strategy Adaptation Active:*",
+        "   Both assets scanned dual-sided (BUY & SELL). Strategies continuously adapt",
+        "   their risk parameters, targets, and trailing ratchets to live market regimes.",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    ]
+    return "\n".join(lines)
+
+
+# Global Singleton Instances
+mtf_trend_engine = MultiTimeframeTrendEngine()
+adaptive_strategy_orchestrator = AdaptiveStrategyOrchestrator()
+
