@@ -21,6 +21,8 @@ from __future__ import annotations
 import sys
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 import os
 import json
@@ -391,31 +393,71 @@ def verify_token(token: str):
 
 
 def send_message(token: str, chat_id: str, text: str, reply_markup: dict = None):
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {
-        "chat_id": str(chat_id),
-        "text": text,
-        "parse_mode": "Markdown"
-    }
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
+    """
+    Sends a message to Telegram. Automatically chunks messages exceeding 3900 characters
+    to prevent Telegram HTTP 400 'message is too long' errors, with resilient Markdown fallback.
+    """
+    if not text:
+        return None
 
-    try:
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=12) as r:
-            return json.loads(r.read())
-    except urllib.error.HTTPError:
+    def _send_single_chunk(chunk_text: str, markup: dict = None):
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        payload = {
+            "chat_id": str(chat_id),
+            "text": chunk_text,
+            "parse_mode": "Markdown"
+        }
+        if markup:
+            payload["reply_markup"] = markup
+
         try:
-            payload.pop("parse_mode", None)
             data = json.dumps(payload).encode("utf-8")
             req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
             with urllib.request.urlopen(req, timeout=12) as r:
                 return json.loads(r.read())
+        except urllib.error.HTTPError:
+            try:
+                payload.pop("parse_mode", None)
+                data = json.dumps(payload).encode("utf-8")
+                req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=12) as r:
+                    return json.loads(r.read())
+            except Exception:
+                return None
         except Exception:
             return None
-    except Exception:
-        return None
+
+    MAX_CHUNK_LEN = 3900
+    if len(text) <= MAX_CHUNK_LEN:
+        return _send_single_chunk(text, reply_markup)
+
+    # Split lines safely so formatting blocks are preserved where possible
+    chunks = []
+    lines = text.split("\n")
+    current_chunk = []
+    current_len = 0
+
+    for line in lines:
+        if current_len + len(line) + 1 > MAX_CHUNK_LEN:
+            if current_chunk:
+                chunks.append("\n".join(current_chunk))
+                current_chunk = []
+                current_len = 0
+            while len(line) > MAX_CHUNK_LEN:
+                chunks.append(line[:MAX_CHUNK_LEN])
+                line = line[MAX_CHUNK_LEN:]
+        current_chunk.append(line)
+        current_len += len(line) + 1
+
+    if current_chunk:
+        chunks.append("\n".join(current_chunk))
+
+    last_res = None
+    for i, chunk in enumerate(chunks):
+        chunk_markup = reply_markup if (i == len(chunks) - 1) else None
+        last_res = _send_single_chunk(chunk, chunk_markup)
+
+    return last_res
 
 
 def answer_callback_query(token: str, callback_query_id: str, text: str = None, show_alert: bool = False):

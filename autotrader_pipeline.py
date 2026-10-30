@@ -310,7 +310,7 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
     }
 
 
-def run_pipeline():
+def run_pipeline(*args, **kwargs):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n" + "═" * 78)
     print(f"  ⚡ HARD-ASSET AUTOTRADER PIPELINE (METHOD 1) | {timestamp}")

@@ -591,6 +591,9 @@ class SelfLearningEngine:
         Pre-Trade Gatekeeper: Scans proposed trade against the Negative Memory Bank.
         Returns (True, veto_reason) if the setup matches a known toxic failure pattern.
         """
+        if not market_vector or not any(k in market_vector for k in ("rsi", "adx", "upper_wick_pct", "lower_wick_pct", "tnx_chg", "dxy_chg", "regime")):
+            return False, ""
+
         bank = self.memory.get("negative_memory_bank", [])
         if not bank:
             return False, ""
@@ -607,11 +610,28 @@ class SelfLearningEngine:
 
         for toxic in bank:
             if toxic.get("asset") == a_norm and toxic.get("action") == act_norm:
-                d_rsi = abs(current_rsi - toxic.get("rsi", 50.0)) / 40.0
-                d_adx = abs(current_adx - toxic.get("adx", 25.0)) / 25.0
-                d_wick = abs(current_wick - toxic.get("upper_wick", 0.0)) / 40.0
-                d_tnx = abs(current_tnx - toxic.get("tnx_chg", 0.0)) / 1.5
-                d_dxy = abs(current_dxy - toxic.get("dxy_chg", 0.0)) / 0.5
+                # Require that the toxic record has a genuine abnormal stress signature
+                t_wick = float(toxic.get("upper_wick", 0.0))
+                t_rsi = float(toxic.get("rsi", 50.0))
+                t_adx = float(toxic.get("adx", 25.0))
+                t_tnx = float(toxic.get("tnx_chg", 0.0))
+                t_dxy = float(toxic.get("dxy_chg", 0.0))
+
+                is_abnormal = (
+                    t_wick >= 25.0 or
+                    t_rsi >= 65.0 or t_rsi <= 35.0 or
+                    t_adx >= 30.0 or
+                    abs(t_tnx) >= 0.8 or
+                    abs(t_dxy) >= 0.25
+                )
+                if not is_abnormal:
+                    continue
+
+                d_rsi = abs(current_rsi - t_rsi) / 40.0
+                d_adx = abs(current_adx - t_adx) / 25.0
+                d_wick = abs(current_wick - t_wick) / 40.0
+                d_tnx = abs(current_tnx - t_tnx) / 1.5
+                d_dxy = abs(current_dxy - t_dxy) / 0.5
                 d_regime = 0.5 if (toxic.get("regime") and current_regime and toxic.get("regime") != current_regime) else 0.0
 
                 dist = math.sqrt(d_rsi**2 + d_adx**2 + d_wick**2 + d_tnx**2 + d_dxy**2 + d_regime**2) / math.sqrt(6)
@@ -1377,6 +1397,7 @@ class SelfLearningEngine:
 
 # Global Singleton Instance
 self_learning_engine = SelfLearningEngine()
+learning_engine = self_learning_engine
 
 
 if __name__ == "__main__":

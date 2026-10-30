@@ -537,8 +537,20 @@ class MarketDataFeed:
 
     def _sanitize_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
         """Sanitizes raw historical OHLCV data."""
+        if df is None or df.empty:
+            return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+
         clean = df.copy()
         clean = clean[~clean.index.duplicated(keep="last")]
+
+        # Normalize column names to Title Case if lowercase
+        col_rename = {}
+        for c in clean.columns:
+            c_str = str(c).strip().capitalize()
+            if c_str in ("Open", "High", "Low", "Close", "Volume"):
+                col_rename[c] = c_str
+        if col_rename:
+            clean.rename(columns=col_rename, inplace=True)
 
         cols = ["Open", "High", "Low", "Close"]
         for c in cols:
@@ -552,20 +564,24 @@ class MarketDataFeed:
         clean.ffill(inplace=True)
         clean.bfill(inplace=True)
 
-        # Drop any remaining unfillable rows
-        clean.dropna(subset=["Close"], inplace=True)
+        # Drop any remaining unfillable rows if Close exists
+        if "Close" in clean.columns:
+            clean.dropna(subset=["Close"], inplace=True)
         return clean
 
     def _inject_live_tick_into_history(self, df: pd.DataFrame, live_price: float) -> pd.DataFrame:
         """Dynamically updates the most recent bar close with the live tick."""
-        if df.empty or live_price <= 0:
+        if df is None or df.empty or live_price <= 0:
             return df
+        if "Close" not in df.columns:
+            return df
+
         res = df.copy()
         res.iloc[-1, res.columns.get_loc("Close")] = live_price
         # Adjust High / Low of current bar if breached
-        if live_price > res.iloc[-1, res.columns.get_loc("High")]:
+        if "High" in res.columns and live_price > res.iloc[-1, res.columns.get_loc("High")]:
             res.iloc[-1, res.columns.get_loc("High")] = live_price
-        if live_price < res.iloc[-1, res.columns.get_loc("Low")]:
+        if "Low" in res.columns and live_price < res.iloc[-1, res.columns.get_loc("Low")]:
             res.iloc[-1, res.columns.get_loc("Low")] = live_price
         return res
 

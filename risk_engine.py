@@ -1054,8 +1054,35 @@ def calculate_lot_size(asset: str, entry_price: float, stop_loss_price: float,
       Recommended Lots = Risk USD / Dollar Risk Per Lot (clamped to min/max lot step)
       Auto-adjusts for broker leverage and margin availability.
     """
-    asset_key = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
+    asset_str = str(asset or "GOLD").upper()
+    asset_key = "GOLD" if asset_str in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
     spec = CONTRACT_SPECS[asset_key]
+
+    if account_balance <= 0:
+        return {
+            "asset": asset_key,
+            "lots": spec["min_lot"],
+            "risk_usd": 0.0,
+            "actual_risk_usd": 0.0,
+            "actual_risk_pct": 0.0,
+            "price_dist": 0.0,
+            "dollar_risk_per_lot": 0.0,
+            "valid": False,
+            "reason": "Account balance must be positive (> 0)"
+        }
+
+    if entry_price <= 0 or stop_loss_price <= 0:
+        return {
+            "asset": asset_key,
+            "lots": spec["min_lot"],
+            "risk_usd": 0.0,
+            "actual_risk_usd": 0.0,
+            "actual_risk_pct": 0.0,
+            "price_dist": 0.0,
+            "dollar_risk_per_lot": 0.0,
+            "valid": False,
+            "reason": "Entry price and Stop-Loss must be positive (> 0)"
+        }
 
     price_dist = abs(entry_price - stop_loss_price)
     if price_dist <= 0:
@@ -1071,10 +1098,10 @@ def calculate_lot_size(asset: str, entry_price: float, stop_loss_price: float,
             "reason": "Entry price equals Stop-Loss (zero distance)"
         }
 
-    risk_budget_usd = account_balance * (risk_pct / 100.0)
+    risk_budget_usd = account_balance * (max(0.01, risk_pct) / 100.0)
     dollar_risk_per_lot = price_dist * spec["contract_size"]
 
-    raw_lots = risk_budget_usd / dollar_risk_per_lot
+    raw_lots = risk_budget_usd / dollar_risk_per_lot if dollar_risk_per_lot > 0 else spec["min_lot"]
     # Step round to lot step (0.01)
     step = spec["lot_step"]
     stepped_lots = math.floor(raw_lots / step) * step
@@ -1092,7 +1119,7 @@ def calculate_lot_size(asset: str, entry_price: float, stop_loss_price: float,
                 clamped_lots = max(spec["min_lot"], round(stepped_margin_lots, 2))
 
     actual_risk_usd = clamped_lots * dollar_risk_per_lot
-    actual_risk_pct = (actual_risk_usd / account_balance) * 100.0
+    actual_risk_pct = (actual_risk_usd / account_balance) * 100.0 if account_balance > 0 else 0.0
 
     return {
         "asset": asset_key,
