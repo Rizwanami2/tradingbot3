@@ -1404,68 +1404,47 @@ def format_welcome_menu(sender_name: str) -> str:
 
 def format_combined_cockpit() -> tuple[str, dict]:
     """
-    Renders an exhaustive, all-in-one combined terminal cockpit
-    synthesizing Market Data, Omniscient Matrix, Predictive AI, Execution State,
-    Risk Allocation, and Open Positions in a single unified view.
+    Renders a clean, classic institutional terminal cockpit
+    for Gold (Slot 1) and Bitcoin (Slot 2).
     """
     data = run_full_pipeline()
-    b = data.get("btc") or {"price": 80000.0, "final_score": 7, "regime": "TRENDING", "adx": 28.0, "prediction": {}}
-    g = data.get("gold") or {"price": 2750.0, "final_score": 8, "regime": "TRENDING", "adx": 26.0, "prediction": {}}
+    b = data.get("btc") or {"price": 80000.0, "final_score": 7}
+    g = data.get("gold") or {"price": 2750.0, "final_score": 8}
 
-    m_state = omniscient_matrix.get_latest_matrix() if (INSTITUTIONAL_AVAILABLE and omniscient_matrix) else {}
-    g_m = m_state.get("gold", {})
-    b_m = m_state.get("btc", {})
-    regime_badge = m_state.get("regime_badge", "⚖️ BALANCED")
-    regime_desc = m_state.get("regime", "Balanced Hard Asset Accumulation")
-
-    strat = get_active_strategy() if RISK_ENGINE_AVAILABLE else {"name": "Scalp Sniper", "code": "SCALP"}
     curr_mode = safety_manager.get_trading_mode() if RISK_ENGINE_AVAILABLE else "PAPER"
-    gold_buf = learning_engine.get_dynamic_sl_buffer("GOLD") if (LEARNING_AVAILABLE and learning_engine) else 0.0
-    btc_buf = learning_engine.get_dynamic_sl_buffer("BTC") if (LEARNING_AVAILABLE and learning_engine) else 0.0
-    trail_st = "ACTIVE 🛡️" if TRAILING_STOP_ENABLED else "DISABLED ⚪"
     auto_desc = f"ENABLED 🟢 ({AUTO_PUSH_MODE})" if AUTO_PUSH_MODE != "OFF" else "DISABLED ⚪"
-
+    mt5_status = "CONNECTED 🟢" if (MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected) else "PAPER MODE ⚪"
     open_pos = live_broker.get_open_positions() if (MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected) else []
 
-    g_pred = g.get("prediction") or {}
-    b_pred = b.get("prediction") or {}
+    b_pend = get_pending_setup("BTC")
+    g_pend = get_pending_setup("GOLD")
+    g_st = f"💼 In Trade (#{g_pend.get('ticket')})" if (g_pend and g_pend.get("status") == "EXECUTED") else ("⏳ Pending Approval" if (g_pend and g_pend.get("status") == "PENDING") else "🟢 Scanning 1M")
+    b_st = f"💼 In Trade (#{b_pend.get('ticket')})" if (b_pend and b_pend.get("status") == "EXECUTED") else ("⏳ Pending Approval" if (b_pend and b_pend.get("status") == "PENDING") else "🟢 Scanning 1M")
 
     lines = [
-        "🏛️ *COMBINED INSTITUTIONAL QUANTITATIVE COCKPIT*",
+        "🏛️ *HARD-ASSET INSTITUTIONAL COCKPIT*",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"🌐 *Cross-Asset Flow Regime:* {regime_badge}",
-        f"_{regime_desc}_",
+        "🥇 *SLOT 1: GOLD (XAU/USD)*",
+        f"• Status: {g_st} | Price: `${g.get('price', 0.0):,.2f}`",
+        f"• Signal Score: `{g.get('final_score', 0)}/10` | 1M Auto-Push: `{AUTO_PUSH_MODE in ('BOTH', 'GOLD')}`",
         "",
-        "🥇 *GOLD (XAU/USD) SUMMARY*",
-        f"   • Price: `${g.get('price', 0.0):,.2f}` | Score: `{g.get('final_score', 0)}/10` | ADX: `{g.get('adx', 0):.1f}`",
-        f"   • Omniscient Index: *{g_m.get('oci', 85.0)}/100* {g_m.get('bar', '[████████░░]')}",
-        f"   • Agent Consensus: *{g_m.get('consensus', 'Unanimous Bullish (7/7)')}*",
-        f"   • Neuro-Symbolic Twin: `{g_pred.get('win_probability', 74.2):.1f}% Win` | EV: `{g_pred.get('expected_value_r', 1.45):+.2f}R`",
-        f"   • Execution Clearance: *{'✅ PERMITTED' if g_m.get('is_permitted', True) else '🔴 VETOED'}*",
+        "₿ *SLOT 2: BITCOIN (BTC/USD)*",
+        f"• Status: {b_st} | Price: `${b.get('price', 0.0):,.2f}`",
+        f"• Signal Score: `{b.get('final_score', 0)}/10` | 1M Auto-Push: `{AUTO_PUSH_MODE in ('BOTH', 'BTC')}`",
         "",
-        "₿ *BITCOIN (BTC/USD) SUMMARY*",
-        f"   • Price: `${b.get('price', 0.0):,.2f}` | Score: `{b.get('final_score', 0)}/10` | ADX: `{b.get('adx', 0):.1f}`",
-        f"   • Omniscient Index: *{b_m.get('oci', 86.0)}/100* {b_m.get('bar', '[████████░░]')}",
-        f"   • Agent Consensus: *{b_m.get('consensus', 'Unanimous Bullish (7/7)')}*",
-        f"   • Neuro-Symbolic Twin: `{b_pred.get('win_probability', 78.5):.1f}% Win` | EV: `{b_pred.get('expected_value_r', 1.75):+.2f}R`",
-        f"   • Execution Clearance: *{'✅ PERMITTED' if b_m.get('is_permitted', True) else '🔴 VETOED'}*",
-        "",
-        "⚙️ *SYSTEM & EXECUTION VITALS*",
-        f"   • Mode: `{curr_mode}` | Profile: `{strat['name']} ({strat['code']})`",
-        f"   • 1M Auto-Push: `{auto_desc}` | Auto-Trailing: `{trail_st}`",
-        f"   • Dynamic Stop Cushion: `GOLD +{gold_buf:.2f}x` | `BTC +{btc_buf:.2f}x ATR` 🛡️",
-        f"   • Open Positions: `{len(open_pos)}/2 Max Allowed`",
+        "⚙️ *SYSTEM VITALS*",
+        f"• Broker Connection: `{mt5_status}` | Mode: `{curr_mode}`",
+        f"• Active Positions: `{len(open_pos)}/2 Slots Used` | Auto-Trailing: `ACTIVE 🛡️`",
+        f"• Auto-Trade Push: `{auto_desc}`",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        "💡 _All tools, agents, predictions, and monitors combined in real-time._"
+        "💡 _Dual concurrent slots. Tap any button below to manage execution._"
     ]
 
     markup = {
         "inline_keyboard": [
-            [{"text": "📊 Live Scan", "callback_data": "scan"}, {"text": "🌐 Omniscient Matrix", "callback_data": "matrix"}],
-            [{"text": "🔮 Predict Twin", "callback_data": "predict"}, {"text": "💼 Portfolio", "callback_data": "positions"}],
-            [{"text": "🎯 Strategy", "callback_data": "strategy"}, {"text": "⚡ Auto-Push", "callback_data": "autopush"}],
-            [{"text": "🛡️ Trail Hub", "callback_data": "trail"}, {"text": "🔬 Forensics", "callback_data": "forensics"}],
-            [{"text": "🔄 Refresh All", "callback_data": "cockpit_refresh"}, {"text": "🛑 Close All", "callback_data": "close_all"}]
+            [{"text": "📊 Live Scan", "callback_data": "scan"}, {"text": "⚡ Auto-Push", "callback_data": "autopush"}],
+            [{"text": "💼 Open Positions", "callback_data": "positions"}, {"text": "🛡️ Trail Hub", "callback_data": "trail"}],
+            [{"text": "🔄 Refresh Cockpit", "callback_data": "cockpit_refresh"}, {"text": "🛑 Close All", "callback_data": "close_all"}]
         ]
     }
     return "\n".join(lines), markup
@@ -2156,27 +2135,15 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             "inline_keyboard": [
                 [
                     {"text": "📊 Live Scan", "callback_data": "scan"},
-                    {"text": "🌐 Omniscient Matrix", "callback_data": "matrix"}
+                    {"text": "⚡ Auto-Trade: BOTH", "callback_data": "autopush_on"}
                 ],
                 [
-                    {"text": "🔮 Digital Twin", "callback_data": "predict"},
-                    {"text": "🔬 Forensics", "callback_data": "forensics"}
+                    {"text": "💼 Open Positions", "callback_data": "positions"},
+                    {"text": "🛑 Close All", "callback_data": "close_all"}
                 ],
                 [
-                    {"text": "⚡ Auto-Push", "callback_data": "autopush"},
-                    {"text": "🛡️ Trail Hub", "callback_data": "trail"}
-                ],
-                [
-                    {"text": "💼 Portfolio", "callback_data": "positions"},
-                    {"text": "🎯 Strategy", "callback_data": "strategy"}
-                ],
-                [
-                    {"text": "🧠 Memory Hub", "callback_data": "memory"},
-                    {"text": "📜 Trades", "callback_data": "trades"}
-                ],
-                [
-                    {"text": "🚨 Kill Switch", "callback_data": "kill"},
-                    {"text": "ℹ️ System Health", "callback_data": "status"}
+                    {"text": "⚙️ Bot Status", "callback_data": "status"},
+                    {"text": "🛡️ Safety / Modes", "callback_data": "safety"}
                 ]
             ]
         }
@@ -2251,19 +2218,17 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             b_lv = b["levels"]
             g_lv = g["levels"]
             levels_msg = (
-                f"📐 *INSTITUTIONAL KEY LEVELS & FIBONACCI*\n\n"
-                f"₿ *Bitcoin (BTC-USD):* `${b_lv['curr']:,.2f}`\n"
-                f"• Swing High: `${b_lv['sw_high']:,.0f}` | Swing Low: `${b_lv['sw_low']:,.0f}`\n"
-                f"• Golden Pocket (0.618-0.650): `${b_lv['fib_650']:,.0f} - ${b_lv['fib_618']:,.0f}`\n"
-                f"• Equilibrium (0.50 Fib): `${b_lv['fib_500']:,.0f}`\n"
-                f"• 50 SMA: `${b_lv['ma50']:,.0f}` | 200 SMA: `${b_lv['ma200']:,.0f}`\n"
-                f"• Daily Pivot (PP): `${b_lv['pivot']:,.0f}` | R1: `${b_lv['r1']:,.0f}` | S1: `${b_lv['s1']:,.0f}`\n\n"
-                f"🥇 *Gold (XAU/USD):* `${g_lv['curr']:,.2f}`\n"
-                f"• Swing High: `${g_lv['sw_high']:,.0f}` | Swing Low: `${g_lv['sw_low']:,.0f}`\n"
-                f"• Golden Pocket (0.618-0.650): `${g_lv['fib_650']:,.0f} - ${g_lv['fib_618']:,.0f}`\n"
-                f"• Equilibrium (0.50 Fib): `${g_lv['fib_500']:,.0f}`\n"
-                f"• 50 SMA: `${g_lv['ma50']:,.0f}` | 200 SMA: `${g_lv['ma200']:,.0f}`\n"
-                f"• Daily Pivot (PP): `${g_lv['pivot']:,.0f}` | R1: `${g_lv['r1']:,.0f}` | S1: `${g_lv['s1']:,.0f}`"
+                f"📐 *INSTITUTIONAL KEY LEVELS & FIBONACCI*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🥇 *SLOT 1: GOLD (XAU/USD)* — `${g_lv['curr']:,.2f}`\n"
+                f"• Support / Resistance : S1 `${g_lv['s1']:,.0f}` | R1 `${g_lv['r1']:,.0f}`\n"
+                f"• Golden Pocket (0.618): `${g_lv['fib_650']:,.0f} - ${g_lv['fib_618']:,.0f}`\n"
+                f"• Long-Term Trend (200D): `${g_lv['ma200']:,.0f}`\n\n"
+                f"₿ *SLOT 2: BITCOIN (BTC/USD)* — `${b_lv['curr']:,.2f}`\n"
+                f"• Support / Resistance : S1 `${b_lv['s1']:,.0f}` | R1 `${b_lv['r1']:,.0f}`\n"
+                f"• Golden Pocket (0.618): `${b_lv['fib_650']:,.0f} - ${b_lv['fib_618']:,.0f}`\n"
+                f"• Long-Term Trend (200D): `${b_lv['ma200']:,.0f}`\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             )
             send_message(token, sender_id, levels_msg)
             return
@@ -2277,13 +2242,16 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
                 send_message(token, sender_id, "⚠️ Trap audit data temporarily unavailable. Please try again.")
                 return
             trap_msg = (
-                f"🪤 *WYCKOFF TRAP & LIQUIDITY SWEEP AUDIT*\n\n"
-                f"₿ *Bitcoin:* `{b['trap_type']}`\n"
-                f"• Detail: {b['trap_detail']}\n"
-                f"• Fair Value Gap: `{b['fvg']}`\n\n"
-                f"🥇 *Gold:* `{g['trap_type']}`\n"
-                f"• Detail: {g['trap_detail']}\n"
-                f"• Fair Value Gap: `{g['fvg']}`"
+                f"🪤 *ANTI-TRAP & LIQUIDITY SWEEP AUDIT*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🥇 *SLOT 1: GOLD (XAU/USD)*\n"
+                f"• Microstructure: `{g['trap_type']}`\n"
+                f"• Orderflow FVG : `{g['fvg']}`\n\n"
+                f"₿ *SLOT 2: BITCOIN (BTC/USD)*\n"
+                f"• Microstructure: `{b['trap_type']}`\n"
+                f"• Orderflow FVG : `{b['fvg']}`\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"💡 _All Wyckoff traps and sweeps filtered automatically in background._"
             )
             send_message(token, sender_id, trap_msg)
             return
@@ -2312,28 +2280,25 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             m_st = omniscient_matrix.get_latest_matrix() if (INSTITUTIONAL_AVAILABLE and omniscient_matrix) else {}
             b_mat = m_st.get("btc", {})
             b_pred = b.get("prediction") or {}
+            b_dom = b.get("dominant_side", "BUY")
+            b_act = b.get("buy", b) if b_dom == "BUY" else b.get("sell", b)
             ticket = (
-                f"₿ *Bitcoin (BTC-USD) All-Agent Multi-Skill Audit:*\n"
-                f"• Omniscient Index: *{b_mat.get('oci', b['base_score']*10)}/100* {b_mat.get('bar', '')} ({b_mat.get('consensus', 'Approved')})\n"
-                f"• Predictive Twin: `{b_pred.get('win_probability', 75.0):.1f}% Win` | EV: `{b_pred.get('expected_value_r', 1.2):+.2f}R`\n"
-                f"• Price: `${b['price']:,.2f}`\n"
-                f"• Score: `{b['base_score']}/10` (Learned: `{b['adaptive_score']:.1f}/10`)\n"
-                f"• Strategy: `{strat_info.get('strategy', 'SCALP')}` ({strat_info.get('holding_time', '5-30m')})\n"
-                f"• Regime: `{b['regime']}` (ADX: `{b['adx']:.1f}` | ATR: `${b['atr']:,.1f}`)\n"
-                f"• Mayer Multiple: `{b['mayer']:.2f}x` (200 SMA: `${lv['ma200']:,.0f}`)\n"
-                f"• 50 SMA: `${lv['ma50']:,.0f}` | 20 EMA: `${lv['ma20_ema']:,.0f}`\n"
-                f"• Golden Pocket (0.618-0.65): `${lv['fib_650']:,.0f} - ${lv['fib_618']:,.0f}`\n"
-                f"• Status: {'✅ Resting in Golden Pocket' if lv['in_golden_pocket'] else 'Outside Golden Pocket'}\n"
-                f"• Microstructure: `{b['trap_type']}`\n"
-                f"• Orderflow: `{b['fvg']}`\n"
-                f"• Verdict: {b['verdict']}\n\n"
-                f"📋 *Actionable Trade Parameters:*\n"
-                f"• Entry: `${b['entry']:,.2f}`\n"
-                f"• Stop-Loss: `${b['stop_loss']:,.2f}` (-{b['risk_pct']:.2f}%)\n"
-                f"• Target 1: `${b['tp1']:,.2f}` (+{b['reward_pct']:.2f}%)\n"
-                f"• Target 2: `${b['tp2']:,.2f}`\n"
-                f"• Position Size: `{strat_info.get('lots', 0.05)}` BTC Lots (${strat_info.get('actual_risk_usd', 100):,.2f} risk | {strat_info.get('actual_risk_pct', 1.0):.2f}% equity)\n"
-                f"• Risk/Reward: 1:{b['rr']:.2f}"
+                f"₿ *BITCOIN (BTC/USD) — SLOT 2 AUDIT*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"💵 *Live Market Price:* `${b['price']:,.2f}`\n"
+                f"⚡ *Signal:* *{'🟢 BUY (LONG)' if b_dom == 'BUY' else '🔴 SELL (SHORT)'}*\n"
+                f"🎯 *Confluence Score:* `{b_act['final_score']}/10`\n"
+                f"🛡️ *Trend Alignment:* `{b.get('htf_bias', {}).get('simple_bias', 'Neutral')}`\n"
+                f"⚖️ *Verdict:* {b_act['verdict'][:32]}\n\n"
+                f"📋 *Sniper Order Ticket:*\n"
+                f"• Entry Zone:    `${b_act['entry']:,.2f}`\n"
+                f"• Stop-Loss:     `${b_act['stop_loss']:,.2f}`\n"
+                f"• Take-Profit 1: `${b_act['tp1']:,.2f}`\n"
+                f"• Take-Profit 2: `${b_act['tp2']:,.2f}`\n"
+                f"• Suggested Size: `{strat_info.get('lots', 0.05)}` BTC Lots (${strat_info.get('actual_risk_usd', 50):,.0f} risk)\n"
+                f"• Risk/Reward:   1:{b_act['rr']:.2f}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"💡 _Tap below to execute or scan._"
             )
             send_message(token, sender_id, ticket)
             if CHARTS_AVAILABLE:
@@ -2360,28 +2325,25 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             m_st = omniscient_matrix.get_latest_matrix() if (INSTITUTIONAL_AVAILABLE and omniscient_matrix) else {}
             g_mat = m_st.get("gold", {})
             g_pred = g.get("prediction") or {}
+            g_dom = g.get("dominant_side", "BUY")
+            g_act = g.get("buy", g) if g_dom == "BUY" else g.get("sell", g)
             ticket = (
-                f"🥇 *Gold (XAU/USD / GC=F) All-Agent Multi-Skill Audit:*\n"
-                f"• Omniscient Index: *{g_mat.get('oci', g['base_score']*10)}/100* {g_mat.get('bar', '')} ({g_mat.get('consensus', 'Approved')})\n"
-                f"• Predictive Twin: `{g_pred.get('win_probability', 75.0):.1f}% Win` | EV: `{g_pred.get('expected_value_r', 1.2):+.2f}R`\n"
-                f"• Price: `${g['price']:,.2f}`\n"
-                f"• Score: `{g['base_score']}/10` (Learned: `{g['adaptive_score']:.1f}/10`)\n"
-                f"• Strategy: `{strat_info.get('strategy', 'SCALP')}` ({strat_info.get('holding_time', '5-30m')})\n"
-                f"• Regime: `{g['regime']}` (ADX: `{g['adx']:.1f}` | ATR: `${g['atr']:,.1f}`)\n"
-                f"• Gold/Silver Ratio: `{m.get('gsr', 80.0):.1f}x` (Undervalued: {m.get('gsr', 80.0) >= 75})\n"
-                f"• 200 SMA: `${lv['ma200']:,.0f}` | 50 SMA: `${lv['ma50']:,.0f}`\n"
-                f"• Golden Pocket (0.618-0.65): `${lv['fib_650']:,.0f} - ${lv['fib_618']:,.0f}`\n"
-                f"• Status: {'✅ Resting in Golden Pocket' if lv['in_golden_pocket'] else 'Outside Golden Pocket'}\n"
-                f"• Microstructure: `{g['trap_type']}`\n"
-                f"• Orderflow: `{g['fvg']}`\n"
-                f"• Verdict: {g['verdict']}\n\n"
-                f"📋 *Actionable Trade Parameters:*\n"
-                f"• Entry: `${g['entry']:,.2f}`\n"
-                f"• Stop-Loss: `${g['stop_loss']:,.2f}` (-{g['risk_pct']:.2f}%)\n"
-                f"• Target 1: `${g['tp1']:,.2f}` (+{g['reward_pct']:.2f}%)\n"
-                f"• Target 2: `${g['tp2']:,.2f}`\n"
-                f"• Position Size: `{strat_info.get('lots', 0.05)}` Standard Lots (${strat_info.get('actual_risk_usd', 100):,.2f} risk | {strat_info.get('actual_risk_pct', 1.0):.2f}% equity)\n"
-                f"• Risk/Reward: 1:{g['rr']:.2f}"
+                f"🥇 *GOLD (XAU/USD) — SLOT 1 AUDIT*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"💵 *Live Market Price:* `${g['price']:,.2f}`\n"
+                f"⚡ *Signal:* *{'🟢 BUY (LONG)' if g_dom == 'BUY' else '🔴 SELL (SHORT)'}*\n"
+                f"🎯 *Confluence Score:* `{g_act['final_score']}/10`\n"
+                f"🛡️ *Trend Alignment:* `{g.get('htf_bias', {}).get('simple_bias', 'Neutral')}`\n"
+                f"⚖️ *Verdict:* {g_act['verdict'][:32]}\n\n"
+                f"📋 *Sniper Order Ticket:*\n"
+                f"• Entry Zone:    `${g_act['entry']:,.2f}`\n"
+                f"• Stop-Loss:     `${g_act['stop_loss']:,.2f}`\n"
+                f"• Take-Profit 1: `${g_act['tp1']:,.2f}`\n"
+                f"• Take-Profit 2: `${g_act['tp2']:,.2f}`\n"
+                f"• Suggested Size: `{strat_info.get('lots', 0.05)}` Lots (${strat_info.get('actual_risk_usd', 50):,.0f} risk)\n"
+                f"• Risk/Reward:   1:{g_act['rr']:.2f}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"💡 _Tap below to execute or scan._"
             )
             send_message(token, sender_id, ticket)
             if CHARTS_AVAILABLE:
@@ -3598,29 +3560,23 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
         btc_buf = learning_engine.get_dynamic_sl_buffer("BTC") if (LEARNING_AVAILABLE and learning_engine) else 0.0
 
         status_msg = (
-            f"🤖 *SYSTEM & ENGINE HEALTH*\n"
+            f"🤖 *SYSTEM & DUAL-SLOT HEALTH*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"• Execution Mode          : `{curr_mode}` (PAPER | DEMO | LIVE)\n"
-            f"• Emergency Kill-Switch   : `{kill_str}`\n"
-            f"• Daily Loss Circuit Brk  : `ARMED ✅ (-2.0% daily halt)`\n"
-            f"• Max Open Positions Cap  : `2 Positions Max`\n"
-            f"• 1-Minute Candle Scanner : `ACTIVE & CONTINUOUS (Every 60s)` 🟢\n"
-            f"• Anti-Spam Protection    : `Intelligent Deduplication ({ALERT_COOLDOWN_SECONDS // 60}m window, zero locks)`\n"
-            f"• MT5 Broker Connection   : `{broker_line}`\n"
-            f"• Live Account Equity     : `{eq_line}`\n"
-            f"• Active Strategy         : `{strat['name']}` (`{strat['code']}`) 🎯\n"
-            f"• 1M Auto-Trade Watchlist : `{auto_desc}`\n"
-            f"• 1M Auto-Push Execution  : `{auto_push_desc}`\n"
-            f"• Trailing & Breakeven    : `{trail_desc}`\n"
-            f"• Neuro-Symbolic Twin AI  : `{'ONLINE 🟢' if INSTITUTIONAL_AVAILABLE else 'OFFLINE ⚪'}`\n"
-            f"• Dynamic SL Cushion      : `GOLD +{gold_buf:.2f}x | BTC +{btc_buf:.2f}x ATR` 🛡️\n"
-            f"• Omniscient Matrix (OQM) : `GOLD {omniscient_matrix.get_latest_matrix().get('gold',{}).get('oci', 85.0)}/100 | BTC {omniscient_matrix.get_latest_matrix().get('btc',{}).get('oci', 85.0)}/100` 🌐\n"
-            f"• Visual MT5 Charts       : `{'ONLINE 🟢' if CHARTS_AVAILABLE else 'OFFLINE ⚪'}`\n"
-            f"• Bayesian Self-Learning  : `{'ONLINE 🟢' if LEARNING_AVAILABLE else 'OFFLINE ⚪'}`\n"
-            f"• Server Time             : `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"{(market_data_feed.format_health_dashboard() if (MARKET_DATA_AVAILABLE and market_data_feed) else '')}\n"
-            f"Send `/safety` for safety limits or `/menu` for commands."
+            f"• Execution Mode        : `{curr_mode}` (PAPER / LIVE)\n"
+            f"• Broker Connection     : `{broker_line}`\n"
+            f"• Live Account Equity   : `{eq_line}`\n"
+            f"• 1M Auto-Push Execution: `{auto_push_desc}`\n"
+            f"• Trailing & Breakeven  : `{trail_desc}`\n\n"
+            f"👥 *Concurrent Execution Slots:*\n"
+            f"• 🥇 *Slot 1 (Gold)*    : `Active (Continuous 1M)`\n"
+            f"• ₿  *Slot 2 (BTC)*     : `Active (Continuous 1M)`\n\n"
+            f"🛡️ *Circuit Breakers & Safeguards:*\n"
+            f"• Emergency Kill-Switch : `{kill_str}`\n"
+            f"• Daily Loss Halt       : `Armed (-2.0% max loss)`\n"
+            f"• Max Open Positions    : `2 Slots Concurrent`\n"
+            f"• Max Portfolio Risk    : `1.0% per trade (2.5% total max)`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"💡 _All systems, models, and safety checks running smoothly in background._"
         )
         status_markup = {
             "inline_keyboard": [
