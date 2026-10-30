@@ -29,3 +29,4 @@ market_data_cache.json
 # Never create or track README files
 README*
 readme*
+*.bak

@@ -1424,6 +1424,155 @@ class TestHardAssetProject(unittest.TestCase):
 
         print("    ✅ Dual-Sided Scanning (BUY & SELL) & Enhanced Self-Learning: ALL PASSED")
 
+    def test_18_hierarchical_memory_regime_brains_and_negative_bank(self):
+        """
+        Test 18: 3-Tier Hierarchical Memory Architecture, Continuous Evolution & Negative Bank Veto.
+        Verifies:
+          1. 3-Tier Memory Integrity: Working memory, episodic events, and semantic knowledge graph.
+          2. Zero-Corruption Persistence: SHA-256 integrity check and rolling .bak snapshot backup.
+          3. Markov Regime-Conditioned Factor Brains: Differentiated weights across expansion, chop, and shock regimes.
+          4. Temporal Recency Weighting: Continuous time-by-time decay w(t) = exp(-lambda * delta_t).
+          5. Negative Memory Bank: Pre-trade toxic veto blocks high-risk setups before execution.
+          6. Interactive /memory Command Hub: Formatting of memory dashboard, semantic rules, and toxic patterns.
+        """
+        print("\n[*] 18. Testing Hierarchical Memory, Regime Brains & Negative Bank...")
+        token = "123456:TEST_TOKEN"
+        sender_id = "12345"
+        sender_name = "Trader"
+
+        from self_learning import self_learning_engine
+        sle = self_learning_engine
+
+        # 1. 3-Tier Memory & Checksum Verification
+        chk = sle.memory_manager.get_checksum()
+        self.assertIsNotNone(chk)
+        self.assertEqual(len(chk), 64)  # Valid SHA-256 length
+
+        # Atomic persistence & backup creation
+        saved = sle.save_memory()
+        self.assertTrue(saved)
+        bak_file = getattr(sle.memory_manager, "backup_file", "")
+        self.assertTrue(os.path.exists(bak_file))
+
+        # 2. Markov Regime Detection
+        reg_exp = sle.detect_market_regime(adx=32.0, vix=15.0, atr_ratio=1.1)
+        self.assertEqual(reg_exp, "TREND_EXPANSION")
+
+        reg_chop = sle.detect_market_regime(adx=14.0, vix=16.0, atr_ratio=0.8)
+        self.assertEqual(reg_chop, "CHOP_CONSOLIDATION")
+
+        reg_shock = sle.detect_market_regime(adx=22.0, vix=38.0, atr_ratio=2.2)
+        self.assertEqual(reg_shock, "VOLATILITY_SHOCK")
+
+        # Verify regime factor brain weights differ
+        trend_features = {
+            "trend_ma200": True,
+            "trend_ma50": True,
+            "rsi_sweet_spot": True,
+            "in_golden_pocket": False,
+            "no_trap": True
+        }
+        score_trend, _ = sle.calculate_score("GOLD", trend_features, action="BUY", regime="TREND_EXPANSION")
+        score_chop, _ = sle.calculate_score("GOLD", trend_features, action="BUY", regime="CHOP_CONSOLIDATION")
+        self.assertGreater(score_trend, score_chop)
+
+        # 3. Temporal Recency Weighting (Continuous Time-by-Time Evolution)
+        w_now = sle.compute_temporal_weight(delta_t_days=0.0)
+        w_45d = sle.compute_temporal_weight(delta_t_days=45.0)
+        w_90d = sle.compute_temporal_weight(delta_t_days=90.0)
+        self.assertAlmostEqual(w_now, 1.0, places=2)
+        self.assertAlmostEqual(w_45d, 0.50, delta=0.05)
+        self.assertAlmostEqual(w_90d, 0.25, delta=0.05)
+
+        # 4. Negative Memory Bank Pre-Trade Toxic Veto
+        toxic_sig = {
+            "asset": "BTC",
+            "action": "BUY",
+            "strategy": "MOMENTUM_BREAKOUT",
+            "rsi": 78.0,
+            "adx": 42.0,
+            "upper_wick": 55.0,
+            "lower_wick": 5.0,
+            "tnx_chg": 2.5,
+            "dxy_chg": 0.8,
+            "regime": "VOLATILITY_SHOCK",
+            "root_cause": "Exhaustion blow-off wick into multi-year resistance",
+            "date": "2026-10-30"
+        }
+        sle.memory.setdefault("negative_memory_bank", []).append(toxic_sig)
+
+        # Toxic match setup
+        matching_market = {
+            "rsi": 77.0,
+            "adx": 41.0,
+            "upper_wick_pct": 53.0,
+            "lower_wick_pct": 6.0,
+            "tnx_chg": 2.3,
+            "dxy_chg": 0.7,
+            "regime": "VOLATILITY_SHOCK"
+        }
+        vetoed, reason = sle.check_negative_memory_veto("BTC", "BUY", matching_market, threshold=0.85)
+        self.assertTrue(vetoed)
+        self.assertIn("Exhaustion blow-off", reason)
+
+        # Safe non-matching setup
+        safe_market = {
+            "rsi": 48.0,
+            "adx": 22.0,
+            "upper_wick_pct": 12.0,
+            "lower_wick_pct": 10.0,
+            "tnx_chg": 0.1,
+            "dxy_chg": -0.1,
+            "regime": "CHOP_CONSOLIDATION"
+        }
+        safe_veto, _ = sle.check_negative_memory_veto("BTC", "BUY", safe_market, threshold=0.85)
+        self.assertFalse(safe_veto)
+
+        # 5. Telegram /memory Hub and Subcommands
+        # /memory
+        self.mock_tg.sent_messages.clear()
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/memory")
+        self.assertGreater(len(self.mock_tg.sent_messages), 0)
+        mem_resp = self.mock_tg.sent_messages[-1][1]
+        self.assertIn("QUANTITATIVE MEMORY HUB", mem_resp)
+        self.assertIn("3-TIER MEMORY STORAGE AUDIT", mem_resp)
+        self.assertIn("SHA-256", mem_resp)
+
+        # /memory rules
+        self.mock_tg.sent_messages.clear()
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/memory rules")
+        self.assertGreater(len(self.mock_tg.sent_messages), 0)
+        rules_resp = self.mock_tg.sent_messages[-1][1]
+        self.assertIn("SEMANTIC KNOWLEDGE GRAPH", rules_resp)
+
+        # /memory patterns
+        self.mock_tg.sent_messages.clear()
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/memory patterns")
+        self.assertGreater(len(self.mock_tg.sent_messages), 0)
+        toxic_resp = self.mock_tg.sent_messages[-1][1]
+        self.assertIn("NEGATIVE MEMORY BANK", toxic_resp)
+
+        # /memory backup
+        self.mock_tg.sent_messages.clear()
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/memory backup")
+        self.assertGreater(len(self.mock_tg.sent_messages), 0)
+        backup_resp = self.mock_tg.sent_messages[-1][1]
+        self.assertIn("Memory Backup Created", backup_resp)
+
+        # /memory sync
+        self.mock_tg.sent_messages.clear()
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/memory sync")
+        self.assertGreater(len(self.mock_tg.sent_messages), 0)
+        sync_resp = self.mock_tg.sent_messages[-1][1]
+        self.assertIn("Memory Synchronized", sync_resp)
+
+        # Callback test
+        telegram_bot.handle_callback_query(token, {"id": "cb1", "from": {"id": sender_id, "first_name": sender_name}, "data": "memory"})
+        telegram_bot.handle_callback_query(token, {"id": "cb2", "from": {"id": sender_id, "first_name": sender_name}, "data": "memory_rules"})
+        telegram_bot.handle_callback_query(token, {"id": "cb3", "from": {"id": sender_id, "first_name": sender_name}, "data": "memory_patterns"})
+
+        print("    ✅ Hierarchical Memory, Regime Brains & Negative Bank: ALL PASSED")
+
 
 if __name__ == "__main__":
     unittest.main()

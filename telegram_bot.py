@@ -845,11 +845,32 @@ def _analyze_single_side(symbol: str, asset_type: str, macro: dict, hist, levels
 
     base_score = len(factors_hit)
     adaptive_score = base_score
+    regime_name = "CHOP_CONSOLIDATION"
     if LEARNING_AVAILABLE and learning_engine:
-        adaptive_score, _ = learning_engine.calculate_score(asset_type, active_features, action=action)
+        regime_name = learning_engine.detect_market_regime(
+            adx=adx,
+            vix=macro.get("vix", 18.0),
+            atr_ratio=atr / (25.0 if asset_type == "GOLD" else 1500.0)
+        )
+        adaptive_score, _ = learning_engine.calculate_score(asset_type, active_features, action=action, regime=regime_name)
 
     final_score = max(base_score, int(round(adaptive_score)))
     is_a_plus = (final_score >= 8)
+
+    # Negative Memory Bank Pre-Trade Toxic Veto (Fingerprint Matching)
+    toxic_veto = False
+    toxic_reason = ""
+    if LEARNING_AVAILABLE and learning_engine:
+        market_vec = {
+            "rsi": rsi,
+            "adx": adx,
+            "upper_wick_pct": up_wick_pct,
+            "lower_wick_pct": low_wick_pct,
+            "tnx_chg": macro.get("tnx_chg", 0.0),
+            "dxy_chg": macro.get("dxy_chg", 0.0),
+            "regime": regime_name
+        }
+        toxic_veto, toxic_reason = learning_engine.check_negative_memory_veto(asset_type, action, market_vec)
 
     is_scalp_strategy = (active_strat["code"] == "SCALP")
 
@@ -858,7 +879,10 @@ def _analyze_single_side(symbol: str, asset_type: str, macro: dict, hist, levels
         at_good_level = strat_accuracy.get("at_good_level", False) or                         levels.get("in_golden_pocket", False) or                         (sw_low > 0 and curr > 0 and (curr - sw_low) / curr <= 0.05) or                         (levels.get("ma20_ema") and abs(curr - levels["ma20_ema"]) / curr <= 0.02) or                         (levels.get("s1") and abs(curr - levels["s1"]) / curr <= 0.02)
         can_execute_scalp = is_scalp_strategy and (final_score >= 7) and (trap_type != "BULL_TRAP") and not htf_eval.get("veto")
 
-        if trap_type == "BULL_TRAP":
+        if toxic_veto:
+            is_a_plus = False
+            verdict = f"🔴 VETOED [NEGATIVE MEMORY BANK]: {toxic_reason}"
+        elif trap_type == "BULL_TRAP":
             is_a_plus = False
             verdict = "🔴 VETOED: Bull Trap at Resistance! Stand Aside or Fade."
         elif htf_eval.get("veto"):
@@ -882,7 +906,10 @@ def _analyze_single_side(symbol: str, asset_type: str, macro: dict, hist, levels
         is_fade_trap = (trap_type in ("BULL_TRAP", "UPTHRUST")) and (final_score >= 7)
         can_execute_scalp = is_scalp_strategy and (final_score >= 7) and (trap_type not in ("BEAR_TRAP", "SPRING")) and not htf_eval.get("veto")
 
-        if trap_type in ("BEAR_TRAP", "SPRING"):
+        if toxic_veto:
+            is_a_plus = False
+            verdict = f"🔴 VETOED [NEGATIVE MEMORY BANK]: {toxic_reason}"
+        elif trap_type in ("BEAR_TRAP", "SPRING"):
             is_a_plus = False
             verdict = "🔴 VETOED: Wyckoff Spring at Support! Stand Aside on Shorts."
         elif is_fade_trap:
@@ -1010,6 +1037,9 @@ def _analyze_single_side(symbol: str, asset_type: str, macro: dict, hist, levels
         "final_score": final_score,
         "verdict": verdict,
         "is_a_plus": is_a_plus,
+        "regime_name": regime_name,
+        "toxic_veto": toxic_veto,
+        "toxic_reason": toxic_reason,
         "factors_hit": factors_hit,
         "entry": curr,
         "stop_loss": stop_loss,
@@ -1284,7 +1314,8 @@ def format_welcome_menu(sender_name: str) -> str:
         f"• `/forensics`             ──► 4-Agent Post-Mortem Forensic Council debrief & root cause\n"
         f"• `/learn`                 ──► Bayesian factor rankings & active probability weights\n"
         f"• `/train`                 ──► Institutional walk-forward self-calibration on history\n"
-        f"• `/trades`                ──► Closed trades journal & realized PnL performance history\n"f"• `/matrix` (or `/omniscient`)──► Omniscient Quantitative Matrix (7 background agents combined)\n"f"• `/all` (or `/cockpit`)   ──► All-in-one combined cockpit (Market, Matrix, Twin, Risk, Positions)\n\n"
+        f"• `/trades`                ──► Closed trades journal & realized PnL performance history\n"
+        f"• `/memory` (or `/mem`)    ──► 3-Tier Hierarchical Memory, Semantic Rules & Negative Bank\n"f"• `/matrix` (or `/omniscient`)──► Omniscient Quantitative Matrix (7 background agents combined)\n"f"• `/all` (or `/cockpit`)   ──► All-in-one combined cockpit (Market, Matrix, Twin, Risk, Positions)\n\n"
         f"⚡ *Execution & Order Controls:*\n"
         f"• `/trade`                 ──► Execution hub (`/trade buy gold`, `/trade sell btc`)\n"
         f"• `/autopush` (or `/push`) ──► Automated order push controller (`/autopush on|off|gold|btc`)\n"
@@ -1652,6 +1683,18 @@ def handle_callback_query(token: str, cq: dict):
         process_telegram_command(token, sender_id, sender_name, "/forensics")
     elif data in ("trades", "history"):
         process_telegram_command(token, sender_id, sender_name, "/trades")
+    elif data in ("memory", "mem"):
+        process_telegram_command(token, sender_id, sender_name, "/memory")
+    elif data in ("memory_rules", "mem_rules"):
+        process_telegram_command(token, sender_id, sender_name, "/memory rules")
+    elif data in ("memory_patterns", "mem_patterns", "memory_toxic"):
+        process_telegram_command(token, sender_id, sender_name, "/memory patterns")
+    elif data in ("memory_backup", "mem_backup"):
+        process_telegram_command(token, sender_id, sender_name, "/memory backup")
+    elif data in ("memory_export", "mem_export"):
+        process_telegram_command(token, sender_id, sender_name, "/memory export")
+    elif data in ("memory_sync", "mem_sync"):
+        process_telegram_command(token, sender_id, sender_name, "/memory sync")
     elif data == "strategy":
         process_telegram_command(token, sender_id, sender_name, "/strategy")
     elif data.startswith("strat_"):
@@ -2005,7 +2048,7 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
                     {"text": "🎯 Strategy", "callback_data": "strategy"}
                 ],
                 [
-                    {"text": "🔬 Forensics", "callback_data": "forensics"},
+                    {"text": "🧠 Memory Hub", "callback_data": "memory"},
                     {"text": "📜 Trades", "callback_data": "trades"}
                 ],
                 [
@@ -3127,6 +3170,66 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             send_message(token, sender_id, "⚠️ Outcome predictor engine unavailable.")
         return
 
+
+    # ── 7E. ADVANCED HIERARCHICAL MEMORY & CONTINUOUS EVOLUTION HUB (/memory, /mem) ──
+    if cmd in ("/memory", "/mem"):
+        if not (LEARNING_AVAILABLE and learning_engine):
+            send_message(token, sender_id, "⚠️ Hierarchical Memory Engine not available.")
+            return
+
+        subcmd = args_lower.strip()
+        if subcmd in ("rules", "rule", "graph"):
+            rules_card = learning_engine.format_semantic_rules_card()
+            send_message(token, sender_id, rules_card)
+            return
+        elif subcmd in ("patterns", "pattern", "toxic", "negative", "traps"):
+            toxic_card = learning_engine.format_negative_patterns_card()
+            send_message(token, sender_id, toxic_card)
+            return
+        elif subcmd in ("backup", "save"):
+            saved = learning_engine.save_memory()
+            if saved:
+                chk = learning_engine.memory_manager.get_checksum()[:12] if hasattr(learning_engine, "memory_manager") else "N/A"
+                send_message(token, sender_id, f"✅ *Institutional Memory Backup Created!*\n  • File: `learning_memory.json`\n  • Snapshot: `learning_memory.bak`\n  • SHA-256 Checksum: `{chk}`\n  • State: Pristine & Atomic")
+            else:
+                send_message(token, sender_id, "⚠️ Failed to create memory backup.")
+            return
+        elif subcmd in ("sync", "refresh"):
+            count = learning_engine.sync_all_closed_trades(live_broker=live_broker, safety_manager=safety_manager)
+            send_message(token, sender_id, f"🔄 *Hierarchical Memory Synchronized!*\n  • Synced `{count}` new closed trades from MT5 broker/paper logs.")
+            return
+        elif subcmd in ("export", "download"):
+            mem_path = getattr(learning_engine, "memory_file", "learning_memory.json")
+            if os.path.exists(mem_path):
+                try:
+                    with open(mem_path, "rb") as f:
+                        url = f"https://api.telegram.org/bot{token}/sendDocument"
+                        requests.post(url, data={"chat_id": sender_id, "caption": "🧠 Institutional Learning Memory JSON (Tiers 1-3)"}, files={"document": f}, timeout=10)
+                    return
+                except Exception:
+                    pass
+            send_message(token, sender_id, f"📁 *Memory File Location:*\n`{os.path.abspath(mem_path)}`")
+            return
+        else:
+            mem_dashboard = learning_engine.format_memory_dashboard()
+            mem_markup = {
+                "inline_keyboard": [
+                    [
+                        {"text": "📜 Semantic Rules", "callback_data": "memory_rules"},
+                        {"text": "🪤 Negative Bank", "callback_data": "memory_patterns"}
+                    ],
+                    [
+                        {"text": "💾 Backup Memory", "callback_data": "memory_backup"},
+                        {"text": "🔄 Sync Broker Deals", "callback_data": "memory_sync"}
+                    ],
+                    [
+                        {"text": "🧠 Train 180D", "callback_data": "train_model"},
+                        {"text": "📜 Trade Journal", "callback_data": "trades"}
+                    ]
+                ]
+            }
+            send_message(token, sender_id, mem_dashboard, reply_markup=mem_markup)
+            return
 
     # ── 7D. OMNISCIENT QUANTITATIVE MATRIX HUB (/matrix [all|gold|btc|agents|status], /omniscient) ──
     if cmd in ("/matrix", "/omniscient"):
