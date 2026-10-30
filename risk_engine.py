@@ -929,15 +929,17 @@ def validate_strategy_accuracy(strat_code: str, asset: str, current_price: float
         else:
             accuracy_factors.append("Clean Microstructure (Minimal Rejection Wick)")
 
-        # Practical RSI bounds for scalping
-        min_rsi = 35.0 if at_good_level else 38.0
-        max_rsi = 70.0 if at_good_level else 68.0
+        # Practical RSI bounds for scalping (allows oversold bounces & overbought fades at support/resistance)
+        min_rsi = 25.0 if at_good_level else 30.0
+        max_rsi = 75.0 if at_good_level else 70.0
+        min_short_rsi = (100.0 - max_rsi)
+        max_short_rsi = (100.0 - min_rsi)
         if is_buy and (rsi > max_rsi or rsi < min_rsi):
             passed = False
             veto_reasons.append(f"RSI Exhaustion ({rsi:.1f}). Long scalps require RSI {min_rsi:.0f}-{max_rsi:.0f}.")
-        elif not is_buy and (rsi < (100.0 - max_rsi) or rsi > (100.0 - min_rsi)):
+        elif not is_buy and (rsi < min_short_rsi or rsi > max_short_rsi):
             passed = False
-            veto_reasons.append(f"RSI Oversold/Overbought ({rsi:.1f}). Short scalps require RSI {(100.0-max_rsi):.0f}-{(100.0-min_rsi):.0f}.")
+            veto_reasons.append(f"RSI Oversold/Overbought ({rsi:.1f}). Short scalps require RSI {min_short_rsi:.0f}-{max_short_rsi:.0f}.")
         else:
             accuracy_factors.append(f"Momentum Sweet Spot (RSI {rsi:.1f})")
 

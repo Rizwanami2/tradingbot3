@@ -138,6 +138,9 @@ AUTO_PUSH_ENABLED = False
 # Automated Trailing Stop & Breakeven Protection
 TRAILING_STOP_ENABLED = True
 
+# Global Active Chat ID Tracking (Updated from commands, callbacks, and config)
+ACTIVE_CHAT_ID = ""
+
 # Strategy Profile Auto-Switch (False = Manual Profile Locked; True = Auto-Adapts to Regime)
 STRATEGY_AUTO_SWITCH = False
 
@@ -150,6 +153,19 @@ def is_auto_push_active(asset: str) -> bool:
     return mode == asset_norm
 
 
+def save_auto_push_state(mode_str: str):
+    """Persists auto push mode into config_telegram.json."""
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            data["auto_push_mode"] = mode_str
+            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception:
+            pass
+
+
 def set_auto_push_mode(mode: str) -> tuple[str, bool]:
     """Updates Auto Push and Auto Trade execution modes synchronously."""
     global AUTO_PUSH_MODE, AUTO_PUSH_ENABLED, AUTO_TRADE_MODE, AUTO_TRADE_LIVE
@@ -159,24 +175,28 @@ def set_auto_push_mode(mode: str) -> tuple[str, bool]:
         AUTO_TRADE_MODE = "BOTH"
         AUTO_PUSH_ENABLED = True
         AUTO_TRADE_LIVE = True
+        save_auto_push_state("BOTH")
         return "BOTH", True
     elif m in ("GOLD", "XAU", "XAUUSD"):
         AUTO_PUSH_MODE = "GOLD"
         AUTO_TRADE_MODE = "GOLD"
         AUTO_PUSH_ENABLED = True
         AUTO_TRADE_LIVE = True
+        save_auto_push_state("GOLD")
         return "GOLD", True
     elif m in ("BTC", "BITCOIN", "BTCUSD"):
         AUTO_PUSH_MODE = "BTC"
         AUTO_TRADE_MODE = "BTC"
         AUTO_PUSH_ENABLED = True
         AUTO_TRADE_LIVE = True
+        save_auto_push_state("BTC")
         return "BTC", True
     else:
         AUTO_PUSH_MODE = "OFF"
         AUTO_TRADE_MODE = "OFF"
         AUTO_PUSH_ENABLED = False
         AUTO_TRADE_LIVE = False
+        save_auto_push_state("OFF")
         return "OFF", False
 
 
@@ -1142,10 +1162,12 @@ def _analyze_single_side(symbol: str, asset_type: str, macro: dict, hist, levels
             is_scalp=is_scalp_strategy
         )
         if prediction:
-            if not prediction.get("approved", True):
+            pred_ev = prediction.get("expected_value_r", 0.0)
+            is_pred_veto = not prediction.get("approved", True) and (pred_ev < 0.0)
+            if is_pred_veto:
                 if is_a_plus:
                     is_a_plus = False
-                    verdict = f"🔴 VETOED [PREDICTIVE DIGITAL TWIN]: {prediction.get('rejection_reason', 'Low Expected Value')}"
+                    verdict = f"🔴 VETOED [PREDICTIVE DIGITAL TWIN]: {prediction.get('rejection_reason', 'Negative Expected Value')}"
             else:
                 factors_hit.append(f"Predictive Twin: {prediction.get('summary')}")
 
@@ -1774,9 +1796,14 @@ def get_lock_status_text() -> str:
 
 def handle_callback_query(token: str, cq: dict):
     """Processes interactive Telegram inline keyboard button presses."""
+    global ACTIVE_CHAT_ID
     cq_id = cq.get("id")
     from_user = cq.get("from", {})
-    sender_id = str(from_user.get("id"))
+    sender_id = str(from_user.get("id") or "")
+    if sender_id and sender_id not in ("YOUR_TELEGRAM_CHAT_ID_HERE", "0", ""):
+        ACTIVE_CHAT_ID = sender_id
+        if not os.environ.get("TELEGRAM_CHAT_ID"):
+            save_chat_id(sender_id)
     sender_name = from_user.get("first_name", "User")
     data = cq.get("data", "")
 
@@ -2224,7 +2251,12 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
     Central command processor for Telegram bot.
     Supports both Modern Combined Hubs and Direct Legacy Shortcuts.
     """
-    global AUTO_TRADE_MODE, AUTO_TRADE_LIVE, TRAILING_STOP_ENABLED
+    global AUTO_TRADE_MODE, AUTO_TRADE_LIVE, TRAILING_STOP_ENABLED, ACTIVE_CHAT_ID
+
+    if sender_id and sender_id not in ("YOUR_TELEGRAM_CHAT_ID_HERE", "0", ""):
+        ACTIVE_CHAT_ID = str(sender_id)
+        if not os.environ.get("TELEGRAM_CHAT_ID"):
+            save_chat_id(str(sender_id))
 
     text = msg_text.strip()
     cmd_parts = text.split()
@@ -3856,7 +3888,16 @@ def start_bot():
     current_chat_id = chat_id
 
     def get_active_chat_id():
-        return current_chat_id
+        global ACTIVE_CHAT_ID
+        if ACTIVE_CHAT_ID and ACTIVE_CHAT_ID not in ("YOUR_TELEGRAM_CHAT_ID_HERE", "0", ""):
+            return ACTIVE_CHAT_ID
+        if current_chat_id and current_chat_id not in ("YOUR_TELEGRAM_CHAT_ID_HERE", "0", ""):
+            return current_chat_id
+        _, saved_cid = get_credentials()
+        if saved_cid and saved_cid not in ("YOUR_TELEGRAM_CHAT_ID_HERE", "0", ""):
+            ACTIVE_CHAT_ID = saved_cid
+            return saved_cid
+        return ""
 
     # Launch background alert scanner
     t = threading.Thread(target=auto_scanner_worker, args=(token, get_active_chat_id), daemon=True)
@@ -3897,7 +3938,13 @@ def start_bot():
 
                 # Handle interactive inline button clicks concurrently
                 if "callback_query" in u:
-                    cmd_executor.submit(_safe_callback, token, u["callback_query"])
+                    cq_obj = u["callback_query"]
+                    cq_from_id = str(cq_obj.get("from", {}).get("id") or (cq_obj.get("message", {}).get("chat", {}).get("id", "")))
+                    if cq_from_id and cq_from_id not in ("YOUR_TELEGRAM_CHAT_ID_HERE", "0", ""):
+                        current_chat_id = cq_from_id
+                        ACTIVE_CHAT_ID = cq_from_id
+                        save_chat_id(cq_from_id)
+                    cmd_executor.submit(_safe_callback, token, cq_obj)
                     continue
 
                 if "message" in u and "text" in u["message"]:

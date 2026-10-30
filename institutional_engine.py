@@ -456,8 +456,8 @@ class NeuroSymbolicPredictor:
         rr_tp1 = round(reward_dist / risk_dist, 2)
         ev_r = round((win_probability * rr_tp1) - ((1.0 - win_probability) * 1.0), 2)
 
-        min_prob = 0.65 if strategy.upper() == "SCALP" else 0.70
-        is_approved = (win_probability >= min_prob) and (ev_r >= 0.15) and not (barrier_detected and win_probability < 0.75)
+        min_prob = 0.48 if strategy.upper() == "SCALP" else 0.45
+        is_approved = ((win_probability >= min_prob and ev_r >= 0.05) or (ev_r >= 0.20)) and not (barrier_detected and win_probability < 0.48)
 
         verdict_str = "APPROVED" if is_approved else "VETOED (Low EV / Barrier)"
         if not is_approved:
