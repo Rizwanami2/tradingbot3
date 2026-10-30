@@ -1839,11 +1839,11 @@ def format_elite_alert(asset: str, data: dict, setup_data: dict = None, exec_res
 
     # Clean Header
     if is_auto_trade and exec_result and exec_result.get("success"):
-        hdr = f"⚡ *AUTO-EXECUTED [{exec_result.get('mode', 'LIVE')}] | {slot_label}: {sym_name}*"
+        hdr = f"⚡ *AUTO-PUSH (AUTO-EXECUTION) [{exec_result.get('mode', 'LIVE')}] | {slot_label}: {sym_name}*"
     elif is_auto_trade and exec_result and exec_result.get("requires_confirmation"):
-        hdr = f"⚠️ *CONFIRMATION REQUIRED | {slot_label}: {sym_name}*"
+        hdr = f"⚠️ *AUTO-PUSH CONFIRMATION REQUIRED | {slot_label}: {sym_name}*"
     elif is_auto_trade and exec_result and exec_result.get("error"):
-        hdr = f"⚠️ *AUTO-TRADE BLOCKED | {slot_label}: {sym_name}*"
+        hdr = f"⚠️ *AUTO-PUSH BLOCKED | {slot_label}: {sym_name}*"
     else:
         hdr = f"🎯 *HIGH-CONFLUENCE SIGNAL | {slot_label}: {sym_name}*"
 
