@@ -777,6 +777,10 @@ STRATEGIES = {
 }
 
 ACTIVE_STRATEGY = "SCALP"
+if safety_manager and "active_strategy" in safety_manager.state:
+    _saved_strat = safety_manager.state.get("active_strategy")
+    if _saved_strat in STRATEGIES:
+        ACTIVE_STRATEGY = _saved_strat
 
 
 def get_market_session(dt: datetime = None) -> dict:
@@ -852,6 +856,12 @@ def set_active_strategy(strat_name: str) -> tuple:
         code = "REVERSAL"
     if code in STRATEGIES:
         ACTIVE_STRATEGY = code
+        if safety_manager:
+            try:
+                safety_manager.state["active_strategy"] = code
+                safety_manager.save_state()
+            except Exception:
+                pass
         return True, STRATEGIES[code]
     return False, None
 

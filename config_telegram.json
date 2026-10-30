@@ -1,7 +1,7 @@
 {
   "telegram": {
     "bot_token": "YOUR_TELEGRAM_BOT_TOKEN_HERE",
-    "chat_id": "12345678"
+    "chat_id": "YOUR_TELEGRAM_CHAT_ID_HERE"
   },
   "mt5": {
     "enabled": true,
@@ -15,6 +15,5 @@
   "pipeline": {
     "scan_interval_seconds": 1800,
     "min_confluence_to_alert": 8
-  },
-  "auto_push_mode": "OFF"
+  }
 }

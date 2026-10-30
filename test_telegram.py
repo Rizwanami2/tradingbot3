@@ -25,6 +25,7 @@ else:
     ssl._create_default_https_context = _create_unverified_https_context
 
 ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
+CONFIG_LOCAL_PATH = os.path.join(os.path.dirname(__file__), "config_telegram.local.json")
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config_telegram.json")
 
 
@@ -47,11 +48,29 @@ def get_token():
         except Exception:
             pass
 
-    # 3. Try config_telegram.json
+    # 3. Try config_telegram.local.json (git-ignored)
+    if os.path.exists(CONFIG_LOCAL_PATH):
+        try:
+            with open(CONFIG_LOCAL_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                val = data.get("telegram", {}).get("bot_token", "").strip()
+                if val and val != "YOUR_TELEGRAM_BOT_TOKEN_HERE":
+                    return val
+        except Exception:
+            pass
+
+    # 4. Try config_telegram.json (with merge marker guard)
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
+                raw_cfg = f.read()
+            if "<<<<<<<" in raw_cfg:
+                import re
+                tok_m = re.search(r'"bot_token":\s*"([^"]+)"', raw_cfg)
+                if tok_m and tok_m.group(1) != "YOUR_TELEGRAM_BOT_TOKEN_HERE":
+                    return tok_m.group(1).strip()
+            else:
+                data = json.loads(raw_cfg)
                 val = data.get("telegram", {}).get("bot_token", "").strip()
                 if val and val != "YOUR_TELEGRAM_BOT_TOKEN_HERE":
                     return val

@@ -249,10 +249,11 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
         verdict = "🔴 VETOED (WAIT FOR CONFLUENCE)"
         action = "STAND_ASIDE"
 
-    # Small Practical TP & SL Calculation for Scalp Execution
+    # Small Practical TP & SL Calculation for Profile Execution
     if RISK_ENGINE_AVAILABLE:
+        active_strat_code = risk_engine.get_active_strategy()["code"] if hasattr(risk_engine, "get_active_strategy") else "SCALP"
         strat_calc = risk_engine.calculate_strategy_levels(
-            asset_type, curr, atr=vol30, action="BUY", strategy="SCALP",
+            asset_type, curr, atr=vol30, action="BUY", strategy=active_strat_code,
             levels={"in_golden_pocket": in_golden_pocket, "sw_low": sw_low}
         )
         stop_loss = strat_calc["stop_loss"]

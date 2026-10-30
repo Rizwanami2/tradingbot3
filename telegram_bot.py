@@ -154,14 +154,11 @@ def is_auto_push_active(asset: str) -> bool:
 
 
 def save_auto_push_state(mode_str: str):
-    """Persists auto push mode into config_telegram.json."""
-    if os.path.exists(CONFIG_PATH):
+    """Persists auto push mode into safety_state.json (git-ignored)."""
+    if RISK_ENGINE_AVAILABLE and safety_manager:
         try:
-            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            data["auto_push_mode"] = mode_str
-            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
+            safety_manager.state["auto_push_mode"] = mode_str
+            safety_manager.save_state()
         except Exception:
             pass
 
@@ -313,6 +310,7 @@ def is_setup_locked(asset: str) -> bool:
 
 
 ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
+CONFIG_LOCAL_PATH = os.path.join(os.path.dirname(__file__), "config_telegram.local.json")
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config_telegram.json")
 
 
@@ -361,26 +359,62 @@ def get_risk_config():
 
 
 def get_credentials():
-    """Loads bot_token and chat_id from .env or config_telegram.json."""
+    """Loads bot_token and chat_id from .env, config_telegram.local.json, or config_telegram.json."""
     load_env()
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
+    # 1. Check config_telegram.local.json (git-ignored override)
+    if os.path.exists(CONFIG_LOCAL_PATH):
+        try:
+            with open(CONFIG_LOCAL_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if not token:
+                    token = data.get("telegram", {}).get("bot_token", "").strip()
+                if not chat_id:
+                    chat_id = str(data.get("telegram", {}).get("chat_id", "")).strip()
+        except Exception:
+            pass
+
+    # 2. Check config_telegram.json (with merge marker guard)
     if not token and os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
+                raw_cfg = f.read()
+            # Guard against git merge conflict markers in JSON
+            if "<<<<<<<" in raw_cfg:
+                import re
+                tok_m = re.search(r'"bot_token":\s*"([^"]+)"', raw_cfg)
+                if tok_m and tok_m.group(1) != "YOUR_TELEGRAM_BOT_TOKEN_HERE":
+                    token = tok_m.group(1).strip()
+                cid_m = re.search(r'"chat_id":\s*"([^"]+)"', raw_cfg)
+                if cid_m and cid_m.group(1) not in ("YOUR_TELEGRAM_CHAT_ID_HERE", "12345678"):
+                    chat_id = cid_m.group(1).strip()
+            else:
+                data = json.loads(raw_cfg)
                 token = data.get("telegram", {}).get("bot_token", "").strip()
                 if not chat_id:
                     chat_id = str(data.get("telegram", {}).get("chat_id", "")).strip()
         except Exception:
             pass
 
+    if not chat_id and RISK_ENGINE_AVAILABLE and safety_manager:
+        chat_id = safety_manager.state.get("active_chat_id", "").strip()
+
     return token, chat_id
 
 
 def save_chat_id(chat_id: str):
-    """Saves chat ID to .env and config_telegram.json for persistence."""
+    """Saves chat ID to safety_state.json and .env for persistence."""
+    cid_str = str(chat_id or "").strip()
+    if not cid_str or cid_str in ("YOUR_TELEGRAM_CHAT_ID_HERE", "12345678", "0", "None"):
+        return
+    if RISK_ENGINE_AVAILABLE and safety_manager:
+        try:
+            safety_manager.state["active_chat_id"] = cid_str
+            safety_manager.save_state()
+        except Exception:
+            pass
     lines = []
     found = False
     if os.path.exists(ENV_PATH):
@@ -388,31 +422,19 @@ def save_chat_id(chat_id: str):
             with open(ENV_PATH, "r", encoding="utf-8") as f:
                 for line in f:
                     if line.strip().startswith("TELEGRAM_CHAT_ID="):
-                        lines.append(f"TELEGRAM_CHAT_ID={chat_id}\n")
+                        lines.append(f"TELEGRAM_CHAT_ID={cid_str}\n")
                         found = True
                     else:
                         lines.append(line)
         except Exception:
             pass
     if not found:
-        lines.append(f"TELEGRAM_CHAT_ID={chat_id}\n")
+        lines.append(f"TELEGRAM_CHAT_ID={cid_str}\n")
     try:
         with open(ENV_PATH, "w", encoding="utf-8") as f:
             f.writelines(lines)
     except Exception:
         pass
-
-    if os.path.exists(CONFIG_PATH):
-        try:
-            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if "telegram" not in data:
-                data["telegram"] = {}
-            data["telegram"]["chat_id"] = str(chat_id)
-            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-        except Exception:
-            pass
 
 
 def verify_token(token: str):
@@ -3863,6 +3885,13 @@ def start_bot():
     if not ok:
         print(f"❌ Telegram Connection Failed: {bot_first_name}")
         return
+
+    # Restore Auto Push / Auto Trade Mode from persistent storage
+    if RISK_ENGINE_AVAILABLE and safety_manager:
+        persisted_push = safety_manager.state.get("auto_push_mode", "OFF")
+        if persisted_push and persisted_push != "OFF":
+            set_auto_push_mode(persisted_push)
+            print(f"🤖 Restored Auto-Execution Mode from storage: {persisted_push}")
 
     # ── Initialize Live MT5 Broker Connection ──────────────────────────────
     mt5_banner = "NOT CONNECTED ⚪"
