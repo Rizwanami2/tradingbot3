@@ -1398,9 +1398,89 @@ def format_welcome_menu(sender_name: str) -> str:
         f"• `/positions`   ──► View open trades & live floating PnL\n"
         f"• `/close_all`   ──► Instantly close all open positions\n"
         f"• `/status`      ──► Bot health, connection & risk limits\n"
+        f"• `/hidden`      ──► View all hidden & advanced background commands\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"💡 _Tap the buttons below to scan or trade._"
     )
+
+
+
+def format_hidden_commands_menu() -> tuple[str, dict]:
+    """
+    Renders the complete directory of all background, advanced,
+    and hidden institutional commands and tools.
+    """
+    lines = [
+        "📜 *ALL HIDDEN & ADVANCED COMMANDS*",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "_These specialized engines run 100% autonomously in the background. Use these commands to inspect telemetry, run audits, or adjust parameters._",
+        "",
+        "🌐 *1. Market Intelligence & Inflection*",
+        "• `/mtf [gold|btc]` ──► Multi-timeframe trend & adaptive strategy",
+        "• `/gold` or `/btc` ──► Comprehensive asset multi-factor audit",
+        "• `/macro` ──► Global macro radar (DXY, 10Y Yields, GSR, VIX)",
+        "• `/levels` ──► Key institutional S/R, Golden Pocket & VPOC",
+        "• `/traps` ──► Microstructure anti-trap (Wyckoff springs/upthrusts)",
+        "• `/debate` ──► Adversarial Bull vs Bear dialectical council",
+        "",
+        "🎯 *2. Execution & Alert Controls*",
+        "• `/buy_gold` / `/sell_gold` ──► Direct 1-tap market orders",
+        "• `/buy_btc` / `/sell_btc` ──► Direct 1-tap market orders",
+        "• `/approve_gold` / `/approve_btc` ──► Execute pending signal",
+        "• `/ignore_gold` / `/ignore_btc` ──► Dismiss active alert",
+        "• `/cooldown [mins]` ──► View or set alert deduplication timer",
+        "• `/locks` / `/unlock [gold|btc|all]` ──► View or clear trade locks",
+        "",
+        "⚡ *3. Strategy, Risk & Automation*",
+        "• `/strategy [scalp|swing|momentum]` ──► Multi-regime strategy profiles",
+        "• `/risk [balance]` ──► Risk budget & institutional lot sizing",
+        "• `/backtest [gold|btc] [strategy] [days]` ──► Quantitative strategy backtest",
+        "• `/autopush [on|off|both|gold|btc]` ──► Autonomous push pipeline",
+        "• `/trail [on|off]` ──► Real-time dynamic trailing stop engine",
+        "• `/mode [paper|demo|live]` ──► Strict trading environment mode",
+        "• `/safety` ──► Multi-layer circuit breaker and safety audit",
+        "• `/kill` / `/kill_reset CONFIRM` ──► Emergency circuit breaker",
+        "",
+        "🧠 *4. AI Memory, Simulations & Forensics*",
+        "• `/predict [gold|btc]` ──► Neuro-Symbolic 1,000-Path Monte Carlo forecast",
+        "• `/matrix` or `/omniscient` ──► 7-Agent Quantitative Matrix council",
+        "• `/matrix agents` ──► Individual agent votes & conviction weights",
+        "• `/memory` ──► Quantitative memory hub & institutional rule base",
+        "• `/memory patterns` ──► Toxic loss patterns & protection rules",
+        "• `/learn` ──► Force synchronization of closed trades memory",
+        "• `/train` ──► Retrain outcome predictor and calibrate weights",
+        "• `/forensics [ticket]` ──► 4-Agent post-mortem trade forensics",
+        "• `/trades` or `/history` ──► Closed trades ledger & win-rate metrics",
+        "• `/all` or `/cockpit` ──► Master dual-slot institutional cockpit",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "💡 _Tap any button below to launch an advanced tool directly._"
+    ]
+
+    markup = {
+        "inline_keyboard": [
+            [
+                {"text": "🌐 MTF Trends", "callback_data": "mtf"},
+                {"text": "🏛️ 7-Agent Matrix", "callback_data": "matrix"}
+            ],
+            [
+                {"text": "🔮 Predict Twin", "callback_data": "predict"},
+                {"text": "🧠 Memory Hub", "callback_data": "memory"}
+            ],
+            [
+                {"text": "🎯 Strategy Profiles", "callback_data": "strategy"},
+                {"text": "🔬 Forensics Council", "callback_data": "forensics"}
+            ],
+            [
+                {"text": "🌐 Global Macro", "callback_data": "macro"},
+                {"text": "📐 Key Levels", "callback_data": "levels"}
+            ],
+            [
+                {"text": "⬅️ Back to Main Menu", "callback_data": "menu"}
+            ]
+        ]
+    }
+
+    return "\n".join(lines), markup
 
 def format_combined_cockpit() -> tuple[str, dict]:
     """
@@ -1781,6 +1861,8 @@ def handle_callback_query(token: str, cq: dict):
         process_telegram_command(token, sender_id, sender_name, "/cooldown 5m")
     elif data in ("kill", "emergency"):
         process_telegram_command(token, sender_id, sender_name, "/kill")
+    elif data in ("hidden_commands", "all_commands", "hidden", "cmdlist"):
+        process_telegram_command(token, sender_id, sender_name, "/hidden")
     elif data in ("menu", "start", "help"):
         process_telegram_command(token, sender_id, sender_name, "/menu")
     elif data == "confirm_trade":
@@ -2141,6 +2223,12 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
         send_message(token, sender_id, cockpit_text, reply_markup=cockpit_markup)
         return
 
+    # ── 1B. ALL HIDDEN & ADVANCED COMMANDS DIRECTORY ──
+    if cmd in ("/hidden", "/commands", "/all_commands", "/advanced", "/expert", "/more", "/cmd", "/hide_commands", "/hidden_commands", "/cmdlist"):
+        hidden_text, hidden_markup = format_hidden_commands_menu()
+        send_message(token, sender_id, hidden_text, reply_markup=hidden_markup)
+        return
+
     if cmd in ("/start", "/help", "/menu"):
         welcome = format_welcome_menu(sender_name)
         welcome_markup = {
@@ -2156,6 +2244,9 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
                 [
                     {"text": "⚙️ Bot Status", "callback_data": "status"},
                     {"text": "🛡️ Safety / Modes", "callback_data": "safety"}
+                ],
+                [
+                    {"text": "📜 All Hidden Commands", "callback_data": "hidden_commands"}
                 ]
             ]
         }
