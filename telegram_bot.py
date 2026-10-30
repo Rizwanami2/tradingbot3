@@ -1315,6 +1315,11 @@ def _send_chart_async(token: str, chat_id: str, symbol: str, caption: str, df_in
 # ==============================================================================
 
 def format_scan_summary(data: dict) -> str:
+    """
+    Renders a clean, classic dual-slot market scan for Gold (Slot 1) & BTC (Slot 2).
+    Shows live prices, dominant signal, entry, stop loss, take profit, and verdict.
+    All underlying quantitative models run silently in the background.
+    """
     m = data.get("macro", {})
     b = data.get("btc")
     g = data.get("gold")
@@ -1322,158 +1327,80 @@ def format_scan_summary(data: dict) -> str:
     if not b or not g:
         return "⚠️ Market data temporarily unavailable from provider. Retrying momentarily..."
 
-    # Automatically trigger and evaluate Omniscient Matrix across all 7 background agents
-    m_state = {}
-    if INSTITUTIONAL_AVAILABLE and omniscient_matrix:
-        try:
-            m_state = omniscient_matrix.evaluate_full_matrix(data)
-        except Exception:
-            m_state = omniscient_matrix.get_latest_matrix()
-
-    b_mat = m_state.get("btc", {})
-    g_mat = m_state.get("gold", {})
-    regime_badge = m_state.get("regime_badge", "⚖️ BALANCED")
-
     session_info = get_market_session() if RISK_ENGINE_AVAILABLE else None
-    strat = get_active_strategy() if RISK_ENGINE_AVAILABLE else {"name": "Scalp Sniper", "code": "SCALP"}
     session_badge = f"{session_info.get('badge', '🌐')} {session_info.get('name', 'Active')}" if session_info else "Active Market"
-
-    gold_buf = learning_engine.get_dynamic_sl_buffer("GOLD") if (LEARNING_AVAILABLE and learning_engine) else 0.0
-    btc_buf = learning_engine.get_dynamic_sl_buffer("BTC") if (LEARNING_AVAILABLE and learning_engine) else 0.0
 
     b_buy = b.get("buy", b)
     b_sell = b.get("sell", b)
     g_buy = g.get("buy", g)
     g_sell = g.get("sell", g)
 
-    b_pred = b.get("prediction") or {}
-    g_pred = g.get("prediction") or {}
+    b_dom = b.get("dominant_side", "BUY")
+    g_dom = g.get("dominant_side", "BUY")
 
-    b_dom_act = b.get("dominant_side", "BUY")
-    g_dom_act = g.get("dominant_side", "BUY")
+    b_active = b_buy if b_dom == "BUY" else b_sell
+    g_active = g_buy if g_dom == "BUY" else g_sell
 
-    b_mtf = b.get("mtf_trend") or {}
-    g_mtf = g.get("mtf_trend") or {}
-    b_strat = b.get("adapted_strat") or {}
-    g_strat = g.get("adapted_strat") or {}
-    b_tfs = b_mtf.get("timeframes", {})
-    g_tfs = g_mtf.get("timeframes", {})
+    b_bias = b.get("htf_bias", {}).get("simple_bias", "Neutral")
+    g_bias = g.get("htf_bias", {}).get("simple_bias", "Neutral")
 
     lines = [
-        f"📊 *HARD-ASSET DUAL-SIDED ALL-AGENT SCAN* ({session_badge})",
-        f"🌐 *Cross-Asset Flow:* {regime_badge} | Profile: *{strat['name']} ({strat['code']})*",
+        f"📊 *HARD-ASSET DUAL-SIDED MARKET SCAN* ({session_badge})",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"🌐 *Macro:* DXY `{m.get('dxy', 101.8):.2f}` | 10Y Yield `{m.get('tnx', 4.5):.2f}%` | Gold/Silver `{m.get('gsr', 80.0):.1f}x` | VIX `{m.get('vix', 16.0):.1f}`",
         "",
-        f"🌐 *Agent 1: Macro & Global Liquidity Sovereign:*",
-        f"• DXY: `{m['dxy']:.2f}` ({m['dxy_chg']:+.2f}%) | 10Y Yield: `{m['tnx']:.2f}%`",
-        f"• GSR: `{m['gsr']:.1f}x` | VIX: `{m['vix']:.1f}` | F&G: `{m['fg_val']}` ({m['fg_label']})",
+        "🥇 *SLOT 1: GOLD (XAU/USD)*",
+        f"• Live Price: `${g['price']:,.2f}` | HTF Bias: *{g_bias}*",
+        f"• Dominant Signal: *{'🟢 BUY' if g_dom == 'BUY' else '🔴 SELL'}* (Score: `{g_active['final_score']}/10`)",
+        f"• Entry: `${g_active['entry']:,.2f}` | SL: `${g_active['stop_loss']:,.2f}` | TP1: `${g_active['tp1']:,.2f}`",
+        f"• 🟢 BUY  / LONG  : Score `{g_buy['final_score']}/10` ──► {g_buy['verdict'][:28]}",
+        f"• 🔴 SELL / SHORT : Score `{g_sell['final_score']}/10` ──► {g_sell['verdict'][:28]}",
         "",
-        f"🌐 *Multi-Timeframe Trend & Movement Radar:*",
-        f"• 🥇 Gold (M1->D1): `{g_mtf.get('movement_badge', 'Aligned')}` | Strategy: *{g_strat.get('strategy_code', 'SCALP')}* ({g_strat.get('preferred_side', 'DUAL')})",
-        f"• ₿  BTC  (M1->D1): `{b_mtf.get('movement_badge', 'Aligned')}` | Strategy: *{b_strat.get('strategy_code', 'SCALP')}* ({b_strat.get('preferred_side', 'DUAL')})",
-        "",
-        f"₿ *Bitcoin (BTC-USD):* `${b['price']:,.2f}`",
-        f"• Omniscient Index: *{b_mat.get('oci', b['base_score']*10)}/100* {b_mat.get('bar', '')} ──► *{b_mat.get('consensus', 'Approved')}*",
-        f"• HTF Bias: `{b.get('htf_bias', {}).get('summary', 'Neutral')}` | Microstructure: `{b['trap_type']}`",
-        f"• MTF Evolution: M1:{b_tfs.get('m1',{}).get('badge','-')[:2]} M5:{b_tfs.get('m5',{}).get('badge','-')[:2]} M15:{b_tfs.get('m15',{}).get('badge','-')[:2]} H1:{b_tfs.get('h1',{}).get('badge','-')[:2]} D1:{b_tfs.get('d1',{}).get('badge','-')[:2]}",
-        f"• Auto-Adapted Strategy: `{b_strat.get('strategy_name', 'Scalp')}` ({b_strat.get('preferred_side', 'DUAL')})",
-        f"• 🟢 BUY  / LONG  (Score: `{b_buy['final_score']}/10`): SL `${b_buy['stop_loss']:,.1f}` | TP1 `${b_buy['tp1']:,.1f}` (1:{b_buy['rr']:.1f}R) ──► {b_buy['verdict'][:28]}",
-        f"• 🔴 SELL / SHORT (Score: `{b_sell['final_score']}/10`): SL `${b_sell['stop_loss']:,.1f}` | TP1 `${b_sell['tp1']:,.1f}` (1:{b_sell['rr']:.1f}R) ──► {b_sell['verdict'][:28]}",
-        f"• 🎯 Institutional Stance: *{b_dom_act}* ({b['verdict']})",
-        f"• Predictive Twin: `{b_pred.get('win_probability', 75.0):.1f}% Win` | Dynamic Buffer: `+{btc_buf:.2f} ATR`",
-        "",
-        f"🥇 *Gold (XAU/USD):* `${g['price']:,.2f}`",
-        f"• Omniscient Index: *{g_mat.get('oci', g['base_score']*10)}/100* {g_mat.get('bar', '')} ──► *{g_mat.get('consensus', 'Approved')}*",
-        f"• HTF Bias: `{g.get('htf_bias', {}).get('summary', 'Neutral')}` | Microstructure: `{g['trap_type']}`",
-        f"• MTF Evolution: M1:{g_tfs.get('m1',{}).get('badge','-')[:2]} M5:{g_tfs.get('m5',{}).get('badge','-')[:2]} M15:{g_tfs.get('m15',{}).get('badge','-')[:2]} H1:{g_tfs.get('h1',{}).get('badge','-')[:2]} D1:{g_tfs.get('d1',{}).get('badge','-')[:2]}",
-        f"• Auto-Adapted Strategy: `{g_strat.get('strategy_name', 'Scalp')}` ({g_strat.get('preferred_side', 'DUAL')})",
-        f"• 🟢 BUY  / LONG  (Score: `{g_buy['final_score']}/10`): SL `${g_buy['stop_loss']:,.2f}` | TP1 `${g_buy['tp1']:,.2f}` (1:{g_buy['rr']:.1f}R) ──► {g_buy['verdict'][:28]}",
-        f"• 🔴 SELL / SHORT (Score: `{g_sell['final_score']}/10`): SL `${g_sell['stop_loss']:,.2f}` | TP1 `${g_sell['tp1']:,.2f}` (1:{g_sell['rr']:.1f}R) ──► {g_sell['verdict'][:28]}",
-        f"• 🎯 Institutional Stance: *{g_dom_act}* ({g['verdict']})",
-        f"• Predictive Twin: `{g_pred.get('win_probability', 75.0):.1f}% Win` | Dynamic Buffer: `+{gold_buf:.2f} ATR`",
-        ""
+        "₿ *SLOT 2: BITCOIN (BTC/USD)*",
+        f"• Live Price: `${b['price']:,.2f}` | HTF Bias: *{b_bias}*",
+        f"• Dominant Signal: *{'🟢 BUY' if b_dom == 'BUY' else '🔴 SELL'}* (Score: `{b_active['final_score']}/10`)",
+        f"• Entry: `${b_active['entry']:,.2f}` | SL: `${b_active['stop_loss']:,.2f}` | TP1: `${b_active['tp1']:,.2f}`",
+        f"• 🟢 BUY  / LONG  : Score `{b_buy['final_score']}/10` ──► {b_buy['verdict'][:28]}",
+        f"• 🔴 SELL / SHORT : Score `{b_sell['final_score']}/10` ──► {b_sell['verdict'][:28]}",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "💡 _Dual-Slot execution active: Both Gold & BTC execute concurrently._"
     ]
-
-    # Render actionable order tickets for any side qualifying with A+ or Scalp
-    for asset_label, item, side_name, is_gold in [("BTC", b_buy, "BUY / LONG", False),
-                                                  ("BTC", b_sell, "SELL / SHORT", False),
-                                                  ("GOLD", g_buy, "BUY / LONG", True),
-                                                  ("GOLD", g_sell, "SELL / SHORT", True)]:
-        if item.get("is_a_plus"):
-            lot_i = item.get("lot_info", {})
-            lot_unit = "Standard Lots" if is_gold else "BTC Lots"
-            lot_str = f"{lot_i.get('lots', 0.05)} {lot_unit} (${lot_i.get('actual_risk_usd', 100.0):,.0f} risk)"
-            lines.extend([
-                f"⚡ *ACTIONABLE {asset_label} ORDER TICKET [{side_name}]:*",
-                f"• Entry Zone: `${item['entry']:,.2f}`",
-                f"• Stop-Loss:  `${item['stop_loss']:,.2f}` (-{item['risk_pct']:.2f}%)",
-                f"• Target 1:   `${item['tp1']:,.2f}` (+{item['reward_pct']:.2f}%)",
-                f"• Target 2:   `${item['tp2']:,.2f}`",
-                f"• Position Size: `{lot_str}`",
-                f"• Risk/Reward: 1:{item['rr']:.2f}",
-                ""
-            ])
 
     return "\n".join(lines)
 
-
 def format_welcome_menu(sender_name: str) -> str:
-    auto_desc = f"ENABLED 🟢 ({AUTO_PUSH_MODE})" if AUTO_PUSH_MODE != "OFF" else "DISABLED ⚪ (Manual Approval)"
-    mt5_status = "CONNECTED 🟢" if (MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected) else "OFFLINE ⚪"
-    strat = get_active_strategy() if RISK_ENGINE_AVAILABLE else {"name": "Scalp Sniper", "code": "SCALP"}
-    trail_st = "ACTIVE 🛡️" if TRAILING_STOP_ENABLED else "DISABLED ⚪"
+    auto_desc = f"ENABLED 🟢 ({AUTO_PUSH_MODE})" if AUTO_PUSH_MODE != "OFF" else "DISABLED ⚪ (Manual Tap)"
+    mt5_status = "CONNECTED 🟢" if (MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected) else "PAPER MODE ⚪"
     curr_mode = safety_manager.get_trading_mode() if RISK_ENGINE_AVAILABLE else "PAPER"
     mode_badge = "⚪ PAPER" if curr_mode == "PAPER" else "🟡 DEMO" if curr_mode == "DEMO" else "🔴 LIVE"
-    gold_buf = learning_engine.get_dynamic_sl_buffer("GOLD") if (LEARNING_AVAILABLE and learning_engine) else 0.0
-    btc_buf = learning_engine.get_dynamic_sl_buffer("BTC") if (LEARNING_AVAILABLE and learning_engine) else 0.0
+
+    b_pend = get_pending_setup("BTC")
+    g_pend = get_pending_setup("GOLD")
+    g_state = f"💼 In Trade (#{g_pend.get('ticket')})" if (g_pend and g_pend.get("status") == "EXECUTED") else ("⏳ Pending Approval" if (g_pend and g_pend.get("status") == "PENDING") else "🟢 Scanning 1M")
+    b_state = f"💼 In Trade (#{b_pend.get('ticket')})" if (b_pend and b_pend.get("status") == "EXECUTED") else ("⏳ Pending Approval" if (b_pend and b_pend.get("status") == "PENDING") else "🟢 Scanning 1M")
 
     return (
-        f"🏛️ *INSTITUTIONAL QUANTITATIVE HARD-ASSET COCKPIT*\n"
+        f"🏛️ *HARD-ASSET TRADING ENGINE (GOLD & BITCOIN)*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"Welcome {sender_name}! High-probability quantitative execution engine for Gold (`XAU/USD`) & Bitcoin (`BTC/USD`).\n\n"
+        f"Welcome *{sender_name}*! Institutional dual-slot execution engine.\n\n"
         f"🎛️ *System State:*\n"
-        f"• Execution Mode     : `{mode_badge}` (Simulation / Demo / Live)\n"
-        f"• Continuous Scanner : `1-MIN CANDLE CLOSE` 🟢\n"
-        f"• MT5 Live Broker    : `{mt5_status}` (Auto-Managed Leverage)\n"
-        f"• Active Strategy    : `{strat['name']}` (`{strat['code']}`) 🎯\n"
-        f"• Auto-Push Mode     : `{auto_desc}`\n"
-        f"• Auto-Trailing & BE : `{trail_st}` (+{strat.get('breakeven_r', 0.35):.2f}R BE / +{strat.get('trail_start_r', 0.65):.2f}R Trail)\n"
-        f"• Dynamic SL Cushion : `GOLD +{gold_buf:.2f}x` | `BTC +{btc_buf:.2f}x ATR` 🛡️\n\n"
-        f"🗂️ *ORGANIZED COMMAND HUBS:*\n\n"
-        f"📊 *Market Radar & Analysis:*\n"
-        f"• `/scan` (or `/market`)   ──► Dual-asset quantitative scan with MT5 visual charts\n"
-        f"• `/gold` & `/btc`         ──► Dedicated single-asset multi-factor quantitative audit\n"
-        f"• `/macro`                 ──► US Dollar (DXY), 10Y Yields (^TNX), GSR & VIX radar\n"
-        f"• `/levels`                ──► Institutional Key Levels, Pivots & Fibonacci Golden Pocket\n"
-        f"• `/traps`                 ──► Wyckoff liquidity sweeps, springs & Fair Value Gaps\n"
-        f"• `/debate`                ──► Adversarial Bull vs. Bear dialectical debate thesis\n\n"
-        f"🔮 *Predictive AI & Self-Healing:*\n"
-        f"• `/predict [gold|btc]`    ──► 1,000-path jump-diffusion Monte Carlo forecast & EV gatekeeper\n"
-        f"• `/forensics`             ──► 4-Agent Post-Mortem Forensic Council debrief & root cause\n"
-        f"• `/learn`                 ──► Bayesian factor rankings & active probability weights\n"
-        f"• `/train`                 ──► Institutional walk-forward self-calibration on history\n"
-        f"• `/trades`                ──► Closed trades journal & realized PnL performance history\n"
-        f"• `/memory` (or `/mem`)    ──► ALL-IN-ONE Autonomous Memory Hub (Auto-Sync, Rules, Negative Veto & Evolution)\n"f"• `/matrix` (or `/omniscient`)──► Omniscient Quantitative Matrix (7 background agents combined)\n"f"• `/all` (or `/cockpit`)   ──► All-in-one combined cockpit (Market, Matrix, Twin, Risk, Positions)\n\n"
-        f"⚡ *Execution & Order Controls:*\n"
-        f"• `/trade`                 ──► Execution hub (`/trade buy gold`, `/trade sell btc`)\n"
-        f"• `/autopush` (or `/push`) ──► Automated order push controller (`/autopush on|off|gold|btc`)\n"
-        f"• `/trail`                 ──► Automated profile trailing & breakeven hub (`/trail on|off`)\n"
-        f"• `/approve_gold` / `_btc` ──► One-click manual approval for high-confluence alerts\n"
-        f"• `/close_all`             ──► Immediate close for all open broker/paper positions\n\n"
-        f"🛡️ *Risk Governance & Safety Controls:*\n"
-        f"• `/portfolio`             ──► Unified equity, open positions & risk allocation dashboard\n"
-        f"• `/strategy`              ──► Modular strategy selector (`scalp|swing|balance|swap`)\n"
-        f"• `/safety`                ──► Multi-layer circuit breakers & trading mode controller\n"
-        f"• `/mode [paper|demo|live]`──► Switch execution modes with safety safeguards\n"
-        f"• `/risk [custom_balance]` ──► Dynamic position sizing calculator for target equity\n"
-        f"• `/backtest`              ──► Institutional historical strategy simulator\n"
-        f"• `/kill`                  ──► Emergency Kill-Switch: Liquidate all & halt engine\n"
-        f"• `/status` (or `/health`) ──► Feed health, latency, MT5 connection & engine diagnostics\n"
+        f"• Execution Mode  : `{mode_badge}`\n"
+        f"• Broker Feed     : `{mt5_status}`\n"
+        f"• Auto-Trade Mode : `{auto_desc}`\n"
+        f"• Trailing Stop   : `ACTIVE 🛡️` (Auto Breakeven & Profit Trail)\n\n"
+        f"👥 *Concurrent Execution Slots (2 Slots Active):*\n"
+        f"• 🥇 *Slot 1 (Gold)* : `{g_state}`\n"
+        f"• ₿  *Slot 2 (BTC)*  : `{b_state}`\n\n"
+        f"⚡ *Quick Commands:*\n"
+        f"• `/scan`        ──► Check live signals & prices for both slots\n"
+        f"• `/trade`       ──► Instant manual order placement\n"
+        f"• `/auto_trade`  ──► Toggle automated execution ON / OFF\n"
+        f"• `/positions`   ──► View open trades & live floating PnL\n"
+        f"• `/close_all`   ──► Instantly close all open positions\n"
+        f"• `/status`      ──► Bot health, connection & risk limits\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"💡 _Tap the interactive buttons below or type any command directly._"
+        f"💡 _Tap the buttons below to scan or trade._"
     )
-
-
-
 
 def format_combined_cockpit() -> tuple[str, dict]:
     """
@@ -1650,8 +1577,9 @@ def execute_setup_order(asset: str, setup_data: dict, token: str, chat_id: str, 
     sl = setup_data["sl"]
     tp1 = setup_data["tp1"]
 
+    action = setup_data.get("action", "BUY").upper()
     res = live_broker.execute_live_sniper_order(
-        asset, "BUY", entry, sl, tp1, lots, comment=comment
+        asset, action, entry, sl, tp1, lots, comment=comment
     )
     return res
 
@@ -1699,7 +1627,7 @@ def approve_active_setup(token: str, chat_id: str, asset: str) -> dict:
         reply_txt = (
             f"✅ *{asset} TRADE APPROVED & EXECUTED [{m_lbl}]*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"• Symbol: `{res['symbol']}` (BUY)\n"
+            f"• Symbol: `{res['symbol']}` ({setup.get('action', 'BUY').upper()})\n"
             f"• Ticket: `#{res['ticket']}`\n"
             f"• Volume: `{res['lots']}` Lots\n"
             f"• Fill Price: `${res['price']:,.2f}`\n"
@@ -1886,90 +1814,73 @@ def handle_callback_query(token: str, cq: dict):
 
 def format_elite_alert(asset: str, data: dict, setup_data: dict = None, exec_result: dict = None, is_auto_trade: bool = False):
     """
-    Formats an uncluttered, high-impact elite trade alert with interactive action options.
-    Returns (alert_text, reply_markup).
+    Formats a clean, classic, institutional trade alert.
+    Displays only essential, actionable trading information:
+    Asset, Direction, Score, Live Price, Entry, SL, TP, Lots, and Risk.
+    All underlying quantitative models run silently in the background.
     """
     item = data["btc"] if asset == "BTC" else data["gold"]
     sym_name = "BITCOIN (BTC/USD)" if asset == "BTC" else "GOLD (XAU/USD)"
     icon = "₿" if asset == "BTC" else "🥇"
-    lv = item["levels"]
+    slot_label = "SLOT 1" if asset == "GOLD" else "SLOT 2"
     lot_info = item.get("lot_info", {})
-    strat_code = lot_info.get("strategy", "SCALP")
-    strat = STRATEGIES.get(strat_code, {}) if RISK_ENGINE_AVAILABLE else {}
-    target_wr = strat.get("target_win_rate", "80-85%")
-    session_info = get_market_session() if RISK_ENGINE_AVAILABLE else None
 
-    # Header badge based on execution status
+    raw_act = (setup_data.get("action") if setup_data else None) or item.get("dominant_side") or "BUY"
+    action = str(raw_act).upper()
+    act_badge = "🟢 BUY (LONG)" if action == "BUY" else "🔴 SELL (SHORT)"
+    score_val = setup_data.get("score", item["final_score"]) if setup_data else item["final_score"]
+
+    entry_val = setup_data.get("entry", item["entry"]) if setup_data else item["entry"]
+    sl_val = setup_data.get("sl", item["stop_loss"]) if setup_data else item["stop_loss"]
+    tp1_val = setup_data.get("tp1", item["tp1"]) if setup_data else item["tp1"]
+    tp2_val = setup_data.get("tp2", item["tp2"]) if setup_data else item["tp2"]
+    lots_val = setup_data.get("lots", lot_info.get("lots", 0.05)) if setup_data else lot_info.get("lots", 0.05)
+    risk_val = setup_data.get("risk_usd", lot_info.get("actual_risk_usd", 50.0)) if setup_data else lot_info.get("actual_risk_usd", 50.0)
+
+    # Clean Header
     if is_auto_trade and exec_result and exec_result.get("success"):
-        hdr = f"⚡ *1M AUTO-PUSH (AUTO-EXECUTION) [{exec_result.get('mode', 'LIVE')}] (SCORE: {item['final_score']}/10)*"
+        hdr = f"⚡ *AUTO-EXECUTED [{exec_result.get('mode', 'LIVE')}] | {slot_label}: {sym_name}*"
     elif is_auto_trade and exec_result and exec_result.get("requires_confirmation"):
-        hdr = f"⚠️ *ELITE SIGNAL - CONFIRMATION REQUIRED (SCORE: {item['final_score']}/10)*"
+        hdr = f"⚠️ *CONFIRMATION REQUIRED | {slot_label}: {sym_name}*"
     elif is_auto_trade and exec_result and exec_result.get("error"):
-        hdr = f"⚠️ *ELITE SIGNAL - AUTO-PUSH BLOCKED (SCORE: {item['final_score']}/10)*"
+        hdr = f"⚠️ *AUTO-TRADE BLOCKED | {slot_label}: {sym_name}*"
     else:
-        hdr = f"🎯 *ELITE A+ TRADE SIGNAL (SCORE: {item['final_score']}/10)*"
+        hdr = f"🎯 *HIGH-CONFLUENCE SIGNAL | {slot_label}: {sym_name}*"
 
     lines = [
         hdr,
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"{icon} *Asset:* `{sym_name}`",
-        f"• Strategy Profile: `{strat.get('name', strat_code)} ({strat_code})` 🎯",
-        f"• Win-Rate Edge: `{target_wr}` ({session_info['badge'] if session_info else '🌐'} {session_info['name'] if session_info else 'Active'})",
-        f"• Live Price: `${item['price']:,.2f}`",
-        f"• Higher TF Bias: `{item.get('htf_bias', {}).get('summary', 'Aligned')}`",
-        f"• Confluence: {'✅ Golden Pocket Active' if lv['in_golden_pocket'] else 'Key S/R Flip Level'}",
-        f"• Microstructure: `{item['trap_type']}` (Body: `{item.get('candle_body_pct', 50):.0f}%`)",
-        f"• Momentum: `{item['regime']}` (ADX: `{item['adx']:.1f}`)",
+        f"📊 *Asset:* {icon} `{sym_name}` ({slot_label})",
+        f"⚡ *Signal:* *{act_badge}*",
+        f"🎯 *Confluence Score:* `{score_val}/10` (Edge: High Probability)",
+        f"💵 *Live Market Price:* `${item['price']:,.2f}`",
         "",
-        # ── Pre-Trade Neuro-Symbolic Digital Twin Forecast ──
-        *([
-            f"🌐 *Omniscient Matrix:* `{omniscient_matrix.get_latest_matrix().get('gold' if asset == 'GOLD' else 'btc', {}).get('oci', 85.0)}/100` ({omniscient_matrix.get_latest_matrix().get('gold' if asset == 'GOLD' else 'btc', {}).get('consensus', 'Unanimous Bullish')})",
-            ""
-        ] if INSTITUTIONAL_AVAILABLE and omniscient_matrix else []),
-        *([
-            "🔮 *Neuro-Symbolic Digital Twin Forecast:*",
-            f"• Win Probability: `{item['prediction']['win_probability']:.1f}%` {item['prediction'].get('badge', '🟢 HIGH EDGE')}",
-            f"• Expected Value: `{item['prediction']['expected_value_r']:+.2f}R` | 1k-Path MC Hit: `{int(item['prediction']['mc_hit_rate'])}%`",
-            *(
-                [f"• Max Adverse Drawdown: `${item['prediction']['mae_predicted']:,.2f}` | Barrier: `{item['prediction'].get('opposing_barrier_score', 100):.0f}%`"]
-                if item['prediction'].get('mae_predicted', 0) > 0 else []
-            ),
-            ""
-        ] if item.get("prediction") else []),
-        "⚡ *Precision Sniper Order Ticket:*",
-        f"• Action: `BUY` (High Probability Setup)",
-        f"• Entry Zone: `${item['entry']:,.2f}`",
-        f"• Small Stop-Loss:  `${item['stop_loss']:,.2f}` (-{item['risk_pct']:.2f}%)",
-        f"• Small Take-Profit: `${item['tp1']:,.2f}` (+{item['reward_pct']:.2f}% | {strat.get('rr_tp1', 1.2):.1f}R)",
-        f"• Extended Target:   `${item['tp2']:,.2f}` (+{strat.get('rr_tp2', 2.0):.1f}R)",
-        f"• Recommended Size:  `{lot_info.get('lots', 0.05)}` Lots (${lot_info.get('actual_risk_usd', 50):,.2f} risk)",
-        f"• Breakeven / Trail: BE at `+{strat.get('breakeven_r', 0.35):.2f}R` | Trail at `+{strat.get('trail_start_r', 0.65):.2f}R`",
+        "📋 *Sniper Order Ticket:*",
+        f"• Entry Zone:    `${entry_val:,.2f}`",
+        f"• Stop-Loss:     `${sl_val:,.2f}`",
+        f"• Take-Profit 1: `${tp1_val:,.2f}`",
+        f"• Take-Profit 2: `${tp2_val:,.2f}`",
+        f"• Position Size: `{lots_val}` Lots (${risk_val:,.0f} risk | 1.0% max)",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     ]
 
     a_low = asset.lower()
     if is_auto_trade and exec_result and exec_result.get("success"):
-        lines.append("⚡ *AUTO-TRADE STATUS: EXECUTED ON BROKER*")
-        lines.append(f"• Symbol: `{exec_result['symbol']}` (BUY)")
+        lines.append("⚡ *STATUS: EXECUTED ON BROKER [LIVE]*")
         lines.append(f"• Ticket: `#{exec_result['ticket']}` | Volume: `{exec_result['lots']}` Lots")
-        lines.append(f"• Fill Price: `${exec_result['price']:,.2f}` | Mode: `{exec_result.get('mode', 'LIVE')}`")
-        lines.append("• Auto-trailing & breakeven active.")
+        lines.append(f"• Fill Price: `${exec_result['price']:,.2f}`")
+        lines.append("🛡️ Trailing stop & breakeven active in background.")
         reply_markup = {
             "inline_keyboard": [
                 [
-                    {"text": "📊 Positions", "callback_data": "positions"},
+                    {"text": "📊 Open Positions", "callback_data": "positions"},
                     {"text": "🛑 Close All", "callback_data": "close_all"}
-                ],
-                [
-                    {"text": "🛡️ Trail Hub", "callback_data": "trail"},
-                    {"text": "⚡ Auto-Push", "callback_data": "autopush"}
                 ]
             ]
         }
     elif is_auto_trade and exec_result and exec_result.get("requires_confirmation"):
-        lines.append("⚠️ *AUTO-TRADE STATUS: FIRST LIVE TRADE REQUIRES CONFIRMATION*")
-        lines.append("• Reply `/confirm_trade YES` or tap [Confirm Trade] below.")
-        lines.append("• Or tap [Dismiss] to ignore.")
+        lines.append("⚠️ *FIRST LIVE TRADE REQUIRES CONFIRMATION*")
+        lines.append("Reply `/confirm_trade YES` or tap [Confirm Trade] below.")
         reply_markup = {
             "inline_keyboard": [
                 [
@@ -1979,10 +1890,8 @@ def format_elite_alert(asset: str, data: dict, setup_data: dict = None, exec_res
             ]
         }
     elif is_auto_trade and exec_result and exec_result.get("error"):
-        lines.append("⚠️ *AUTO-TRADE STATUS: BLOCKED BY RISK GUARDRAIL*")
-        lines.append(f"• Reason: `{exec_result.get('error')}`")
-        lines.append(f"• Approve Manually: `/approve_{a_low}`")
-        lines.append(f"• Dismiss Signal: `/ignore_{a_low}`")
+        lines.append(f"⚠️ *SAFETY GUARD:* `{exec_result.get('error')}`")
+        lines.append(f"Approve manually: `/approve_{a_low}` | Dismiss: `/ignore_{a_low}`")
         reply_markup = {
             "inline_keyboard": [
                 [
@@ -1993,20 +1902,17 @@ def format_elite_alert(asset: str, data: dict, setup_data: dict = None, exec_res
         }
     else:
         lines.append("⏸️ *STATUS: HIGH-CONFLUENCE SIGNAL (Auto-Trade OFF)*")
-        lines.append("🔘 *ACTION OPTIONS:*")
-        lines.append(f"• Approve & Execute : `/approve_{a_low}`")
-        lines.append(f"• Dismiss Signal   : `/ignore_{a_low}`")
+        lines.append("• Ready to execute on MT5 broker with 1 tap:")
         reply_markup = {
             "inline_keyboard": [
                 [
-                    {"text": f"✅ Approve {asset}", "callback_data": f"exec_{a_low}"},
+                    {"text": f"⚡ Approve {asset}", "callback_data": f"exec_{a_low}"},
                     {"text": "❌ Dismiss", "callback_data": f"ignore_{a_low}"}
                 ]
             ]
         }
 
     return "\n".join(lines), reply_markup
-
 
 def auto_scanner_worker(token: str, chat_id_getter):
     """
@@ -2195,7 +2101,7 @@ def auto_scanner_worker(token: str, chat_id_getter):
             else:
                 gold_st = f"Score {g['final_score']}/10"
 
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] 1M Scan: BTC: {btc_st} | Gold: {gold_st} (Spam: 0 | Lock: OFF)")
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] 1M Scan: Slot 1 (Gold): {gold_st} | Slot 2 (BTC): {btc_st} (Spam: 0 | Lock: OFF)")
 
             # ── 4. Periodic Autonomous Self-Learning & Memory Optimization (Every 5 minutes) ──
             global _last_auto_learning_sync
