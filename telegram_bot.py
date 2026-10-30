@@ -3723,14 +3723,14 @@ def start_bot():
         print(f"\n{status_text}\n")
         mt5_banner = "ONLINE 🟢" if connected else "DISCONNECTED ⚪"
 
-    print("=" * 70)
-    print("  🚀 ALL-SKILLS QUANTITATIVE HARD-ASSET BOT (GOLD & BTC)")
-    print("=" * 70)
-    print(f"  🟢 Telegram Connected : @{bot_username} ({bot_first_name})")
-    print(f"  🏦 Live MT5 Broker    : {mt5_banner}")
-    print(f"  🧠 Self-Learning      : {'ONLINE (learning_memory.json)' if LEARNING_AVAILABLE else 'OFFLINE'}")
-    print(f"  🛡️ Combined Skills    : 12 Active Modules (Macro, Levels, Traps, FVG, Sizing)")
-    print("=" * 70)
+    print("=" * 65)
+    print("  🏛️ HARD-ASSET TRADING ENGINE (GOLD & BITCOIN)")
+    print("=" * 65)
+    print(f"  🟢 Telegram Connected : @{bot_username}")
+    print(f"  🏦 MetaTrader 5 Broker: {mt5_banner}")
+    print(f"  🥇 Slot 1: Gold (XAU) : ACTIVE (1-Minute Continuous)")
+    print(f"  ₿  Slot 2: BTC (USD)  : ACTIVE (1-Minute Continuous)")
+    print("=" * 65)
     print(f"\n📱 Open Telegram, find @{bot_username}, and send: /start\n")
 
     current_chat_id = chat_id

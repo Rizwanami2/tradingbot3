@@ -1350,7 +1350,7 @@ class OmniscientQuantitativeMatrix:
         return "\n".join(lines)
 
     def format_asset_matrix(self, asset: str, matrix: Optional[Dict[str, Any]] = None) -> str:
-        """Renders comprehensive 7-agent deep dive for an individual asset."""
+        """Renders a clean, classic 7-agent deep dive for an individual asset."""
         m = matrix or self.get_latest_matrix()
         a_norm = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
         data = m.get("gold" if a_norm == "GOLD" else "btc", {})
@@ -1360,11 +1360,10 @@ class OmniscientQuantitativeMatrix:
 
         lines = [
             f"🏛️ *OMNISCIENT MATRIX DEEP DIVE: {a_norm} ({symbol})*",
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-            f"💰 *Current Price:* `${price:,.2f}`",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            f"💵 *Current Price:* `${price:,.2f}`",
             f"🎯 *Omniscient Confluence Index (OCI):* *{data.get('oci', 0.0)}/100* {data.get('bar', '')}",
-            f"🗳️ *Consensus:* *{data.get('consensus', 'N/A')}*",
-            f"🎖️ *Alpha Conviction:* *{data.get('conviction', 'N/A')}*",
+            f"🗳️ *Consensus:* *{data.get('consensus', 'N/A')}* | Alpha Conviction: *{data.get('conviction', 'N/A')}*",
             f"⚡ *Execution Clearance:* *{'✅ PERMITTED' if data.get('is_permitted') else '🔴 VETOED'}*",
             "",
             "📋 *7 SPECIALIZED AGENT BALLOT AUDITS:*"
@@ -1373,14 +1372,12 @@ class OmniscientQuantitativeMatrix:
         order = ["macro", "structure", "microstructure", "debate", "neuro_prediction", "risk_volatility", "self_learning"]
         for k in order:
             ag = agents.get(k, {})
-            lines.append(
-                f"{ag.get('badge', '⚪')} *{ag.get('name', k)}* ({ag.get('score', 0.0)}%)\n"
-                f"   • *Vote:* `{ag.get('vote', 'N/A')}` | *Weight:* `{int(ag.get('weight', 0.1)*100)}%`\n"
-                f"   • *Insight:* _{ag.get('headline', 'Normal')}_\n"
-                f"   • *Audit:* `{ag.get('details', '')}`\n"
-            )
+            lines.append(f"• {ag.get('badge', '⚪')} *{ag.get('name', k)}*: `{ag.get('vote', 'APPROVE')}` ({ag.get('score', 0.0):.0f}%) ──► _{ag.get('headline', 'Normal')}_")
 
-        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        lines.extend([
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "💡 _All 7 institutional models evaluate independently in background before every trade._"
+        ])
         return "\n".join(lines)
 
     def format_agents_ballot(self, matrix: Optional[Dict[str, Any]] = None) -> str:
@@ -1391,8 +1388,8 @@ class OmniscientQuantitativeMatrix:
 
         lines = [
             "👥 *OMNISCIENT MULTI-AGENT BALLOT COUNCIL*",
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-            "Live vote distribution across all 7 background agents:\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "Live consensus across all 7 background agents:\n"
         ]
 
         g_agents = g.get("agents", {})
@@ -1403,16 +1400,14 @@ class OmniscientQuantitativeMatrix:
             ga = g_agents.get(k, {})
             ba = b_agents.get(k, {})
             lines.append(
-                f"🛡️ *{ga.get('name', k)}*\n"
-                f"   • Weight: `{int(ga.get('weight', 0.1)*100)}%` of Total Matrix\n"
-                f"   • Gold: {ga.get('badge','')} *{ga.get('vote','')}* ({ga.get('score',0)}%) — _{ga.get('headline','')}_\n"
-                f"   • BTC:  {ba.get('badge','')} *{ba.get('vote','')}* ({ba.get('score',0)}%) — _{ba.get('headline','')}_\n"
+                f"• *{ga.get('name', k)}*: Gold {ga.get('badge','')} `{ga.get('vote','')}` | BTC {ba.get('badge','')} `{ba.get('vote','')}`"
             )
 
         lines.extend([
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
             f"🥇 *Gold Consensus:* {g.get('approvals',0)} Approve | {g.get('warnings',0)} Warn | {g.get('vetoes',0)} Veto",
-            f"₿ *BTC Consensus:*  {b.get('approvals',0)} Approve | {b.get('warnings',0)} Warn | {b.get('vetoes',0)} Veto"
+            f"₿ *BTC Consensus:*  {b.get('approvals',0)} Approve | {b.get('warnings',0)} Warn | {b.get('vetoes',0)} Veto",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         ])
         return "\n".join(lines)
 
@@ -1425,29 +1420,17 @@ class OmniscientQuantitativeMatrix:
         b = m.get("btc", {})
         lines = [
             "⚙️ *OMNISCIENT QUANTITATIVE MATRIX TELEMETRY*",
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-            f"🔄 *Background Daemon:* `{'ONLINE' if self._is_running else 'ACTIVE (Auto-Sync)'}`",
-            f"⏱️ *Matrix Cache Latency:* `{age}s ago`",
-            f"🔁 *Sync Cycle Count:* `#{self._update_count}`",
-            f"📊 *Historical Snapshots:* `{len(self._history)} in memory`",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            f"🔄 *Background Daemon:* `{'ONLINE' if self._is_running else 'ACTIVE (Auto-Sync)'}` (Updated {age}s ago)",
+            f"📊 *Matrix Sync Cycle :* `#{self._update_count}` | Snapshots: `{len(self._history)} in memory`",
             "",
-            "🥇 *Gold Matrix State:*",
-            f"   • OCI: *{g.get('oci', 0.0)}/100* | Consensus: *{g.get('consensus', 'N/A')}*",
-            f"   • Clearance: *{'✅ PERMITTED' if g.get('is_permitted') else '🔴 VETOED'}*",
-            "",
-            "₿ *Bitcoin Matrix State:*",
-            f"   • OCI: *{b.get('oci', 0.0)}/100* | Consensus: *{b.get('consensus', 'N/A')}*",
-            f"   • Clearance: *{'✅ PERMITTED' if b.get('is_permitted') else '🔴 VETOED'}*",
+            "🥇 *Slot 1 (Gold) :* OCI: *{g.get('oci', 0.0)}/100* | Status: *{'✅ PERMITTED' if g.get('is_permitted') else '🔴 VETOED'}*",
+            "₿ *Slot 2 (BTC)  :* OCI: *{b.get('oci', 0.0)}/100* | Status: *{'✅ PERMITTED' if b.get('is_permitted') else '🔴 VETOED'}*",
             "",
             "👥 *Active Background Agents (7/7):*",
-            "   1. Macro & Global Liquidity Sovereign (DXY, Yields, GSR)",
-            "   2. Structural SMC & Levels Specialist (50/200 EMA, Golden Pocket)",
-            "   3. Microstructure & Anti-Trap Sentinel (Wicks, Springs, Upthrusts)",
-            "   4. Adversarial Bull vs Bear Council (Dialectical Thesis, Mayer Multiple)",
-            "   5. Autonomous Neuro-Symbolic Predictor (Monte Carlo 10k paths, EV)",
-            "   6. Dynamic Risk & Volatility Arbiter (Dynamic SL Buffer, ATR)",
-            "   7. Self-Learning Forensics Engine (Post-Mortem Bayesian Feedback)",
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            "• Macro & Liquidity | Structural Levels | Microstructure Anti-Trap",
+            "• Bull vs Bear Debate | Neuro Predictive Engine | Dynamic Risk Arbiter | Self-Learning",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         ]
         return "\n".join(lines)
 
