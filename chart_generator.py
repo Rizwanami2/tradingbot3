@@ -151,6 +151,9 @@ def generate_mt5_chart(symbol: str, asset_name: str, lookback_bars: int = 45, df
     buf = io.BytesIO()
     plt.savefig(buf, format="png", bbox_inches="tight", facecolor=fig.get_facecolor(), dpi=150)
     plt.close(fig)
+    plt.close("all")
+    import gc
+    gc.collect()
     buf.seek(0)
     return buf
 

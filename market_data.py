@@ -365,7 +365,7 @@ class MarketDataFeed:
         """
         now = time.time()
         cached = self._memory_cache.get("macro_snapshot")
-        if cached and (now - cached["timestamp"] < 60):  # Macro changes slower, 60s cache
+        if cached and (now - cached["timestamp"] < 300):  # Macro changes slower, 300s (5m) anti-spam cache
             return dict(cached["data"])
 
         # Default fallbacks

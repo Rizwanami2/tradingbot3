@@ -364,6 +364,9 @@ class MT5LiveBroker:
         final_sl = round(fill_price - sl_dist if is_buy else fill_price + sl_dist, digits)
         final_tp = round(fill_price + tp_dist if is_buy else fill_price - tp_dist, digits)
 
+        is_gold_asset = ("XAU" in symbol.upper() or "GOLD" in symbol.upper())
+        asset_deviation = 40 if is_gold_asset else 650  # Adaptive: 40 pts Gold ($0.40), 650 pts BTC ($6.50)
+
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": symbol,
@@ -372,7 +375,7 @@ class MT5LiveBroker:
             "price": fill_price,
             "sl": final_sl,
             "tp": final_tp,
-            "deviation": 25,
+            "deviation": asset_deviation,
             "magic": 999888,
             "comment": comment,
             "type_time": mt5.ORDER_TIME_GTC,
@@ -978,6 +981,165 @@ class MT5LiveBroker:
                 })
             return {"success": True, "ticket": p.ticket, "closed_pnl": p.profit, "symbol": symbol}
         return {"success": False, "error": f"MT5 close error code {getattr(res, 'retcode', 'UNKNOWN')}"}
+
+    def close_position_partial(self, ticket: str | int, fraction: float = 0.50, exit_price: float = None, reason: str = "PARTIAL_TP") -> dict:
+        """
+        Closes a partial fraction (default 50%) of an open position.
+        Works across both Paper and Live MT5 positions.
+        """
+        str_ticket = str(ticket)
+        mode = safety_manager.get_trading_mode() if safety_manager else "LIVE"
+
+        # 1. Paper Position Partial Close
+        if str_ticket.startswith("PAPER-") or mode == "PAPER":
+            if safety_manager:
+                positions = safety_manager.get_paper_positions()
+                for p in positions:
+                    if str(p["ticket"]) == str_ticket:
+                        curr_lots = p.get("lots", 0.05)
+                        close_lots = round(curr_lots * fraction, 2)
+                        rem_lots = round(curr_lots - close_lots, 2)
+                        if close_lots <= 0.0 or rem_lots <= 0.0:
+                            return self.close_position(str_ticket, exit_price=exit_price, reason=reason)
+                        p["lots"] = rem_lots
+                        asset_key = p["asset"]
+                        mult = 100.0 if asset_key == "GOLD" else 1.0
+                        price = exit_price or p["open_price"]
+                        is_buy = p["action"] == "BUY"
+                        pnl = round(((price - p["open_price"]) if is_buy else (p["open_price"] - price)) * close_lots * mult, 2)
+                        safety_manager.record_pnl(pnl)
+                        return {"success": True, "ticket": str_ticket, "partial_lots": close_lots, "remaining_lots": rem_lots, "pnl": pnl}
+            return {"success": False, "error": "Paper position not found for partial close."}
+
+        # 2. Live MT5 Position Partial Close
+        if not self.ensure_connected():
+            return {"success": False, "error": "MT5 is disconnected."}
+
+        try:
+            num_ticket = int(str_ticket)
+        except ValueError:
+            return {"success": False, "error": f"Invalid MT5 ticket format: {ticket}"}
+
+        positions = mt5.positions_get(ticket=num_ticket)
+        if not positions or len(positions) == 0:
+            return {"success": False, "error": f"Position #{num_ticket} not found in MT5."}
+
+        p = positions[0]
+        symbol = p.symbol
+        tick = mt5.symbol_info_tick(symbol)
+        sym_info = mt5.symbol_info(symbol)
+        if not tick or not sym_info:
+            return {"success": False, "error": f"Failed to get price tick for {symbol}"}
+
+        vol_min = sym_info.volume_min or 0.01
+        vol_step = sym_info.volume_step or 0.01
+        close_volume = round(p.volume * fraction, 2)
+        close_volume = math.floor(close_volume / vol_step) * vol_step
+        close_volume = round(close_volume, 2)
+
+        if close_volume < vol_min:
+            close_volume = vol_min
+        if close_volume >= p.volume:
+            return self.close_position(num_ticket, exit_price=exit_price, reason=reason)
+
+        order_type = mt5.ORDER_TYPE_SELL if p.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
+        price = tick.bid if p.type == mt5.ORDER_TYPE_BUY else tick.ask
+        asset_key = "GOLD" if "XAU" in symbol or "GOLD" in symbol else "BTC"
+        dev = 40 if asset_key == "GOLD" else 650
+
+        req = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "position": p.ticket,
+            "symbol": symbol,
+            "volume": close_volume,
+            "type": order_type,
+            "price": price,
+            "deviation": dev,
+            "magic": BOT_MAGIC,
+            "comment": f"PARTIAL_{int(fraction*100)}PCT",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_IOC
+        }
+        res = mt5.order_send(req)
+        if res is None or res.retcode != mt5.TRADE_RETCODE_DONE:
+            for filling in [mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN]:
+                req["type_filling"] = filling
+                res = mt5.order_send(req)
+                if res is not None and res.retcode == mt5.TRADE_RETCODE_DONE:
+                    break
+
+        if res is not None and res.retcode == mt5.TRADE_RETCODE_DONE:
+            partial_pnl = round(p.profit * (close_volume / p.volume), 2)
+            if safety_manager:
+                safety_manager.record_pnl(partial_pnl)
+                safety_manager.log_order_audit({
+                    "event": "PARTIAL_CLOSE_MT5",
+                    "ticket": p.ticket,
+                    "symbol": symbol,
+                    "closed_volume": close_volume,
+                    "remaining_volume": round(p.volume - close_volume, 2),
+                    "pnl_usd": partial_pnl,
+                    "reason": reason
+                })
+            return {"success": True, "ticket": p.ticket, "closed_volume": close_volume, "pnl": partial_pnl, "symbol": symbol}
+        return {"success": False, "error": f"MT5 partial close error code {getattr(res, 'retcode', 'UNKNOWN')}"}
+
+    def move_to_breakeven(self, ticket: str | int) -> dict:
+        """
+        Manually forces position SL to Breakeven Plus (BE+) with spread buffer.
+        """
+        str_ticket = str(ticket)
+        mode = safety_manager.get_trading_mode() if safety_manager else "LIVE"
+
+        # Paper position
+        if str_ticket.startswith("PAPER-") or mode == "PAPER":
+            if safety_manager:
+                for p in safety_manager.get_paper_positions():
+                    if str(p["ticket"]) == str_ticket:
+                        open_p = p["open_price"]
+                        asset_key = p["asset"]
+                        offset = 0.50 if asset_key == "GOLD" else 50.0
+                        be_price = (open_p + offset) if p["action"] == "BUY" else (open_p - offset)
+                        p["sl"] = be_price
+                        return {"success": True, "ticket": str_ticket, "new_sl": be_price, "symbol": p.get("symbol")}
+            return {"success": False, "error": "Paper position not found."}
+
+        # MT5 live position
+        if not self.ensure_connected():
+            return {"success": False, "error": "MT5 is disconnected."}
+
+        try:
+            num_ticket = int(str_ticket)
+        except ValueError:
+            return {"success": False, "error": f"Invalid ticket: {ticket}"}
+
+        positions = mt5.positions_get(ticket=num_ticket)
+        if not positions:
+            return {"success": False, "error": f"Position #{num_ticket} not found."}
+
+        p = positions[0]
+        sym = p.symbol
+        tick = mt5.symbol_info_tick(sym)
+        info = mt5.symbol_info(sym)
+        digits = getattr(info, "digits", 2)
+        spread_pts = getattr(tick, "ask", 0) - getattr(tick, "bid", 0) if tick else 0.0
+        asset_key = "GOLD" if "XAU" in sym or "GOLD" in sym else "BTC"
+        be_offset = max(0.50, round(spread_pts + 0.35, digits)) if asset_key == "GOLD" else max(50.0, round(spread_pts + 25.0, digits))
+
+        is_buy = (p.type == mt5.ORDER_TYPE_BUY)
+        new_sl = round(p.price_open + be_offset, digits) if is_buy else round(p.price_open - be_offset, digits)
+
+        req = {
+            "action": mt5.TRADE_ACTION_SLTP,
+            "position": p.ticket,
+            "symbol": sym,
+            "sl": new_sl,
+            "tp": p.tp
+        }
+        res = mt5.order_send(req)
+        if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+            return {"success": True, "ticket": p.ticket, "new_sl": new_sl, "symbol": sym}
+        return {"success": False, "error": f"Failed to set BE: {getattr(res, 'retcode', 'UNKNOWN')}"}
 
     def has_open_position(self, asset: str) -> bool:
         """Returns True if a position for this asset is open in MT5 or Paper."""

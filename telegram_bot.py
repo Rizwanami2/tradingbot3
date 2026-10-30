@@ -35,7 +35,7 @@ import urllib.request
 import urllib.parse
 import urllib.error
 import ssl
-from datetime import datetime
+from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 import concurrent.futures
@@ -264,7 +264,7 @@ PENDING_SETUPS = {
 DEDUP_LOCK = threading.Lock()
 
 # Alert & Auto-Trade Deduplication Cooldown (in seconds)
-ALERT_COOLDOWN_SECONDS = 120  # 2 minutes auto-trade & alert cooldown
+ALERT_COOLDOWN_SECONDS = 900  # 15 minutes auto-trade & alert deduplication cooldown (Anti-Spam Suite)
 
 
 def set_alert_cooldown(seconds: int) -> int:
@@ -1580,6 +1580,8 @@ def format_hidden_commands_menu() -> tuple[str, dict]:
         "• `/ignore_gold` / `/ignore_btc` ──► Dismiss active alert",
         "• `/cooldown [mins]` ──► View or set alert deduplication timer",
         "• `/locks` / `/unlock [gold|btc|all]` ──► View or clear trade locks",
+        "• `/part <ticket>` ──► Bank 50% partial profit",
+        "• `/be <ticket>` ──► Move stop-loss to Breakeven Plus",
         "",
         "⚡ *3. Strategy, Risk & Automation*",
         "• `/strategy [scalp|swing|momentum]` ──► Multi-regime strategy profiles",
@@ -1707,15 +1709,42 @@ def trailing_monitor_worker(token: str, chat_id_getter):
                 continue
 
             strat_code = get_active_strategy()["code"] if RISK_ENGINE_AVAILABLE else "SCALP"
+            # Friday Weekend Gap Protection for Gold (XAU/USD)
+            try:
+                now_utc = datetime.now(timezone.utc)
+                if now_utc.weekday() == 4 and (now_utc.hour > 20 or (now_utc.hour == 20 and now_utc.minute >= 45)):
+                    if live_broker and live_broker.has_open_position("GOLD"):
+                        target_chat_id = chat_id_getter()
+                        mode = safety_manager.get_trading_mode() if safety_manager else "LIVE"
+                        if mode == "PAPER" and safety_manager:
+                            for p in list(safety_manager.get_paper_positions()):
+                                if p.get("asset") == "GOLD":
+                                    safety_manager.close_paper_position(p["ticket"], p.get("open_price", 0.0), reason="FRIDAY_WEEKEND_GAP_SHIELD")
+                                    if target_chat_id:
+                                        send_message(token, target_chat_id, f"🛡️ *FRIDAY GAP SHIELD:* Closed Paper Gold #{p['ticket']} at market before weekend gap risk.")
+                        elif live_broker.is_connected:
+                            import MetaTrader5 as mt5_fri
+                            pos_gold = mt5_fri.positions_get(symbol=live_broker.resolve_symbol("GOLD"))
+                            if pos_gold:
+                                for gp in pos_gold:
+                                    if getattr(gp, "magic", 0) == live_broker.BOT_MAGIC:
+                                        live_broker.close_position(gp.ticket, reason="FRIDAY_WEEKEND_GAP_SHIELD")
+                                        if target_chat_id:
+                                            send_message(token, target_chat_id, f"🛡️ *FRIDAY GAP SHIELD:* Closed Gold Position #{gp.ticket} before weekend market closure.")
+            except Exception as e_fri:
+                print(f"⚠️ Friday gap shield check error: {e_fri}")
+
             events = live_broker.trail_positions(default_strategy=strat_code)
             if events:
                 target_chat_id = chat_id_getter()
                 for ev in events:
-                    if target_chat_id:
-                        send_message(token, target_chat_id, ev["msg"])
                     action_name = ev.get("action", "")
                     new_sl_val = ev.get("new_sl", ev.get("price", ""))
                     print(f"[{datetime.now().strftime('%H:%M:%S')}] Trailing Event: {ev['symbol']} #{ev['ticket']} -> {action_name} @ {new_sl_val}")
+                    # Anti-spam filter: only notify for critical milestones, silence micro-trailing ticks
+                    if action_name in ("BREAKEVEN", "TP_HIT", "SL_HIT", "PARTIAL_TP", "CLOSE", "FRIDAY_FLATTEN"):
+                        if target_chat_id:
+                            send_message(token, target_chat_id, ev["msg"])
                     # Auto release scanner locks when trade closes on TP/SL
                     if action_name in ("TP_HIT", "SL_HIT"):
                         asset_key = ev.get("asset", "GOLD")
@@ -1937,6 +1966,30 @@ def handle_callback_query(token: str, cq: dict):
         ignore_active_setup(token, sender_id, "GOLD")
     elif data in ("ignore_btc", "dismiss_btc"):
         ignore_active_setup(token, sender_id, "BTC")
+    elif data.startswith("part_"):
+        t_id = data.split("_", 1)[1]
+        if live_broker:
+            res = live_broker.close_position_partial(t_id, fraction=0.50, reason="MANUAL_PARTIAL_TP")
+            if res.get("success"):
+                send_message(token, sender_id, f"💰 *PARTIAL PROFIT BANKED:* Closed 50% of #{t_id} (PnL: +${res.get('pnl', 0.0):.2f}). Remaining lots continue running with trailing stop!")
+            else:
+                send_message(token, sender_id, f"⚠️ Partial close failed: {res.get('error')}")
+    elif data.startswith("be_"):
+        t_id = data.split("_", 1)[1]
+        if live_broker:
+            res = live_broker.move_to_breakeven(t_id)
+            if res.get("success"):
+                send_message(token, sender_id, f"🛡️ *BREAKEVEN LOCKED:* Position #{t_id} stop loss moved to `${res.get('new_sl')}` (risk eliminated)!")
+            else:
+                send_message(token, sender_id, f"⚠️ Move to Breakeven failed: {res.get('error')}")
+    elif data.startswith("close_") and data not in ("close_all", "close"):
+        t_id = data.split("_", 1)[1]
+        if live_broker:
+            res = live_broker.close_position(t_id, reason="MANUAL_TELEGRAM_CLOSE")
+            if res.get("success"):
+                send_message(token, sender_id, f"❌ *POSITION CLOSED:* #{t_id} closed at market.")
+            else:
+                send_message(token, sender_id, f"⚠️ Close failed: {res.get('error')}")
     elif data in ("close_all", "close"):
         process_telegram_command(token, sender_id, sender_name, "/close_all")
     elif data in ("buy_gold", "order_buy_gold"):
@@ -2061,6 +2114,21 @@ def handle_callback_query(token: str, cq: dict):
         process_telegram_command(token, sender_id, sender_name, "/train")
 
 
+def get_market_session_badge() -> str:
+    """Returns the active global market session and volatility profile."""
+    utc_hour = datetime.now(timezone.utc).hour
+    if 13 <= utc_hour < 17:
+        return "🇺🇸 NY Overlap (Peak Volatility)"
+    elif 8 <= utc_hour < 13:
+        return "🇬🇧 London Session (High Volume)"
+    elif 17 <= utc_hour < 21:
+        return "🇺🇸 NY Afternoon (Trend Continuation)"
+    elif 0 <= utc_hour < 8:
+        return "🌏 Asian Session (Consolidation/Range)"
+    else:
+        return "🌐 Market Rollover / Pacific"
+
+
 def format_elite_alert(asset: str, data: dict, setup_data: dict = None, exec_result: dict = None, is_auto_trade: bool = False):
     """
     Formats a clean, classic, institutional trade alert.
@@ -2102,6 +2170,7 @@ def format_elite_alert(asset: str, data: dict, setup_data: dict = None, exec_res
         f"📊 *Asset:* {icon} `{sym_name}` ({slot_label})",
         f"⚡ *Signal:* *{act_badge}*",
         f"🎯 *Confluence Score:* `{score_val}/10` (Edge: High Probability)",
+        f"🌐 *Session:* `{get_market_session_badge()}`",
         f"💵 *Live Market Price:* `${item['price']:,.2f}`",
         "",
         "📋 *Sniper Order Ticket:*",
@@ -2119,8 +2188,14 @@ def format_elite_alert(asset: str, data: dict, setup_data: dict = None, exec_res
         lines.append(f"• Ticket: `#{exec_result['ticket']}` | Volume: `{exec_result['lots']}` Lots")
         lines.append(f"• Fill Price: `${exec_result['price']:,.2f}`")
         lines.append("🛡️ Trailing stop & breakeven active in background.")
+        t_num = exec_result.get("ticket", "")
         reply_markup = {
             "inline_keyboard": [
+                [
+                    {"text": "💰 Bank 50%", "callback_data": f"part_{t_num}"},
+                    {"text": "🛡️ Move BE+", "callback_data": f"be_{t_num}"},
+                    {"text": "❌ Close", "callback_data": f"close_{t_num}"}
+                ],
                 [
                     {"text": "📊 Positions", "callback_data": "positions"},
                     {"text": "🛡️ Trail Hub", "callback_data": "trail"},
@@ -2215,7 +2290,8 @@ def auto_scanner_worker(token: str, chat_id_getter):
                 b_target.get('verdict', '').startswith("🟢") or
                 b_target['final_score'] >= 7
             )
-            if is_qualified_b:
+            has_btc_open = live_broker.has_open_position("BTC") if (MT5_EXECUTOR_AVAILABLE and live_broker) else False
+            if is_qualified_b and not has_btc_open:
                 if should_send_alert("BTC", b_act, b_target['price'], b_target['final_score'], cooldown_seconds=ALERT_COOLDOWN_SECONDS):
                     setup_data = {
                         "asset": "BTC",
@@ -2268,7 +2344,8 @@ def auto_scanner_worker(token: str, chat_id_getter):
                 g_target.get('verdict', '').startswith("🟢") or
                 g_target['final_score'] >= 7
             )
-            if is_qualified_g:
+            has_gold_open = live_broker.has_open_position("GOLD") if (MT5_EXECUTOR_AVAILABLE and live_broker) else False
+            if is_qualified_g and not has_gold_open:
                 if should_send_alert("GOLD", g_act, g_target['price'], g_target['final_score'], cooldown_seconds=ALERT_COOLDOWN_SECONDS):
                     setup_data = {
                         "asset": "GOLD",
@@ -2738,6 +2815,33 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
                 else:
                     send_message(token, sender_id, f"ℹ️ {res.get('msg') or res.get('error', 'No open positions to close.')}")
             return
+
+    # ── 3B. MANUAL PARTIAL CLOSE & BREAKEVEN SHORTCUTS (/part, /be) ──
+    if cmd in ("/part", "/partial"):
+        target_ticket = args.strip() if args else ""
+        if not target_ticket:
+            send_message(token, sender_id, "ℹ️ *Usage:* `/part <ticket_number>`\nCloses 50% of the position to bank partial profits and protects remaining volume.")
+            return
+        if live_broker:
+            res = live_broker.close_position_partial(target_ticket, fraction=0.50, reason="MANUAL_PARTIAL_COMMAND")
+            if res.get("success"):
+                send_message(token, sender_id, f"💰 *PARTIAL PROFIT SECURED:* Closed 50% of #{target_ticket} (PnL: +${res.get('pnl', 0.0):.2f}). Remaining volume protected with trailing stop!")
+            else:
+                send_message(token, sender_id, f"⚠️ Partial close failed: {res.get('error')}")
+        return
+
+    if cmd in ("/be", "/breakeven"):
+        target_ticket = args.strip() if args else ""
+        if not target_ticket:
+            send_message(token, sender_id, "ℹ️ *Usage:* `/be <ticket_number>`\nMoves stop loss to Breakeven Plus (BE+) with spread buffer.")
+            return
+        if live_broker:
+            res = live_broker.move_to_breakeven(target_ticket)
+            if res.get("success"):
+                send_message(token, sender_id, f"🛡️ *BREAKEVEN LOCKED:* Stop loss for #{target_ticket} moved to `${res.get('new_sl')}` (risk eliminated)!")
+            else:
+                send_message(token, sender_id, f"⚠️ Move to Breakeven failed: {res.get('error')}")
+        return
 
         # Sub-branch: Buy / Sell Execution (Gold or BTC)
         is_buy_gold = "buy" in action_mode and ("gold" in action_mode or "xau" in action_mode)

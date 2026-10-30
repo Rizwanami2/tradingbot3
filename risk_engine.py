@@ -250,6 +250,12 @@ class SafetyManager:
             reason = self.state.get("kill_switch_reason", "Emergency Halt Active")
             return False, f"🚨 Kill-Switch is ACTIVE ({reason}). All trading blocked."
 
+        # Check 1.5: Weekly Drawdown Ceiling (-5.0% High-Water Mark)
+        weekly_pnl = self.state.get("realized_weekly_pnl", 0.0)
+        starting_eq_val = self.state.get("starting_daily_equity", current_equity or DEFAULT_ACCOUNT_BALANCE)
+        if starting_eq_val > 0 and (weekly_pnl / starting_eq_val) * 100.0 <= -5.0:
+            return False, f"🚨 Weekly Loss Limit TRIPPED (-5.0% reached). Trading locked until Monday to preserve capital."
+
         # Check 2: Daily Loss Circuit Breaker
         starting_eq = self.state.get("starting_daily_equity", current_equity or DEFAULT_ACCOUNT_BALANCE)
         daily_pnl = self.state.get("realized_daily_pnl", 0.0)

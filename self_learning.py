@@ -381,6 +381,9 @@ class SelfLearningEngine:
         return (pct / 100.0) if pct > 0 else 0.55
 
     def save_memory(self) -> bool:
+        # Enforce rolling cap of 500 items in trade_journal to prevent JSON file bloat
+        if "trade_journal" in self.memory and len(self.memory["trade_journal"]) > 500:
+            self.memory["trade_journal"] = self.memory["trade_journal"][-500:]
         return self.memory_mgr.atomic_save(self.memory)
 
     # ──────────────────────────────────────────────────────────────────────────
