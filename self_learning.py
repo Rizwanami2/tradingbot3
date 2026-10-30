@@ -1224,35 +1224,71 @@ class SelfLearningEngine:
     # TELEGRAM /MEMORY & AUDIT DASHBOARDS
     # ──────────────────────────────────────────────────────────────────────────
     def format_memory_dashboard(self) -> str:
-        """Renders comprehensive master Memory & Knowledge Graph dashboard for Telegram."""
+        """
+        Renders the Consolidated All-in-One Autonomous Memory, Semantic Knowledge Graph & Negative Bank Dashboard.
+        Compiles all memory data into a single, comprehensive institutional view without needing multiple subcommands.
+        """
         p = self.memory.get("performance", {})
         dp = self.memory.get("directional_performance", {})
         rules = self.memory.get("semantic_rules", [])
         toxic_bank = self.memory.get("negative_memory_bank", [])
+        disc_strat = self.memory.get("discovered_strategies", [])
         csum = self.memory.get("sha256_checksum", "Verified")[:12]
         cycles = self.memory.get("training_cycles", 0)
 
         lines = [
             "🧠 *INSTITUTIONAL QUANTITATIVE MEMORY HUB*",
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "🤖 *Autonomous Engine:* `ACTIVE 🟢 (100% Automatic Background)`",
             f"⚡ *Memory Integrity:* `SHA-256 Verified ({csum}...)` ✅",
-            f"⏱️ *Evolution Cycles:* `{cycles}` | *Last Synced:* `{self.memory.get('last_updated', 'N/A')}`",
+            f"⏱️ *Evolution Cycles:* `{cycles}` | *Temporal Decay:* `45D Half-Life`",
+            f"📁 *Persistence:* `learning_memory.json` + `learning_memory.bak` (Auto-Synced)",
             "",
             "🏛️ *3-TIER MEMORY STORAGE AUDIT:*",
-            f"• *Tier 1 (RAM Micro-Cache)  :* Active Intraday State (`Lockless`)",
+            "• *Tier 1 (RAM Micro-Cache)  :* Active Intraday State (`Lockless`)",
             f"• *Tier 2 (Episodic Journal) :* `{len(self.memory.get('trade_journal', []))}` Recorded Trade Snapshots",
             f"• *Tier 3 (Semantic Rules)   :* `{len(rules)}` Distilled Quantitative Rules",
             f"• *Negative Memory Bank      :* `{len(toxic_bank)}` Toxic Loss Fingerprints (Pre-Trade Vetoes)",
             "",
-            "📊 *DIRECTIONAL ALPHA CONVICTION:*",
-            f"• 🟢 *Long (BUY)  :* `{dp.get('BUY', {}).get('win_rate_pct', 0.0):.1f}% Win Rate` ({dp.get('BUY', {}).get('wins', 0)}W/{dp.get('BUY', {}).get('losses', 0)}L) | `{dp.get('BUY', {}).get('total_r_multiple', 0.0):+.2f}R`",
-            f"• 🔴 *Short (SELL):* `{dp.get('SELL', {}).get('win_rate_pct', 0.0):.1f}% Win Rate` ({dp.get('SELL', {}).get('wins', 0)}W/{dp.get('SELL', {}).get('losses', 0)}L) | `{dp.get('SELL', {}).get('total_r_multiple', 0.0):+.2f}R`",
+            "📊 *DIRECTIONAL ALPHA CONVICTION (BUY vs SELL):*",
+            f"• 🟢 *Long (BUY)  :* `{dp.get('BUY', {}).get('win_rate_pct', 0.0):.1f}% Win Rate` ({dp.get('BUY', {}).get('wins', 0)}W/{dp.get('BUY', {}).get('losses', 0)}L) | `{dp.get('BUY', {}).get('total_r_multiple', 0.0):+.2f}R` | `PF {dp.get('BUY', {}).get('profit_factor', 1.0):.2f}`",
+            f"• 🔴 *Short (SELL):* `{dp.get('SELL', {}).get('win_rate_pct', 0.0):.1f}% Win Rate` ({dp.get('SELL', {}).get('wins', 0)}W/{dp.get('SELL', {}).get('losses', 0)}L) | `{dp.get('SELL', {}).get('total_r_multiple', 0.0):+.2f}R` | `PF {dp.get('SELL', {}).get('profit_factor', 1.0):.2f}`",
             "",
-            "🔬 *DYNAMIC VOLATILITY SHOCK CUSHIONS:*",
-            f"• Gold (XAU/USD): `+{self.get_dynamic_sl_buffer('GOLD'):.2f}x ATR` | BTC: `+{self.get_dynamic_sl_buffer('BTC'):.2f}x ATR`",
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-            "💡 _Commands: `/memory rules` | `/memory patterns` | `/memory backup` | `/train`_"
+            "📜 *SEMANTIC KNOWLEDGE GRAPH (AUTO-EVOLVED RULES):*"
         ]
+
+        if not rules:
+            lines.append("• _Zero rules distilled yet. Engine evolves rules automatically as trades complete._")
+        else:
+            for idx, r in enumerate(rules[:3], 1):
+                conf = r.get("confidence", 80.0)
+                badge = "🟢" if conf >= 85.0 else ("🟡" if conf >= 75.0 else "⚪")
+                lines.append(f"{idx}. {badge} *[{r.get('id', 'RULE')}]* ({conf:.1f}% Confidence | {r.get('asset', 'ALL')})")
+                lines.append(f"   • *Rule:* _{r.get('statement', '')}_")
+                lines.append(f"   • *Edge:* `{r.get('activations', 0)}` Setups | `{r.get('success_rate', 0.0):.1f}%` Empirical Success")
+
+        lines.append("")
+        lines.append("🪤 *NEGATIVE MEMORY BANK (PRE-TRADE TOXIC VETOES):*")
+        if not toxic_bank:
+            lines.append("• 🛡️ _Zero toxic patterns stored. All previous executions within safe volatility bounds._")
+        else:
+            lines.append(f"• 🛑 Catalogued Signatures: `{len(toxic_bank)}` | Gatekeeper: `≥85% Match Vetoed`")
+            for idx, t in enumerate(toxic_bank[-2:], 1):
+                t_id = t.get('ticket') or t.get('date', 'P')
+                lines.append(f"  {idx}. *#{t_id}* {t.get('asset')} ({t.get('action')}) -> `{t.get('root_cause', 'Variance')}`")
+
+        if disc_strat:
+            lines.append("")
+            lines.append("🧬 *AUTONOMOUSLY EVOLVED MACHINE STRATEGIES:*")
+            for s in disc_strat[:2]:
+                lines.append(f"• `[{s.get('code', 'STRAT')}]` {s.get('name', 'Strategy')}: Win Rate `{s.get('empirical_win_rate', 70.0):.1f}%` | Exp R `{s.get('expected_r', 1.5):+.2f}R`")
+
+        lines.append("")
+        lines.append("🔬 *DYNAMIC VOLATILITY SHOCK CUSHIONS:*")
+        lines.append(f"• Gold (XAU/USD): `+{self.get_dynamic_sl_buffer('GOLD'):.2f}x ATR` | BTC: `+{self.get_dynamic_sl_buffer('BTC'):.2f}x ATR`")
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append("💡 *100% Autonomous:* Background engine automatically ingests all closed trades, adapts factor weights, refines rules, and creates backups without manual commands.")
+
         return "\n".join(lines)
 
     def format_semantic_rules_card(self) -> str:

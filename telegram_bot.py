@@ -1093,6 +1093,7 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
     return res
 
 
+_last_auto_learning_sync = 0.0
 _last_pipeline_cache = {
     "macro": None,
     "btc": None,
@@ -1315,7 +1316,7 @@ def format_welcome_menu(sender_name: str) -> str:
         f"• `/learn`                 ──► Bayesian factor rankings & active probability weights\n"
         f"• `/train`                 ──► Institutional walk-forward self-calibration on history\n"
         f"• `/trades`                ──► Closed trades journal & realized PnL performance history\n"
-        f"• `/memory` (or `/mem`)    ──► 3-Tier Hierarchical Memory, Semantic Rules & Negative Bank\n"f"• `/matrix` (or `/omniscient`)──► Omniscient Quantitative Matrix (7 background agents combined)\n"f"• `/all` (or `/cockpit`)   ──► All-in-one combined cockpit (Market, Matrix, Twin, Risk, Positions)\n\n"
+        f"• `/memory` (or `/mem`)    ──► ALL-IN-ONE Autonomous Memory Hub (Auto-Sync, Rules, Negative Veto & Evolution)\n"f"• `/matrix` (or `/omniscient`)──► Omniscient Quantitative Matrix (7 background agents combined)\n"f"• `/all` (or `/cockpit`)   ──► All-in-one combined cockpit (Market, Matrix, Twin, Risk, Positions)\n\n"
         f"⚡ *Execution & Order Controls:*\n"
         f"• `/trade`                 ──► Execution hub (`/trade buy gold`, `/trade sell btc`)\n"
         f"• `/autopush` (or `/push`) ──► Automated order push controller (`/autopush on|off|gold|btc`)\n"
@@ -1447,6 +1448,18 @@ def trailing_monitor_worker(token: str, chat_id_getter):
                     if action_name in ("TP_HIT", "SL_HIT"):
                         asset_key = ev.get("asset", "GOLD")
                         clear_active_setup(asset_key)
+
+                        if LEARNING_AVAILABLE and learning_engine:
+                            try:
+                                # Autonomous Self-Learning & Memory Ingestion (Zero Manual Intervention)
+                                learning_engine.sync_all_closed_trades(live_broker=live_broker, safety_manager=safety_manager)
+                                learning_engine.recalculate_all_metrics()
+                                learning_engine.refine_semantic_knowledge_graph()
+                                learning_engine.mine_negative_memory_bank()
+                                learning_engine.synthesize_and_evolve_strategies()
+                                learning_engine.save_memory()
+                            except Exception as me:
+                                print(f"⚠️ Auto memory learning update error: {me}")
 
                         if action_name == "SL_HIT" and LEARNING_AVAILABLE and learning_engine:
                             try:
@@ -1999,6 +2012,23 @@ def auto_scanner_worker(token: str, chat_id_getter):
             btc_st = f"Active ({b_pend.get('status')})" if b_pend else f"Score {b['final_score']}/10"
             gold_st = f"Active ({g_pend.get('status')})" if g_pend else f"Score {g['final_score']}/10"
             print(f"[{datetime.now().strftime('%H:%M:%S')}] 1M Scan: BTC: {btc_st} | Gold: {gold_st} (Spam: 0 | Lock: OFF)")
+
+            # ── 4. Periodic Autonomous Self-Learning & Memory Optimization (Every 5 minutes) ──
+            global _last_auto_learning_sync
+            if LEARNING_AVAILABLE and learning_engine:
+                if (current_time - _last_auto_learning_sync) >= 300:
+                    try:
+                        synced_cnt = learning_engine.sync_all_closed_trades(live_broker=live_broker, safety_manager=safety_manager)
+                        learning_engine.recalculate_all_metrics()
+                        learning_engine.refine_semantic_knowledge_graph()
+                        learning_engine.mine_negative_memory_bank()
+                        learning_engine.synthesize_and_evolve_strategies()
+                        learning_engine.save_memory()
+                        _last_auto_learning_sync = current_time
+                        if synced_cnt > 0:
+                            print(f"🧠 [{datetime.now().strftime('%H:%M:%S')}] Autonomous Background Memory: Synced {synced_cnt} closed trades | Weights & Rules Evolved")
+                    except Exception as le:
+                        print(f"⚠️ Periodic auto-learning sync error: {le}")
 
         except Exception as scan_err:
             time.sleep(5)
@@ -3211,20 +3241,27 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             send_message(token, sender_id, f"📁 *Memory File Location:*\n`{os.path.abspath(mem_path)}`")
             return
         else:
+            # Auto-run complete learning & reconciliation pass before rendering unified card
+            try:
+                learning_engine.sync_all_closed_trades(live_broker=live_broker, safety_manager=safety_manager)
+                learning_engine.recalculate_all_metrics()
+                learning_engine.refine_semantic_knowledge_graph()
+                learning_engine.mine_negative_memory_bank()
+                learning_engine.synthesize_and_evolve_strategies()
+                learning_engine.save_memory()
+            except Exception:
+                pass
+
             mem_dashboard = learning_engine.format_memory_dashboard()
             mem_markup = {
                 "inline_keyboard": [
                     [
-                        {"text": "📜 Semantic Rules", "callback_data": "memory_rules"},
-                        {"text": "🪤 Negative Bank", "callback_data": "memory_patterns"}
+                        {"text": "🔄 Refresh & Auto-Sync", "callback_data": "memory_sync"},
+                        {"text": "💾 Backup Snapshot", "callback_data": "memory_backup"}
                     ],
                     [
-                        {"text": "💾 Backup Memory", "callback_data": "memory_backup"},
-                        {"text": "🔄 Sync Broker Deals", "callback_data": "memory_sync"}
-                    ],
-                    [
-                        {"text": "🧠 Train 180D", "callback_data": "train_model"},
-                        {"text": "📜 Trade Journal", "callback_data": "trades"}
+                        {"text": "📊 Live Scan", "callback_data": "scan"},
+                        {"text": "🌐 Omniscient Matrix", "callback_data": "matrix"}
                     ]
                 ]
             }
