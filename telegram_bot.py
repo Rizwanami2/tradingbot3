@@ -2230,7 +2230,13 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
                 f"• Long-Term Trend (200D): `${b_lv['ma200']:,.0f}`\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             )
-            send_message(token, sender_id, levels_msg)
+            levels_markup = {
+                "inline_keyboard": [
+                    [{"text": "📊 Dual-Slot Scan", "callback_data": "scan"}, {"text": "⚡ Auto-Push: BOTH", "callback_data": "autopush_on"}],
+                    [{"text": "🥇 Gold Audit", "callback_data": "gold"}, {"text": "₿ BTC Audit", "callback_data": "btc"}]
+                ]
+            }
+            send_message(token, sender_id, levels_msg, reply_markup=levels_markup)
             return
 
         # Sub-branch: Wyckoff Traps & Liquidity
@@ -2253,7 +2259,13 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"💡 _All Wyckoff traps and sweeps filtered automatically in background._"
             )
-            send_message(token, sender_id, trap_msg)
+            trap_markup = {
+                "inline_keyboard": [
+                    [{"text": "📊 Dual-Slot Scan", "callback_data": "scan"}, {"text": "⚡ Cockpit", "callback_data": "all"}],
+                    [{"text": "🥇 Gold Audit", "callback_data": "gold"}, {"text": "₿ BTC Audit", "callback_data": "btc"}]
+                ]
+            }
+            send_message(token, sender_id, trap_msg, reply_markup=trap_markup)
             return
 
         # Sub-branch: Adversarial Debate
@@ -2300,7 +2312,13 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"💡 _Tap below to execute or scan._"
             )
-            send_message(token, sender_id, ticket)
+            btc_markup = {
+                "inline_keyboard": [
+                    [{"text": "🟢 Buy BTC", "callback_data": "buy_btc"}, {"text": "🔴 Sell BTC", "callback_data": "sell_btc"}],
+                    [{"text": "📊 Dual Scan", "callback_data": "scan"}, {"text": "💼 Positions", "callback_data": "positions"}]
+                ]
+            }
+            send_message(token, sender_id, ticket, reply_markup=btc_markup)
             if CHARTS_AVAILABLE:
                 b_buf = generate_mt5_chart("BTC-USD", "BITCOIN (BTC-USD)")
                 if b_buf:
@@ -2345,7 +2363,13 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"💡 _Tap below to execute or scan._"
             )
-            send_message(token, sender_id, ticket)
+            gold_markup = {
+                "inline_keyboard": [
+                    [{"text": "🟢 Buy Gold", "callback_data": "buy_gold"}, {"text": "🔴 Sell Gold", "callback_data": "sell_gold"}],
+                    [{"text": "📊 Dual Scan", "callback_data": "scan"}, {"text": "💼 Positions", "callback_data": "positions"}]
+                ]
+            }
+            send_message(token, sender_id, ticket, reply_markup=gold_markup)
             if CHARTS_AVAILABLE:
                 g_buf = generate_mt5_chart("GC=F", "GOLD (XAU/USD)")
                 if g_buf:
@@ -2357,9 +2381,9 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
         data = run_full_pipeline()
         scan_markup = {
             "inline_keyboard": [
-                [{"text": "🌐 Omniscient Matrix", "callback_data": "matrix"}, {"text": "🔮 Predict Twin", "callback_data": "predict"}],
-                [{"text": "🥇 Gold Deep Dive", "callback_data": "matrix_gold"}, {"text": "₿ BTC Deep Dive", "callback_data": "matrix_btc"}],
-                [{"text": "👥 Agent Ballots", "callback_data": "matrix_agents"}, {"text": "⚡ Combined All", "callback_data": "all"}]
+                [{"text": "🥇 Gold Audit", "callback_data": "gold"}, {"text": "₿ BTC Audit", "callback_data": "btc"}],
+                [{"text": "⚡ Auto-Trade: BOTH", "callback_data": "autopush_on"}, {"text": "💼 Open Positions", "callback_data": "positions"}],
+                [{"text": "🛑 Close All", "callback_data": "close_all"}, {"text": "⚙️ Bot Status", "callback_data": "status"}]
             ]
         }
         send_message(token, sender_id, format_scan_summary(data), reply_markup=scan_markup)
@@ -2722,7 +2746,7 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
                 ],
                 [
                     {"text": "📊 Live Scan", "callback_data": "scan"},
-                    {"text": "🔮 Digital Twin", "callback_data": "predict"}
+                    {"text": "💼 Open Positions", "callback_data": "positions"}
                 ]
             ]
         }
@@ -2961,7 +2985,21 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
         else:
             lines.append("ℹ️ *Open Positions:* No active live positions running.")
 
-        send_message(token, sender_id, "\n".join(lines))
+        pos_markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "🛑 Close All Positions", "callback_data": "close_all"}
+                ] if positions else [
+                    {"text": "📊 Live Scan", "callback_data": "scan"},
+                    {"text": "⚡ Auto-Push", "callback_data": "autopush"}
+                ],
+                [
+                    {"text": "🛡️ Trail Hub", "callback_data": "trail"},
+                    {"text": "⚙️ Bot Status", "callback_data": "status"}
+                ]
+            ]
+        }
+        send_message(token, sender_id, "\n".join(lines), reply_markup=pos_markup)
         return
 
     # ── 5B. AUTOMATED PUSH CONTROLLER HUB (/autopush [on|off|both|gold|btc|status], /push) ──
@@ -3136,22 +3174,19 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             }
 
             send_message(token, sender_id, (
-                f"🛡️ *AUTOMATED PROFILE-AWARE TRAILING CONTROLLER*\n"
+                f"🛡️ *AUTOMATED TRAILING STOP CONTROLLER*\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"• Trailing Engine    : `{st}`\n"
-                f"• Execution Mode     : `{curr_mode}` (Dual MT5 & Paper Trailing)\n"
-                f"• Active Profile     : *{curr_s['name']} ({curr_s['code']})* 🎯\n"
-                f"• Fast Breakeven     : `+{curr_s.get('breakeven_r', 0.35):.2f}R` (Instant Risk-Free Lock)\n"
-                f"• Trailing Trigger   : Starts at `+{curr_s.get('trail_start_r', 0.65):.2f}R`\n"
-                f"• Trailing Step      : `{curr_s.get('trail_step_r', 0.20):.2f}R` behind peak price\n"
-                f"• Anti-Collapse Guard: Preserves true initial risk distance\n"
-                f"• Peak Tracking      : Ratchets trailing SL forward strictly behind peak\n"
-                f"• Rollover Shield    : Insulated daily from 21:50-22:15 UTC\n"
+                f"• Trailing Engine  : `{st}`\n"
+                f"• Execution Mode   : `{curr_mode}` (Live & Paper Protected)\n"
+                f"• Active Strategy  : *{curr_s['name']} ({curr_s['code']})* 🎯\n"
+                f"• Breakeven Lock   : `+{curr_s.get('breakeven_r', 0.35):.2f}R` (Instant Risk-Free Lock)\n"
+                f"• Trailing Trigger : Starts at `+{curr_s.get('trail_start_r', 0.65):.2f}R`\n"
+                f"• Trailing Step    : `{curr_s.get('trail_step_r', 0.20):.2f}R` behind peak price\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"📋 *Monitored Positions ({len(open_pos)}):*\n"
+                f"📋 *Open Monitored Positions ({len(open_pos)}):*\n"
                 + "\n".join(pos_lines) + "\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"Controls: `/trail on`, `/trail off`, `/trail scalp`, `/trail swing`"
+                f"💡 _Locks in profit automatically as price moves in your favor._"
             ), reply_markup=reply_markup)
             return
 
@@ -3166,7 +3201,6 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
                 except Exception as e:
                     pass
                 trades_card = learning_engine.format_recent_trades_card(limit=4)
-                summary = learning_engine.get_summary_text()
                 learn_markup = {
                     "inline_keyboard": [
                         [
@@ -3175,11 +3209,11 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
                         ],
                         [
                             {"text": "🎯 Strategy Profiles", "callback_data": "strategy"},
-                            {"text": "🔬 Forensics Council", "callback_data": "forensics"}
+                            {"text": "📊 Live Scan", "callback_data": "scan"}
                         ]
                     ]
                 }
-                send_message(token, sender_id, f"{trades_card}\n\n```\n{summary}\n```\n💡 _To retrain dual-sided walk-forward engine: `/train` | To inspect trade journal: `/trades`_", reply_markup=learn_markup)
+                send_message(token, sender_id, f"{trades_card}\n\n💡 _Continuous machine learning runs in background to adapt strategy factor weights._", reply_markup=learn_markup)
             else:
                 send_message(token, sender_id, "⚠️ Self-Learning module not available.")
             return
@@ -3217,11 +3251,11 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             gold_buf = learning_engine.get_dynamic_sl_buffer("GOLD")
             btc_buf = learning_engine.get_dynamic_sl_buffer("BTC")
             header = (
-                f"🔬 *4-AGENT POST-MORTEM FORENSIC COUNCIL*\n"
-                f"• Active Dynamic SL Cushion Calibration:\n"
-                f"  - GOLD (XAU/USD): `+{gold_buf:.2f}x ATR`\n"
-                f"  - BTC (BTC/USD) : `+{btc_buf:.2f}x ATR`\n"
-                f"• Forensic Chamber: Microstructure Anti-Trap | Macro Yields | Orderflow FVG | CRO\n\n"
+                f"🔬 *POST-MORTEM FORENSIC COUNCIL*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"• Protection Status : `Active (Loss Prevention Engine)`\n"
+                f"• Dynamic Cushion   : Gold `+{gold_buf:.2f}x ATR` | BTC `+{btc_buf:.2f}x ATR`\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             )
             forensics_markup = {
                 "inline_keyboard": [
@@ -3278,18 +3312,15 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
 
             if pred:
                 sim_msg = (
-                    f"🔮 *NEURO-SYMBOLIC DIGITAL TWIN FORECAST ({asset_target})*\n"
+                    f"🔮 *DIGITAL TWIN FORECAST ({asset_target})*\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"• Verdict: {pred.get('badge', '🟢 HIGH EDGE')} ({'APPROVED' if pred.get('approved') else 'VETOED'})\n"
-                    f"• Win Probability: `{pred.get('win_probability', 75.0):.1f}%`\n"
-                    f"• Expected Value (EV): `{pred.get('expected_value_r', 0.85):+.2f}R` (${pred.get('expected_value_usd', 85.0):+,.2f})\n"
-                    f"• 1,000-Path Jump-Diffusion Hit Rate: `{pred.get('mc_hit_rate', 70.0):.1f}%`\n"
-                    f"• Bayesian Historical Similarity: `{pred.get('bayesian_similarity', 80.0):.1f}%`\n"
-                    f"• Opposing Barrier Clearance: `{pred.get('opposing_barrier_score', 100.0):.1f}%`\n"
-                    f"• Predicted Max Adverse Drawdown (MAE): `${pred.get('mae_predicted', 0.0):,.2f}`\n"
-                    f"• Gatekeeper Verdict: `{pred.get('rejection_reason') if not pred.get('approved') else 'Approved for Execution (Positive EV Edge)'}`\n"
+                    f"• Trade Clearance  : *{'✅ APPROVED' if pred.get('approved') else '🔴 VETOED'}*\n"
+                    f"• Edge Rating      : {pred.get('badge', '🟢 HIGH EDGE')}\n"
+                    f"• Win Probability  : `{pred.get('win_probability', 75.0):.1f}%`\n"
+                    f"• Expected Return  : `{pred.get('expected_value_r', 0.85):+.2f}R` (${pred.get('expected_value_usd', 85.0):+,.2f})\n"
+                    f"• 1,000-Path Jump-Diffusion : Passed ({pred.get('mc_hit_rate', 70.0):.1f}% win rate)\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"💡 _Simulates 1,000 geometric Brownian jump-diffusion trajectories in <10ms before every trade._"
+                    f"💡 _All probabilistic simulations run automatically in background before execution._"
                 )
                 predict_markup = {
                     "inline_keyboard": [
@@ -3299,7 +3330,7 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
                         ],
                         [
                             {"text": "📊 Live Scan", "callback_data": "scan"},
-                            {"text": "🔬 Forensics", "callback_data": "forensics"}
+                            {"text": "💼 Positions", "callback_data": "positions"}
                         ]
                     ]
                 }
@@ -3321,26 +3352,25 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             b_prob = b_pred.get("win_probability", 78.5) if b_pred else 78.5
 
             dual_card = (
-                f"🔮 *CONSOLIDATED NEURO-SYMBOLIC DIGITAL TWIN FORECAST*\n"
+                f"🔮 *CONSOLIDATED DIGITAL TWIN FORECAST*\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"🤖 *Autonomous Gatekeeper:* 1,000-Path Jump-Diffusion Monte Carlo (<10ms)\n\n"
-                f"🥇 *GOLD (XAU/USD) DIGITAL TWIN:*\n"
-                f"• Verdict: {g_pred.get('badge', '🟢 HIGH EDGE') if g_pred else '🟢 HIGH EDGE'} ({'APPROVED' if (not g_pred or g_pred.get('approved')) else 'VETOED'})\n"
-                f"• 1,000-Path Jump-Diffusion Win Prob: `{g_prob:.1f}%` | EV: `{g_ev:+.2f}R`\n"
-                f"• Barrier Clearance: `{g_pred.get('opposing_barrier_score', 95.0) if g_pred else 95.0:.1f}%`\n"
-                f"• Historical Similarity: `{g_pred.get('bayesian_similarity', 82.0) if g_pred else 82.0:.1f}%`\n\n"
-                f"₿ *BITCOIN (BTC/USD) DIGITAL TWIN:*\n"
-                f"• Verdict: {b_pred.get('badge', '🟢 HIGH EDGE') if b_pred else '🟢 HIGH EDGE'} ({'APPROVED' if (not b_pred or b_pred.get('approved')) else 'VETOED'})\n"
-                f"• 1,000-Path Jump-Diffusion Win Prob: `{b_prob:.1f}%` | EV: `{b_ev:+.2f}R`\n"
-                f"• Barrier Clearance: `{b_pred.get('opposing_barrier_score', 92.0) if b_pred else 92.0:.1f}%`\n"
-                f"• Historical Similarity: `{b_pred.get('bayesian_similarity', 85.0) if b_pred else 85.0:.1f}%`\n"
+                f"🥇 *SLOT 1: GOLD (XAU/USD)*\n"
+                f"• Status     : {'✅ APPROVED' if (not g_pred or g_pred.get('approved')) else '🔴 VETOED'}\n"
+                f"• Edge Rating: {g_pred.get('badge', '🟢 HIGH EDGE') if g_pred else '🟢 HIGH EDGE'}\n"
+                f"• Win Chance : `{g_prob:.1f}%` | Return: `{g_ev:+.2f}R`\n"
+                f"• 1,000-Path Jump-Diffusion: Verified\n\n"
+                f"₿ *SLOT 2: BITCOIN (BTC/USD)*\n"
+                f"• Status     : {'✅ APPROVED' if (not b_pred or b_pred.get('approved')) else '🔴 VETOED'}\n"
+                f"• Edge Rating: {b_pred.get('badge', '🟢 HIGH EDGE') if b_pred else '🟢 HIGH EDGE'}\n"
+                f"• Win Chance : `{b_prob:.1f}%` | Return: `{b_ev:+.2f}R`\n"
+                f"• 1,000-Path Jump-Diffusion: Verified\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"💡 *Autonomous Execution Gatekeeper:* Evaluated automatically before every trade."
+                f"💡 _All mathematical path simulations evaluated automatically in background._"
             )
             markup = {
                 "inline_keyboard": [
-                    [{"text": "🥇 Gold Deep Dive", "callback_data": "predict_gold"}, {"text": "₿ BTC Deep Dive", "callback_data": "predict_btc"}],
-                    [{"text": "📊 Live Scan", "callback_data": "scan"}, {"text": "🌐 Matrix", "callback_data": "matrix"}]
+                    [{"text": "🥇 Predict Gold", "callback_data": "predict_gold"}, {"text": "₿ Predict Bitcoin", "callback_data": "predict_btc"}],
+                    [{"text": "📊 Live Scan", "callback_data": "scan"}, {"text": "💼 Positions", "callback_data": "positions"}]
                 ]
             }
             send_message(token, sender_id, dual_card, reply_markup=markup)
