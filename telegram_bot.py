@@ -1866,14 +1866,15 @@ def format_elite_alert(asset: str, data: dict, setup_data: dict = None, exec_res
 
     a_low = asset.lower()
     if is_auto_trade and exec_result and exec_result.get("success"):
-        lines.append("⚡ *STATUS: EXECUTED ON BROKER [LIVE]*")
+        lines.append("⚡ *STATUS: AUTO-PUSH EXECUTED ON BROKER [LIVE]*")
         lines.append(f"• Ticket: `#{exec_result['ticket']}` | Volume: `{exec_result['lots']}` Lots")
         lines.append(f"• Fill Price: `${exec_result['price']:,.2f}`")
         lines.append("🛡️ Trailing stop & breakeven active in background.")
         reply_markup = {
             "inline_keyboard": [
                 [
-                    {"text": "📊 Open Positions", "callback_data": "positions"},
+                    {"text": "📊 Positions", "callback_data": "positions"},
+                    {"text": "🛡️ Trail Hub", "callback_data": "trail"},
                     {"text": "🛑 Close All", "callback_data": "close_all"}
                 ]
             ]
