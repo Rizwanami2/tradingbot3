@@ -844,6 +844,12 @@ def set_active_strategy(strat_name: str) -> tuple:
     """Sets active trading strategy."""
     global ACTIVE_STRATEGY
     code = strat_name.strip().upper()
+    if code in ("BALANCED", "BALANCE"):
+        code = "BALANCE"
+    elif code in ("ANTITRAP", "ANTI_TRAP", "TRAP"):
+        code = "ANTI_TRAP"
+    elif code in ("REVERSAL", "CHOGH", "REV"):
+        code = "REVERSAL"
     if code in STRATEGIES:
         ACTIVE_STRATEGY = code
         return True, STRATEGIES[code]

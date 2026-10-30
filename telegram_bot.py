@@ -138,6 +138,9 @@ AUTO_PUSH_ENABLED = False
 # Automated Trailing Stop & Breakeven Protection
 TRAILING_STOP_ENABLED = True
 
+# Strategy Profile Auto-Switch (False = Manual Profile Locked; True = Auto-Adapts to Regime)
+STRATEGY_AUTO_SWITCH = False
+
 def is_auto_push_active(asset: str) -> bool:
     """Returns True if automated order push is active for the specified asset."""
     mode = (AUTO_PUSH_MODE or AUTO_TRADE_MODE or "OFF").upper()
@@ -885,8 +888,8 @@ def _analyze_single_side(symbol: str, asset_type: str, macro: dict, hist, levels
     free_mrg = acc_data.get("margin_free") if acc_data else None
     swap_info = live_broker.get_swap_rates(asset_type) if (MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected) else None
 
-    # Autonomous Strategy Adaptation: Adopt optimal strategy for current market movement
-    if adapted_strat and adapted_strat.get("strategy_code"):
+    # Autonomous Strategy Adaptation vs Manual Profile Enforcement
+    if STRATEGY_AUTO_SWITCH and adapted_strat and adapted_strat.get("strategy_code"):
         active_strat = {
             "code": adapted_strat["strategy_code"],
             "name": adapted_strat["strategy_name"],
@@ -980,12 +983,20 @@ def _analyze_single_side(symbol: str, asset_type: str, macro: dict, hist, levels
         }
         toxic_veto, toxic_reason = learning_engine.check_negative_memory_veto(asset_type, action, market_vec)
 
-    is_scalp_strategy = (active_strat["code"] == "SCALP")
+    strat_code_curr = active_strat["code"]
+    is_scalp_strategy = (strat_code_curr == "SCALP")
+    is_scalp_strat = is_scalp_strategy
+    is_swing_strat = (strat_code_curr == "SWING")
+    is_bal_strat = (strat_code_curr == "BALANCE")
+    is_swap_strat = (strat_code_curr == "SWAP")
 
     if is_buy:
         sw_low = levels.get("sw_low", 0.0)
         at_good_level = strat_accuracy.get("at_good_level", False) or                         levels.get("in_golden_pocket", False) or                         (sw_low > 0 and curr > 0 and (curr - sw_low) / curr <= 0.05) or                         (levels.get("ma20_ema") and abs(curr - levels["ma20_ema"]) / curr <= 0.02) or                         (levels.get("s1") and abs(curr - levels["s1"]) / curr <= 0.02)
-        can_execute_scalp = is_scalp_strategy and (final_score >= 7) and (trap_type != "BULL_TRAP") and not htf_eval.get("veto")
+        can_exec_scalp = is_scalp_strat and (final_score >= 7) and (trap_type != "BULL_TRAP") and not htf_eval.get("veto")
+        can_exec_swing = is_swing_strat and (final_score >= 7) and (strat_accuracy["passed"] or final_score >= 8) and (trap_type != "BULL_TRAP") and not htf_eval.get("veto")
+        can_exec_bal = is_bal_strat and (final_score >= 7) and (strat_accuracy["passed"] or final_score >= 8) and (trap_type != "BULL_TRAP") and not htf_eval.get("veto")
+        can_exec_swap = is_swap_strat and (final_score >= 7) and (strat_accuracy["passed"] or final_score >= 8) and (trap_type != "BULL_TRAP") and not htf_eval.get("veto")
 
         if toxic_veto:
             is_a_plus = False
@@ -996,23 +1007,33 @@ def _analyze_single_side(symbol: str, asset_type: str, macro: dict, hist, levels
         elif htf_eval.get("veto"):
             is_a_plus = False
             verdict = f"🔴 VETOED [HTF BIAS]: {htf_eval['veto_reason']}"
-        elif can_execute_scalp:
+        elif can_exec_scalp:
             is_a_plus = True
-            verdict = f"🟢 SCALP BUY [{active_strat['code']}] (Score: {final_score}/10) - High Probability Execution"
+            verdict = f"🟢 SCALP BUY [{strat_code_curr}] (Score: {final_score}/10) - High Probability Execution"
+        elif can_exec_swing:
+            is_a_plus = True
+            verdict = f"🟢 SWING BUY [{strat_code_curr}] (Score: {final_score}/10) - Macro Trend Execution"
+        elif can_exec_bal:
+            is_a_plus = True
+            verdict = f"🟢 BALANCE BUY [{strat_code_curr}] (Score: {final_score}/10) - Equilibrium Reversion Execution"
+        elif can_exec_swap:
+            is_a_plus = True
+            verdict = f"🟢 SWAP BUY [{strat_code_curr}] (Score: {final_score}/10) - Positive Carry Execution"
         elif not strat_accuracy["passed"]:
             is_a_plus = False
-            verdict = f"🔴 VETOED [{active_strat['code']}]: {strat_accuracy['veto_reasons'][0]}"
+            verdict = f"🔴 VETOED [{strat_code_curr}]: {strat_accuracy['veto_reasons'][0]}"
         elif is_a_plus:
-            verdict = f"🟢 A+ BUY SETUP [{active_strat['code']}] (Score: {final_score}/10) - High Probability Execution"
+            verdict = f"🟢 A+ BUY SETUP [{strat_code_curr}] (Score: {final_score}/10) - High Probability Execution"
         elif final_score >= 6:
-            verdict = f"🟡 B BUY SETUP [{active_strat['code']}] (Score: {final_score}/10) - Watchlist / Reduced Size"
+            verdict = f"🟡 B BUY SETUP [{strat_code_curr}] (Score: {final_score}/10) - Watchlist / Reduced Size"
         else:
             verdict = f"🔴 VETOED (Score: {final_score}/10) - Insufficient Confluence"
     else:  # SELL / SHORT
-        sw_high = levels.get("sw_high", 0.0)
-        at_good_res = (sw_high > 0 and curr > 0 and (sw_high - curr) / curr <= 0.05) or                       (levels.get("r1") and abs(curr - levels["r1"]) / curr <= 0.02)
         is_fade_trap = (trap_type in ("BULL_TRAP", "UPTHRUST")) and (final_score >= 7)
-        can_execute_scalp = is_scalp_strategy and (final_score >= 7) and (trap_type not in ("BEAR_TRAP", "SPRING")) and not htf_eval.get("veto")
+        can_exec_scalp = is_scalp_strat and (final_score >= 7) and (trap_type not in ("BEAR_TRAP", "SPRING")) and not htf_eval.get("veto")
+        can_exec_swing = is_swing_strat and (final_score >= 7) and (strat_accuracy["passed"] or final_score >= 8) and (trap_type not in ("BEAR_TRAP", "SPRING")) and not htf_eval.get("veto")
+        can_exec_bal = is_bal_strat and (final_score >= 7) and (strat_accuracy["passed"] or final_score >= 8) and (trap_type not in ("BEAR_TRAP", "SPRING")) and not htf_eval.get("veto")
+        can_exec_swap = is_swap_strat and (final_score >= 7) and (strat_accuracy["passed"] or final_score >= 8) and (trap_type not in ("BEAR_TRAP", "SPRING")) and not htf_eval.get("veto")
 
         if toxic_veto:
             is_a_plus = False
@@ -1022,20 +1043,29 @@ def _analyze_single_side(symbol: str, asset_type: str, macro: dict, hist, levels
             verdict = "🔴 VETOED: Wyckoff Spring at Support! Stand Aside on Shorts."
         elif is_fade_trap:
             is_a_plus = True
-            verdict = f"🟢 FADE THE TRAP SHORT [{active_strat['code']}] (Score: {final_score}/10) - High Probability Reversal"
+            verdict = f"🟢 FADE THE TRAP SHORT [{strat_code_curr}] (Score: {final_score}/10) - High Probability Reversal"
         elif htf_eval.get("veto"):
             is_a_plus = False
             verdict = f"🔴 VETOED [HTF BIAS]: {htf_eval['veto_reason']}"
-        elif can_execute_scalp:
+        elif can_exec_scalp:
             is_a_plus = True
-            verdict = f"🟢 SCALP SHORT [{active_strat['code']}] (Score: {final_score}/10) - High Probability Short"
+            verdict = f"🟢 SCALP SHORT [{strat_code_curr}] (Score: {final_score}/10) - High Probability Short"
+        elif can_exec_swing:
+            is_a_plus = True
+            verdict = f"🟢 SWING SHORT [{strat_code_curr}] (Score: {final_score}/10) - Macro Trend Short"
+        elif can_exec_bal:
+            is_a_plus = True
+            verdict = f"🟢 BALANCE SHORT [{strat_code_curr}] (Score: {final_score}/10) - Equilibrium Reversion Short"
+        elif can_exec_swap:
+            is_a_plus = True
+            verdict = f"🟢 SWAP SHORT [{strat_code_curr}] (Score: {final_score}/10) - Positive Carry Short"
         elif not strat_accuracy["passed"]:
             is_a_plus = False
-            verdict = f"🔴 VETOED [{active_strat['code']}]: {strat_accuracy['veto_reasons'][0]}"
+            verdict = f"🔴 VETOED [{strat_code_curr}]: {strat_accuracy['veto_reasons'][0]}"
         elif is_a_plus:
-            verdict = f"🟢 A+ SHORT SETUP [{active_strat['code']}] (Score: {final_score}/10) - High Probability Execution"
+            verdict = f"🟢 A+ SHORT SETUP [{strat_code_curr}] (Score: {final_score}/10) - High Probability Execution"
         elif final_score >= 6:
-            verdict = f"🟡 B SHORT SETUP [{active_strat['code']}] (Score: {final_score}/10) - Watchlist / Reduced Size"
+            verdict = f"🟡 B SHORT SETUP [{strat_code_curr}] (Score: {final_score}/10) - Watchlist / Reduced Size"
         else:
             verdict = f"🔴 VETOED (Score: {final_score}/10) - Insufficient Confluence"
 
@@ -2034,8 +2064,12 @@ def auto_scanner_worker(token: str, chat_id_getter):
             b_target = b.get("buy") if b.get("dominant_side") == "BUY" else b.get("sell")
             if not b_target: b_target = b
             b_act = b_target.get("action", b.get("dominant_side", "BUY"))
-            is_scalp_b = (active_strat['code'] == "SCALP" and b_target['final_score'] >= 7 and not b_target['verdict'].startswith("🔴"))
-            if b_target['is_a_plus'] or is_scalp_b:
+            is_qualified_b = not b_target['verdict'].startswith("🔴") and (
+                b_target.get('is_a_plus') or
+                b_target.get('verdict', '').startswith("🟢") or
+                b_target['final_score'] >= 7
+            )
+            if is_qualified_b:
                 if should_send_alert("BTC", b_act, b_target['price'], b_target['final_score'], cooldown_seconds=ALERT_COOLDOWN_SECONDS):
                     setup_data = {
                         "asset": "BTC",
@@ -2083,8 +2117,12 @@ def auto_scanner_worker(token: str, chat_id_getter):
             g_target = g.get("buy") if g.get("dominant_side") == "BUY" else g.get("sell")
             if not g_target: g_target = g
             g_act = g_target.get("action", g.get("dominant_side", "BUY"))
-            is_scalp_g = (active_strat['code'] == "SCALP" and g_target['final_score'] >= 7 and not g_target['verdict'].startswith("🔴"))
-            if g_target['is_a_plus'] or is_scalp_g:
+            is_qualified_g = not g_target['verdict'].startswith("🔴") and (
+                g_target.get('is_a_plus') or
+                g_target.get('verdict', '').startswith("🟢") or
+                g_target['final_score'] >= 7
+            )
+            if is_qualified_g:
                 if should_send_alert("GOLD", g_act, g_target['price'], g_target['final_score'], cooldown_seconds=ALERT_COOLDOWN_SECONDS):
                     setup_data = {
                         "asset": "GOLD",
@@ -2127,32 +2165,13 @@ def auto_scanner_worker(token: str, chat_id_getter):
                             daemon=True
                         ).start()
 
-            # ── 3. Multi-Timeframe Trend Shift Monitoring (ChoCH & Inflection Alerts) ──
+            # ── 3. Multi-Timeframe Trend Shift Monitoring (Silent Background Tracking - Zero Spam Alerts) ──
             for asset_key, asset_data in [("BTC", b), ("GOLD", g)]:
                 mtf = asset_data.get("mtf_trend") or {}
                 if mtf.get("shift_detected"):
                     shift_key = f"shift_{asset_key}_{mtf.get('market_movement')}"
-                    last_shift = PENDING_SETUPS.get(shift_key, 0)
-                    if (current_time - last_shift) > 900:  # 15 min cooldown per unique shift
-                        PENDING_SETUPS[shift_key] = current_time
-                        adapted = asset_data.get("adapted_strat") or {}
-                        shift_msg = (
-                            f"⚡ *[{asset_key}] MULTI-TIMEFRAME TREND SHIFT DETECTED!*\n"
-                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                            f"📊 *Market Movement:* `{mtf.get('movement_badge')}`\n"
-                            f"ℹ️ *Detail:* {mtf.get('movement_desc')}\n"
-                            f"🎯 *Auto-Adapted Strategy:* `{adapted.get('strategy_name', 'Adapted')}`\n"
-                            f"⚡ *Preferred Side:* *{adapted.get('preferred_side', 'DUAL')}* (Target: `1:{adapted.get('target_rr_tp1', 1.5):.2f}R`)\n"
-                            f"💡 *Action:* {adapted.get('rationale')}\n"
-                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                        )
-                        shift_markup = {
-                            "inline_keyboard": [
-                                [{"text": f"🌐 View {asset_key} MTF", "callback_data": f"mtf_{asset_key.lower()}"}, {"text": "📊 Dual-Sided Scan", "callback_data": "scan"}],
-                                [{"text": "⚡ Cockpit", "callback_data": "all"}]
-                            ]
-                        }
-                        send_message(token, target_chat_id, shift_msg, reply_markup=shift_markup)
+                    PENDING_SETUPS[shift_key] = current_time
+                    # Multi-timeframe trend shift state updated silently; no unsolicited Telegram alert sent
 
 
             # ── 3. Clean 1-Minute Console Heartbeat (Zero Spam) ──
@@ -2793,8 +2812,17 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
 
     # ── 4. MODERN STRATEGY HUB (/strategy [scalp|swing|balance|swap]) ──
     if cmd == "/strategy":
+        global STRATEGY_AUTO_SWITCH
         sub = args_lower.strip()
-        if sub in ("scalp", "swing", "balance", "swap"):
+        if sub in ("auto on", "auto_on", "autoon"):
+            STRATEGY_AUTO_SWITCH = True
+            send_message(token, sender_id, "🔄 *AUTO-SWITCH STRATEGY: ENABLED 🟢*\nStrategy profile will dynamically adapt to live market movements.")
+            return
+        elif sub in ("auto off", "auto_off", "autooff"):
+            STRATEGY_AUTO_SWITCH = False
+            send_message(token, sender_id, "🔒 *AUTO-SWITCH STRATEGY: DISABLED ⚪*\nManual strategy profile locked. Your chosen profile strictly governs all scans and executions.")
+            return
+        elif sub in ("scalp", "swing", "balance", "balanced", "swap", "reversal", "anti_trap", "antitrap"):
             ok, s = set_active_strategy(sub.upper())
             if not ok or not s:
                 s = get_active_strategy()
@@ -2832,7 +2860,8 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
         table = (
             f"🎯 *MODULAR STRATEGY & PROFILE CONTROLLER*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Active Strategy: *{curr_s['name']} ({curr_s['code']})* 🎯\n\n"
+            f"Active Strategy: *{curr_s['name']} ({curr_s['code']})* 🎯\n" \
+            f"• Auto-Switch Profile : `{'ENABLED 🟢 (Dynamic Adaptation)' if STRATEGY_AUTO_SWITCH else 'DISABLED ⚪ (Manual Profile Locked)'}`\n\n"
             f"Available Institutional Profiles:\n"
             f"1. ⚡ *SCALP* (`/strategy scalp`)\n"
             f"   • Profile Risk: `0.50%` | Target Win Rate: `~80-85%`\n"
