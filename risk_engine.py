@@ -1493,13 +1493,12 @@ def generate_risk_audit_text(account_balance: float = DEFAULT_ACCOUNT_BALANCE,
 
     # Quantitative Risk Optimization
     lines.extend([
-        "📊 *Statistical Edge & Drawdown Guardrails:*",
-        f"• Win Rate Benchmark: `{kelly['win_rate']}%` (1:2.0 R:R)",
-        f"• Half-Kelly Optimal Size: `{kelly['safe_recommended_pct']}%`",
-        f"• Consecutive Losses to Hit -6% DD: `{ruin['consecutive_losses_to_halt']}` trades",
-        f"• Probability of 5-Loss Streak: `{ruin['prob_5_losses_pct']}%`",
+        "📊 *Institutional Capital Guardrails:*",
+        f"• Risk Budget Adherence: `{risk_pct:.1f}% per trade` (Strict Capital Ceiling)",
+        f"• Confluence Required  : `Score ≥ 8/10` for full position",
+        f"• Max Open Exposure    : `2 Positions Max` (1 Gold + 1 BTC)",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        "🔒 *Rule:* Never increase lot size after a loss. Zero revenge trading."
+        "🔒 *Capital Rule:* Fixed 1% risk per trade. Zero revenge trading."
     ])
 
     return "\n".join(lines)

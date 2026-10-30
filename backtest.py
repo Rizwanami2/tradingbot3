@@ -598,12 +598,9 @@ def format_backtest_cli_table(results: list) -> str:
 
 
 def format_backtest_telegram_card(res: dict) -> str:
-    """Formats a rich Markdown summary card for Telegram display."""
+    """Formats a clean, classic institutional backtest summary for Telegram."""
     if "error" in res:
         return f"❌ *Backtest Error:* {res['error']}"
-
-    strat_info = STRATEGIES.get(res["strategy"], {})
-    target_wr = strat_info.get("target_win_rate", "N/A")
 
     exits = res.get("exit_breakdown", {})
     tp1_hits = exits.get("TP1_TARGET", 0)
@@ -613,31 +610,26 @@ def format_backtest_telegram_card(res: dict) -> str:
     sl_hits = exits.get("STOP_LOSS", 0)
 
     card = (
-        f"📊 *INSTITUTIONAL BACKTEST REPORT: {res['asset']} ({res['strategy']})*\n"
+        f"📊 *HISTORICAL BACKTEST: {res['asset']} ({res['strategy']})*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"• Historical Period : `{res['lookback_days']} Days` (Daily Bars)\n"
-        f"• Initial Capital   : `${res['initial_capital']:,.2f}`\n"
+        f"• Test Period       : `{res['lookback_days']} Days` (Daily Bars)\n"
+        f"• Starting Balance  : `${res['initial_capital']:,.2f}`\n"
         f"• Final Equity      : `${res['final_capital']:,.2f}`\n"
         f"• Net Profit        : `${res['net_profit_usd']:+,.2f}` (`{res['net_return_pct']:+.2f}%`)\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🎯 *ACCURACY & EDGE:*\n"
-        f"• Total Trades      : `{res['total_trades']}` (Wins: `{res['wins']}` | Losses: `{res['losses']}`)\n"
-        f"• Win Rate          : *{res['win_rate_pct']}%* (Benchmark Target: `{target_wr}`)\n"
-        f"• Profit Factor     : *{res['profit_factor']}x* (Institutional Edge > 1.80)\n"
-        f"• Max Drawdown      : `{res['max_drawdown_pct']}%` (Circuit Breaker: 6.0%)\n"
-        f"• Sharpe Ratio      : `{res['sharpe_ratio']}` | Sortino: `{res['sortino_ratio']}`\n"
-        f"• Calmar Ratio      : `{res['calmar_ratio']}`\n"
-        f"• Trade Expectancy  : `+{res['avg_trade_r']:.2f}R` (${res['expectancy_usd']:+,.2f} / trade)\n"
+        f"🎯 *PERFORMANCE & EDGE:*\n"
+        f"• Total Setups      : `{res['total_trades']}` ({res['wins']}W / {res['losses']}L)\n"
+        f"• Win Rate          : *{res['win_rate_pct']}%*\n"
+        f"• Profit Factor     : *{res['profit_factor']}x*\n"
+        f"• Max Drawdown      : `{res['max_drawdown_pct']}%` (Halt Limit: 6.0%)\n"
+        f"• Average Trade     : `+{res['avg_trade_r']:.2f}R` (${res['expectancy_usd']:+,.2f})\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🛡️ *TRADE RESOLUTION BREAKDOWN:*\n"
-        f"• Target 1 (TP1)    : `{tp1_hits}` trades\n"
-        f"• Target 2 (TP2)    : `{tp2_hits}` trades\n"
-        f"• Trailed Stop Locks: `{trail_hits}` trades\n"
-        f"• Breakeven Exits   : `{be_hits}` trades (Zero Loss)\n"
-        f"• Stop-Losses Hit   : `{sl_hits}` trades\n"
-        f"• Max Win / Loss Run: `{res['max_win_streak']}W` / `{res['max_loss_streak']}L`\n"
+        f"🛡️ *EXIT BREAKDOWN:*\n"
+        f"• Target Hits (TP)  : `{tp1_hits + tp2_hits}` trades\n"
+        f"• Trailing / BE Lock: `{trail_hits + be_hits}` trades (Zero Loss)\n"
+        f"• Stop-Loss Hits    : `{sl_hits}` trades\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🔒 *Execution Guardrail:* Only Score $\ge 8/10$ A+ setups permitted."
+        f"💡 _All mathematical backtests enforce strict 1% risk per trade._"
     )
     return card
 

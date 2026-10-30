@@ -1280,22 +1280,22 @@ def generate_adversarial_debate(data: dict) -> str:
     g = data.get("gold")
 
     if not b or not g:
-        return "⚠️ Market data temporarily unavailable for dialectical debate. Please try again."
+        return "⚠️ Market data temporarily unavailable for debate. Please try again."
 
     lines = [
-        "⚔️ *ADVERSARIAL BULL VS. BEAR DEBATE*",
+        "⚔️ *BULL VS. BEAR MARKET DEBATE*",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "🥇 *SLOT 1: GOLD (XAU/USD)*",
+        f"• 🐂 *Bull Thesis:* Central bank reserve accumulation & strong physical demand floor at ${g['levels']['s1']:,.0f}.",
+        f"• 🐻 *Bear Counter:* Dollar Index (DXY) at {m.get('dxy', 102.0):.2f} caps immediate explosive momentum.",
+        f"• ⚖️ *Consensus:* *{g['verdict'][:32]}*",
         "",
-        "₿ *BITCOIN (BTC-USD):*",
-        f"🐂 *Bull Thesis:* Price (${b['price']:,.2f}) supported by 200 SMA (${b['levels']['ma200']:,.0f}). Mayer Multiple at {b['mayer']:.2f}x indicates institutional accumulation zone without retail euphoria. Market regime is {b['regime']}.",
-        f"🐻 *Bear Counter:* Macro 10Y Yields at {m.get('tnx', 4.5):.2f}% ({m.get('tnx_chg', 0.0):+.2f}%) maintain liquidity drag. Recent imbalance: {b['fvg']}. Invalidation stop sits at ${b['stop_loss']:,.2f}.",
-        "",
-        "🥇 *GOLD (XAU/USD):*",
-        f"🐂 *Bull Thesis:* Gold/Silver Ratio at {m.get('gsr', 80.0):.1f}x signals structural metal undervaluation. Physical central bank demand creates solid floor. No bull trap rejection.",
-        f"🐻 *Bear Counter:* DXY trading at {m.get('dxy', 102.0):.2f} ({m.get('dxy_chg', 0.0):+.2f}%). Real yield firmness caps explosive breakout momentum until DXY rolls over.",
-        "",
-        f"⚖️ *Consensus Verdict:*",
-        f"• BTC: {b['verdict']}",
-        f"• Gold: {g['verdict']}"
+        "₿ *SLOT 2: BITCOIN (BTC/USD)*",
+        f"• 🐂 *Bull Thesis:* Structural accumulation holding above 200D MA (${b['levels']['ma200']:,.0f}) with Mayer Multiple at {b.get('mayer', 1.0):.2f}x.",
+        f"• 🐻 *Bear Counter:* Macro 10-year yields at {m.get('tnx', 4.5):.2f}% maintain liquidity resistance.",
+        f"• ⚖️ *Consensus:* *{b['verdict'][:32]}*",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "💡 _Adversarial debate consensus is weighed automatically into the 10-point confluence score._"
     ]
     return "\n".join(lines)
 
@@ -1767,6 +1767,18 @@ def handle_callback_query(token: str, cq: dict):
         process_telegram_command(token, sender_id, sender_name, f"/mode {mode_key}")
     elif data in ("safety", "modes"):
         process_telegram_command(token, sender_id, sender_name, "/safety")
+    elif data == "kill_reset":
+        process_telegram_command(token, sender_id, sender_name, "/kill_reset CONFIRM")
+    elif data == "backtest_gold":
+        process_telegram_command(token, sender_id, sender_name, "/backtest gold scalp 180")
+    elif data == "backtest_btc":
+        process_telegram_command(token, sender_id, sender_name, "/backtest btc scalp 180")
+    elif data == "cd_1m":
+        process_telegram_command(token, sender_id, sender_name, "/cooldown 1m")
+    elif data == "cd_2m":
+        process_telegram_command(token, sender_id, sender_name, "/cooldown 2m")
+    elif data == "cd_5m":
+        process_telegram_command(token, sender_id, sender_name, "/cooldown 5m")
     elif data in ("kill", "emergency"):
         process_telegram_command(token, sender_id, sender_name, "/kill")
     elif data in ("menu", "start", "help"):
@@ -2197,14 +2209,23 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
                 send_message(token, sender_id, "⚠️ Macro radar data temporarily unavailable. Please try again.")
                 return
             macro_text = (
-                f"🌐 *GLOBAL MACRO RADAR*\n\n"
-                f"• US Dollar Index (DXY): `{m['dxy']:.2f}` ({m['dxy_chg']:+.2f}%)\n"
-                f"• US 10-Year Real Yield: `{m['tnx']:.2f}%` ({m['tnx_chg']:+.2f}%)\n"
-                f"• Gold/Silver Ratio (GSR): `{m['gsr']:.1f}x` (Undervalued: {m['gsr'] >= 75})\n"
-                f"• CBOE Volatility Index (VIX): `{m['vix']:.1f}`\n"
-                f"• Crypto Fear & Greed: `{m['fg_val']}` ({m['fg_label']})"
+                f"🌐 *GLOBAL MACRO RADAR*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"• Dollar Index (DXY)     : `{m['dxy']:.2f}` ({m['dxy_chg']:+.2f}%)\n"
+                f"• US 10-Year Real Yield  : `{m['tnx']:.2f}%` ({m['tnx_chg']:+.2f}%)\n"
+                f"• Gold / Silver Ratio    : `{m['gsr']:.1f}x` ({'Metals Undervalued' if m['gsr'] >= 75 else 'Neutral'})\n"
+                f"• Volatility Index (VIX) : `{m['vix']:.1f}` ({'Low / Complacent' if m['vix'] < 18 else 'Elevated'})\n"
+                f"• Crypto Market Sentiment: `{m['fg_val']}/100` ({m['fg_label']})\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"💡 _Macro trends automatically adjust execution probability in background._"
             )
-            send_message(token, sender_id, macro_text)
+            macro_markup = {
+                "inline_keyboard": [
+                    [{"text": "📊 Dual Scan", "callback_data": "scan"}, {"text": "⚡ Cockpit", "callback_data": "all"}],
+                    [{"text": "🥇 Gold Audit", "callback_data": "gold"}, {"text": "₿ BTC Audit", "callback_data": "btc"}]
+                ]
+            }
+            send_message(token, sender_id, macro_text, reply_markup=macro_markup)
             return
 
         # Sub-branch: Key Levels & Fibonacci
@@ -2272,7 +2293,13 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
         if sub in ("debate", "bull_bear", "bullbear"):
             data = run_full_pipeline()
             debate_msg = generate_adversarial_debate(data)
-            send_message(token, sender_id, debate_msg)
+            debate_markup = {
+                "inline_keyboard": [
+                    [{"text": "📊 Dual Scan", "callback_data": "scan"}, {"text": "⚡ Auto-Push: BOTH", "callback_data": "autopush_on"}],
+                    [{"text": "🥇 Gold Audit", "callback_data": "gold"}, {"text": "₿ BTC Audit", "callback_data": "btc"}]
+                ]
+            }
+            send_message(token, sender_id, debate_msg, reply_markup=debate_markup)
             return
 
         # Sub-branch: Bitcoin Single Audit
@@ -2633,7 +2660,13 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
                 f"• `/cooldown 120s` (sets cooldown in seconds)\n"
                 f"• `/cooldown 5` (sets cooldown to 5 minutes)"
             )
-            send_message(token, sender_id, msg)
+            cooldown_markup = {
+                "inline_keyboard": [
+                    [{"text": "⏱️ 1 Minute", "callback_data": "cd_1m"}, {"text": "⏱️ 2 Minutes", "callback_data": "cd_2m"}, {"text": "⏱️ 5 Minutes", "callback_data": "cd_5m"}],
+                    [{"text": "📊 Live Scan", "callback_data": "scan"}, {"text": "⚡ Cockpit", "callback_data": "all"}]
+                ]
+            }
+            send_message(token, sender_id, msg, reply_markup=cooldown_markup)
             return
 
         arg_val = args.strip().lower()
@@ -2823,6 +2856,12 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
         set_auto_push_mode("OFF")
         kill_info = safety_manager.trigger_kill_switch("Telegram Emergency Kill Command") if RISK_ENGINE_AVAILABLE else {}
         close_res = live_broker.close_all_positions() if (MT5_EXECUTOR_AVAILABLE and live_broker) else {}
+        kill_markup = {
+            "inline_keyboard": [
+                [{"text": "✅ Reset Kill-Switch", "callback_data": "kill_reset"}],
+                [{"text": "💼 View Portfolio", "callback_data": "positions"}, {"text": "⚙️ Status", "callback_data": "status"}]
+            ]
+        }
         send_message(token, sender_id, (
             f"🚨 *EMERGENCY KILL-SWITCH TRIGGERED!*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -2831,7 +2870,7 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             f"• Engine Execution Status   : `LOCKED 🚨`\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"All trading is halted to protect capital. To resume normal trading, run:\n`/kill_reset CONFIRM`"
-        ))
+        ), reply_markup=kill_markup)
         return
 
     # ── RESET KILL-SWITCH (/kill_reset CONFIRM) ──
@@ -3239,7 +3278,21 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
                 pass
             trades, wins = learning_engine.train_on_historical_data(lookback_days=180, verbose=False)
             win_pct = (wins / trades * 100) if trades > 0 else 0
-            send_message(token, sender_id, f"✅ *Self-Training Complete!*\n• Setups Evaluated: `{trades}`\n• Historical Win Rate: `{win_pct:.1f}%` ({wins}W / {trades-wins}L)\n• Type `/learn` or `/trades` to review updated rankings and trade journal.")
+            train_markup = {
+                "inline_keyboard": [
+                    [{"text": "📜 Trade Journal", "callback_data": "trades"}, {"text": "🎯 Strategy Profiles", "callback_data": "strategy"}],
+                    [{"text": "📊 Live Scan", "callback_data": "scan"}, {"text": "💼 Positions", "callback_data": "positions"}]
+                ]
+            }
+            send_message(token, sender_id, (
+                f"✅ *SELF-TRAINING COMPLETED*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"• Setups Evaluated   : `{trades}` historical setups\n"
+                f"• Historical Win Rate: *{win_pct:.1f}%* ({wins}W / {trades-wins}L)\n"
+                f"• Factor Weights     : `Recalibrated & Persisted`\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"💡 _Machine learning engine continuously refines weights as live trades complete._"
+            ), reply_markup=train_markup)
         else:
             send_message(token, sender_id, "⚠️ Self-Learning module not available.")
         return
@@ -3466,16 +3519,18 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             resp_text = omniscient_matrix.format_asset_matrix("GOLD", m_state)
             markup = {
                 "inline_keyboard": [
-                    [{"text": "🌐 Full Matrix", "callback_data": "matrix_all"}, {"text": "₿ BTC Matrix", "callback_data": "matrix_btc"}],
-                    [{"text": "👥 Agent Ballots", "callback_data": "matrix_agents"}, {"text": "🔮 Predict Gold", "callback_data": "predict_gold"}]
+                    [{"text": "🌐 Matrix Overview", "callback_data": "matrix_all"}, {"text": "₿ BTC Matrix", "callback_data": "matrix_btc"}],
+                    [{"text": "🟢 Buy Gold", "callback_data": "buy_gold"}, {"text": "🔴 Sell Gold", "callback_data": "sell_gold"}],
+                    [{"text": "📊 Live Scan", "callback_data": "scan"}, {"text": "💼 Open Positions", "callback_data": "positions"}]
                 ]
             }
         elif arg in ("btc", "bitcoin"):
             resp_text = omniscient_matrix.format_asset_matrix("BTC", m_state)
             markup = {
                 "inline_keyboard": [
-                    [{"text": "🌐 Full Matrix", "callback_data": "matrix_all"}, {"text": "🥇 Gold Matrix", "callback_data": "matrix_gold"}],
-                    [{"text": "👥 Agent Ballots", "callback_data": "matrix_agents"}, {"text": "🔮 Predict BTC", "callback_data": "predict_btc"}]
+                    [{"text": "🌐 Matrix Overview", "callback_data": "matrix_all"}, {"text": "🥇 Gold Matrix", "callback_data": "matrix_gold"}],
+                    [{"text": "🟢 Buy BTC", "callback_data": "buy_btc"}, {"text": "🔴 Sell BTC", "callback_data": "sell_btc"}],
+                    [{"text": "📊 Live Scan", "callback_data": "scan"}, {"text": "💼 Open Positions", "callback_data": "positions"}]
                 ]
             }
         elif arg in ("agents", "council", "ballots", "votes"):
@@ -3498,8 +3553,8 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             markup = {
                 "inline_keyboard": [
                     [{"text": "🥇 Gold Matrix", "callback_data": "matrix_gold"}, {"text": "₿ BTC Matrix", "callback_data": "matrix_btc"}],
-                    [{"text": "👥 Agent Ballots", "callback_data": "matrix_agents"}, {"text": "🔮 Predict Alpha", "callback_data": "predict"}],
-                    [{"text": "🔄 Refresh Matrix", "callback_data": "matrix_refresh"}, {"text": "⚙️ Matrix Status", "callback_data": "matrix_status"}]
+                    [{"text": "⚡ Auto-Push: BOTH", "callback_data": "autopush_on"}, {"text": "📊 Live Scan", "callback_data": "scan"}],
+                    [{"text": "💼 Open Positions", "callback_data": "positions"}, {"text": "⚙️ System Status", "callback_data": "status"}]
                 ]
             }
 
@@ -3542,7 +3597,13 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
         else:
             risk_report = f"🛡️ *Risk Audit:* Balance `${active_bal:,.2f}` | 1% Risk: `${active_bal*0.01:,.2f}`"
 
-        send_message(token, sender_id, risk_report)
+        risk_markup = {
+            "inline_keyboard": [
+                [{"text": "📊 Live Scan", "callback_data": "scan"}, {"text": "⚡ Auto-Push: BOTH", "callback_data": "autopush_on"}],
+                [{"text": "💼 Open Positions", "callback_data": "positions"}, {"text": "🛑 Close All", "callback_data": "close_all"}]
+            ]
+        }
+        send_message(token, sender_id, risk_report, reply_markup=risk_markup)
         return
 
     # ── 9. QUANTITATIVE BACKTEST HUB (/backtest [gold|btc] [scalp|swing|balance|swap] [days]) ──
@@ -3569,7 +3630,13 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
         if BACKTEST_AVAILABLE:
             res = run_historical_backtest(asset=target_asset, strategy_code=target_strat, lookback_days=target_days)
             card = format_backtest_telegram_card(res)
-            send_message(token, sender_id, card)
+            backtest_markup = {
+                "inline_keyboard": [
+                    [{"text": "🥇 Backtest Gold", "callback_data": "backtest_gold"}, {"text": "₿ Backtest BTC", "callback_data": "backtest_btc"}],
+                    [{"text": "📊 Live Scan", "callback_data": "scan"}, {"text": "💼 Open Positions", "callback_data": "positions"}]
+                ]
+            }
+            send_message(token, sender_id, card, reply_markup=backtest_markup)
         else:
             send_message(token, sender_id, "⚠️ Backtesting engine temporarily unavailable.")
         return

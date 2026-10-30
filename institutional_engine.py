@@ -1810,10 +1810,8 @@ def format_combined_mtf_card(gold_mtf: dict, gold_strat: dict, btc_mtf: dict, bt
         f"   • Movement: *{btc_mtf.get('movement_badge', 'N/A')}*",
         f"   • Alignment: `{b_score:+.2f}` | Strategy: *{btc_strat.get('strategy_code', 'SCALP')}* ({btc_strat.get('preferred_side', 'DUAL')})",
         f"   • M1:{b_tf.get('m1',{}).get('badge','-')[:2]} M5:{b_tf.get('m5',{}).get('badge','-')[:2]} M15:{b_tf.get('m15',{}).get('badge','-')[:2]} H1:{b_tf.get('h1',{}).get('badge','-')[:2]} D1:{b_tf.get('d1',{}).get('badge','-')[:2]}",
-        "",
-        "⚡ *Autonomous Strategy Adaptation Active:*",
-        "   Both assets scanned dual-sided (BUY & SELL). Strategies continuously adapt",
-        "   their risk parameters, targets, and trailing ratchets to live market regimes.",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "💡 _Multi-timeframe trend shifts adapt strategy risk, targets, and trailing stops automatically._"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     ]
     return "\n".join(lines)
