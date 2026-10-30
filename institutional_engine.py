@@ -225,13 +225,14 @@ class InstitutionalEngine:
             else:  # STRONG_BEARISH
                 # Strong counter-trend: veto swing/balance/swap; allow scalp only if high confluence
                 is_veto = strat_norm in ("SWING", "BALANCE", "SWAP")
+                details_str = htf_bias.get("details") or htf_bias.get("summary") or "Extreme Trend"
                 return {
                     "aligned": False,
                     "status": "VETOED" if is_veto else "COUNTER_TREND_WARNING",
                     "confluence_delta": -2,
                     "risk_multiplier": 0.5,
                     "veto": is_veto,
-                    "veto_reason": f"Long vetoed: Strong Bearish HTF Bias ({htf_bias['details']}) forbids {strat_norm} trades." if is_veto else None,
+                    "veto_reason": f"Long vetoed: Strong Bearish HTF Bias ({details_str}) forbids {strat_norm} trades." if is_veto else None,
                     "display_badge": "🚨 HTF Strong Bearish (Veto Warning)" if is_veto else "⚠️ HTF Strong Bearish (Scalp Only, Half Size)"
                 }
 
@@ -268,13 +269,14 @@ class InstitutionalEngine:
                 }
             else:  # STRONG_BULLISH
                 is_veto = strat_norm in ("SWING", "BALANCE", "SWAP")
+                details_str = htf_bias.get("details") or htf_bias.get("summary") or "Extreme Trend"
                 return {
                     "aligned": False,
                     "status": "VETOED" if is_veto else "COUNTER_TREND_WARNING",
                     "confluence_delta": -2,
                     "risk_multiplier": 0.5,
                     "veto": is_veto,
-                    "veto_reason": f"Short vetoed: Strong Bullish HTF Bias ({htf_bias['details']}) forbids {strat_norm} trades." if is_veto else None,
+                    "veto_reason": f"Short vetoed: Strong Bullish HTF Bias ({details_str}) forbids {strat_norm} trades." if is_veto else None,
                     "display_badge": "🚨 HTF Strong Bullish (Veto Warning)" if is_veto else "⚠️ HTF Strong Bullish (Scalp Only, Half Size)"
                 }
 
@@ -291,6 +293,14 @@ class InstitutionalEngine:
 
 # Global Singleton Instance
 institutional_engine = InstitutionalEngine()
+
+def compute_htf_bias(df: pd.DataFrame, asset: str) -> Dict[str, Any]:
+    """Module-level helper to compute higher timeframe bias."""
+    return institutional_engine.compute_htf_bias(df, asset)
+
+def evaluate_htf_alignment(htf_bias: dict, action: str = "BUY", strategy: str = "SCALP") -> dict:
+    """Module-level helper to evaluate higher timeframe alignment."""
+    return institutional_engine.evaluate_htf_alignment(htf_bias, action=action, strategy=strategy)
 
 
 # ==============================================================================
@@ -1794,7 +1804,7 @@ def format_combined_mtf_card(gold_mtf: dict, gold_strat: dict, btc_mtf: dict, bt
         f"   • Alignment: `{b_score:+.2f}` | Strategy: *{btc_strat.get('strategy_code', 'SCALP')}* ({btc_strat.get('preferred_side', 'DUAL')})",
         f"   • M1:{b_tf.get('m1',{}).get('badge','-')[:2]} M5:{b_tf.get('m5',{}).get('badge','-')[:2]} M15:{b_tf.get('m15',{}).get('badge','-')[:2]} H1:{b_tf.get('h1',{}).get('badge','-')[:2]} D1:{b_tf.get('d1',{}).get('badge','-')[:2]}",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        "💡 _Multi-timeframe trend shifts adapt strategy risk, targets, and trailing stops automatically._"
+        "💡 _Multi-timeframe trend shifts adapt strategy risk, targets, and trailing stops automatically._",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     ]
     return "\n".join(lines)

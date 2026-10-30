@@ -1962,6 +1962,8 @@ def handle_callback_query(token: str, cq: dict):
         process_telegram_command(token, sender_id, sender_name, "/btc")
     elif data in ("gold", "xau"):
         process_telegram_command(token, sender_id, sender_name, "/gold")
+    elif data in ("train_model", "train", "retrain"):
+        process_telegram_command(token, sender_id, sender_name, "/train")
 
 
 def format_elite_alert(asset: str, data: dict, setup_data: dict = None, exec_result: dict = None, is_auto_trade: bool = False):
@@ -3523,7 +3525,11 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
 
             pred = item.get("prediction")
             if not pred and INSTITUTIONAL_AVAILABLE and neuro_predictor:
-                opp_levels = [item["levels"].get("r1"), item["levels"].get("sw_high"), item["levels"].get("fib_382")]
+                item_act = item.get("dominant_side", "BUY").upper()
+                if item_act == "BUY":
+                    opp_levels = [item["levels"].get("r1"), item["levels"].get("sw_high"), item["levels"].get("fib_382")]
+                else:
+                    opp_levels = [item["levels"].get("s1"), item["levels"].get("sw_low"), item["levels"].get("fib_618")]
                 opp_levels = [float(x) for x in opp_levels if x is not None and not np.isnan(x) and x > 0]
                 pred = neuro_predictor.predict_trade_outcome(
                     asset=asset_target,
@@ -3533,7 +3539,7 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
                     atr=item["atr"],
                     active_features={},
                     opposing_levels=opp_levels,
-                    action="BUY",
+                    action=item_act,
                     is_scalp=True
                 )
 
@@ -3862,6 +3868,17 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             ]
         }
         send_message(token, sender_id, status_msg, reply_markup=status_markup)
+        return
+
+    # ── SHORTCUTS: /stop, /pause, /cancel, /dismiss ──
+    if cmd in ("/stop", "/pause"):
+        set_auto_push_mode("OFF")
+        send_message(token, sender_id, "🛑 *AUTO-EXECUTION PAUSED*\nAutomated order execution is paused. Continuous 1-minute scanning continues in background.\nTo resume auto-trading: `/auto_trade on`")
+        return
+
+    if cmd in ("/cancel", "/dismiss"):
+        clear_all_setups()
+        send_message(token, sender_id, "❌ *PENDING SETUPS DISMISSED*\nAll pending signal approvals have been cleared.")
         return
 
     # Fallback for unrecognized commands

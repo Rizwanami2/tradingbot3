@@ -383,7 +383,11 @@ class TestHardAssetProject(unittest.TestCase):
             "/trades",
             "/recent_trades",
             "/cooldown",
-            "/cooldown 2"
+            "/cooldown 2",
+            "/stop",
+            "/pause",
+            "/cancel",
+            "/dismiss"
         ]
 
         for cmd in test_commands:
@@ -734,6 +738,22 @@ class TestHardAssetProject(unittest.TestCase):
         self.assertEqual(eval_sell_bear["confluence_delta"], 1)
         self.assertFalse(eval_sell_bear["veto"])
 
+        # E) Regression protection: Dict without 'details' key must not raise KeyError
+        sparse_htf = {"bias": "STRONG_BULLISH"}
+        eval_sparse_short = engine.evaluate_htf_alignment(sparse_htf, action="SELL", strategy="SWING")
+        self.assertTrue(eval_sparse_short["veto"])
+        self.assertIn("vetoed", eval_sparse_short["veto_reason"].lower())
+
+        sparse_bear = {"bias": "STRONG_BEARISH"}
+        eval_sparse_long = engine.evaluate_htf_alignment(sparse_bear, action="BUY", strategy="SWING")
+        self.assertTrue(eval_sparse_long["veto"])
+        self.assertIn("vetoed", eval_sparse_long["veto_reason"].lower())
+
+        # F) Module-level function wrappers
+        import institutional_engine as ie_mod
+        mod_res = ie_mod.compute_htf_bias(bull_df, "GOLD")
+        self.assertIn(mod_res["bias"], ("BULLISH", "STRONG_BULLISH"))
+
         # 4. Live Pipeline Integration check
         data = telegram_bot.run_full_pipeline()
         self.assertIsNotNone(data["btc"].get("htf_bias"))
@@ -858,6 +878,16 @@ class TestHardAssetProject(unittest.TestCase):
         telegram_bot.handle_callback_query(token, cq_mat)
         self.assertGreater(len(self.mock_tg.sent_messages), 0)
         self.assertIn("OMNISCIENT QUANTITATIVE MATRIX", self.mock_tg.sent_messages[0][1])
+
+        # 6D. Test inline callback click: 'train_model'
+        self.mock_tg.sent_messages.clear()
+        cq_train = {
+            "id": "cb_005",
+            "from": {"id": int(sender_id), "first_name": sender_name},
+            "data": "train_model"
+        }
+        telegram_bot.handle_callback_query(token, cq_train)
+        self.assertGreater(len(self.mock_tg.sent_messages), 0)
 
         # 7. Test /unlock command (confirms locks removed)
         self.mock_tg.sent_messages.clear()

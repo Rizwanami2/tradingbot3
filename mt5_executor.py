@@ -38,8 +38,14 @@ except Exception:
 
 
 # Common symbol variations used across institutional and retail brokers
-GOLD_SYMBOL_CANDIDATES = ["XAUUSD", "XAUUSDm", "GOLD", "XAUUSD.a", "XAUUSD.raw", "XAUUSD.ecn", "XAUUSD.s", "XAUUSD.", "GC=F"]
-BTC_SYMBOL_CANDIDATES  = ["BTCUSD", "BTCUSDm", "BTC", "BTCUSD.a", "BTCUSD.raw", "BTCUSD.ecn", "BTCUSD.s", "BTCUSD.", "BTC-USD"]
+GOLD_SYMBOL_CANDIDATES = [
+    "XAUUSD", "XAUUSDm", "GOLD", "XAUUSD.a", "XAUUSD.raw", "XAUUSD.ecn",
+    "XAUUSD.s", "XAUUSD.", "XAUUSD_i", "XAU_USD", "GOLD.pro", "XAUUSD.pro", "GC=F"
+]
+BTC_SYMBOL_CANDIDATES  = [
+    "BTCUSD", "BTCUSDm", "BTC", "BTCUSD.a", "BTCUSD.raw", "BTCUSD.ecn",
+    "BTCUSD.s", "BTCUSD.", "BTCUSD_i", "BTC_USD", "BTCUSD.pro", "BTC-USD"
+]
 
 
 class MT5LiveBroker:
@@ -623,9 +629,11 @@ class MT5LiveBroker:
             if needs_breakeven:
                 res = self.modify_position_sltp(ticket, breakeven_sl, curr_tp)
                 if res.get("success"):
+                    asset_norm = "GOLD" if ("XAU" in symbol or "GOLD" in symbol) else "BTC"
                     events.append({
                         "ticket": ticket,
                         "symbol": symbol,
+                        "asset": asset_norm,
                         "type": "BUY" if is_buy else "SELL",
                         "strategy": strat_name,
                         "action": "BREAKEVEN",
@@ -651,9 +659,11 @@ class MT5LiveBroker:
                 if should_trail:
                     res = self.modify_position_sltp(ticket, trailing_sl, curr_tp)
                     if res.get("success"):
+                        asset_norm = "GOLD" if ("XAU" in symbol or "GOLD" in symbol) else "BTC"
                         events.append({
                             "ticket": ticket,
                             "symbol": symbol,
+                            "asset": asset_norm,
                             "type": "BUY" if is_buy else "SELL",
                             "strategy": strat_name,
                             "action": "TRAILED",
@@ -664,8 +674,6 @@ class MT5LiveBroker:
                             "profit_r": current_r,
                             "msg": f"📈 *[{strat_name}] TRAILING ADVANCED:* #{ticket} `{symbol}` SL trailed to `${trailing_sl:,.2f}` (+{current_r:.2f}R — Profit Secured!)"
                         })
-
-        return events
 
         return events
 
