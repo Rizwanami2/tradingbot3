@@ -27,6 +27,9 @@ if hasattr(sys.stderr, "reconfigure"):
 import os
 import json
 import time
+import io
+import contextlib
+import logging
 import threading
 import urllib.request
 import urllib.parse
@@ -39,6 +42,7 @@ import concurrent.futures
 
 # Suppress warnings
 import warnings
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 warnings.filterwarnings("ignore")
 
 # Bypass Windows VPS missing root CA certificates or hosting provider SSL inspection
@@ -235,11 +239,19 @@ def set_pending_setup(asset: str, setup_data: dict):
         PENDING_SETUPS[asset_key] = setup_data
 
 
-def get_pending_setup(asset: str) -> dict | None:
+def get_pending_setup(asset: str, max_age_seconds: int = 900) -> dict | None:
     asset_key = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
     with DEDUP_LOCK:
         setup = PENDING_SETUPS.get(asset_key)
-        return dict(setup) if setup else None
+        if not setup:
+            return None
+        # Auto-expire unexecuted setups older than TTL (15 minutes)
+        if setup.get("status") == "PENDING" and not setup.get("executed"):
+            age = time.time() - setup.get("time", 0.0)
+            if age > max_age_seconds:
+                PENDING_SETUPS[asset_key] = None
+                return None
+        return dict(setup)
 
 
 def clear_pending_setup(asset: str) -> bool:
@@ -645,11 +657,29 @@ def fetch_macro_context():
     if MARKET_DATA_AVAILABLE and market_data_feed:
         return market_data_feed.get_macro_snapshot()
 
-    dxy = yf.Ticker("DX-Y.NYB").history(period="5d")
-    tnx = yf.Ticker("^TNX").history(period="5d")
-    silver = yf.Ticker("SI=F").history(period="5d")
-    gold_5d = yf.Ticker("GC=F").history(period="5d")
-    vix = yf.Ticker("^VIX").history(period="5d")
+    with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+        try:
+            dxy = yf.Ticker("DX-Y.NYB").history(period="5d")
+            if dxy.empty:
+                dxy = yf.Ticker("UUP").history(period="5d")
+        except Exception:
+            dxy = pd.DataFrame()
+        try:
+            tnx = yf.Ticker("^TNX").history(period="5d")
+        except Exception:
+            tnx = pd.DataFrame()
+        try:
+            silver = yf.Ticker("SI=F").history(period="5d")
+        except Exception:
+            silver = pd.DataFrame()
+        try:
+            gold_5d = yf.Ticker("GC=F").history(period="5d")
+        except Exception:
+            gold_5d = pd.DataFrame()
+        try:
+            vix = yf.Ticker("^VIX").history(period="5d")
+        except Exception:
+            vix = pd.DataFrame()
 
     dxy_val = dxy["Close"].iloc[-1] if not dxy.empty else 102.0
     dxy_chg = (((dxy_val / dxy["Close"].iloc[-2]) - 1) * 100) if len(dxy) >= 2 else 0.0
@@ -2148,8 +2178,23 @@ def auto_scanner_worker(token: str, chat_id_getter):
             # ── 3. Clean 1-Minute Console Heartbeat (Zero Spam) ──
             b_pend = get_pending_setup("BTC")
             g_pend = get_pending_setup("GOLD")
-            btc_st = f"Active ({b_pend.get('status')})" if b_pend else f"Score {b['final_score']}/10"
-            gold_st = f"Active ({g_pend.get('status')})" if g_pend else f"Score {g['final_score']}/10"
+
+            if b_pend and b_pend.get("status") == "PENDING":
+                b_age = int((current_time - b_pend.get("time", current_time)) // 60)
+                btc_st = f"Score {b['final_score']}/10 [Pending {b_age}m]"
+            elif b_pend and b_pend.get("status") == "EXECUTED":
+                btc_st = f"Active (Trade #{b_pend.get('ticket')})"
+            else:
+                btc_st = f"Score {b['final_score']}/10"
+
+            if g_pend and g_pend.get("status") == "PENDING":
+                g_age = int((current_time - g_pend.get("time", current_time)) // 60)
+                gold_st = f"Score {g['final_score']}/10 [Pending {g_age}m]"
+            elif g_pend and g_pend.get("status") == "EXECUTED":
+                gold_st = f"Active (Trade #{g_pend.get('ticket')})"
+            else:
+                gold_st = f"Score {g['final_score']}/10"
+
             print(f"[{datetime.now().strftime('%H:%M:%S')}] 1M Scan: BTC: {btc_st} | Gold: {gold_st} (Spam: 0 | Lock: OFF)")
 
             # ── 4. Periodic Autonomous Self-Learning & Memory Optimization (Every 5 minutes) ──

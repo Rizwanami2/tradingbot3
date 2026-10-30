@@ -22,6 +22,8 @@ Guards & Quality Assurance:
 
 import os
 import time
+import io
+import contextlib
 import json
 import random
 import logging
@@ -33,6 +35,7 @@ from typing import Dict, Any, Optional, Tuple, List
 import numpy as np
 import pandas as pd
 import yfinance as yf
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 # Configure logger
 logger = logging.getLogger("Bottreding.MarketData")
@@ -373,12 +376,21 @@ class MarketDataFeed:
 
         # ── 1. DXY (US Dollar Index) ──
         try:
-            dxy_df = yf.Ticker("DX-Y.NYB").history(period="5d")
-            if not dxy_df.empty and len(dxy_df) >= 2:
-                dxy_val = float(dxy_df["Close"].iloc[-1])
-                dxy_chg = float(((dxy_val / dxy_df["Close"].iloc[-2]) - 1) * 100)
-            elif not dxy_df.empty:
-                dxy_val = float(dxy_df["Close"].iloc[-1])
+            with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+                dxy_df = yf.Ticker("DX-Y.NYB").history(period="5d")
+                if not dxy_df.empty and len(dxy_df) >= 2:
+                    dxy_val = float(dxy_df["Close"].iloc[-1])
+                    dxy_chg = float(((dxy_val / dxy_df["Close"].iloc[-2]) - 1) * 100)
+                elif not dxy_df.empty:
+                    dxy_val = float(dxy_df["Close"].iloc[-1])
+                else:
+                    # Secondary ETF proxy (UUP tracks DXY basket closely)
+                    uup_df = yf.Ticker("UUP").history(period="5d")
+                    if not uup_df.empty and len(uup_df) >= 2:
+                        dxy_val = float(uup_df["Close"].iloc[-1]) * 3.502
+                        dxy_chg = float(((uup_df["Close"].iloc[-1] / uup_df["Close"].iloc[-2]) - 1) * 100)
+                    elif not uup_df.empty:
+                        dxy_val = float(uup_df["Close"].iloc[-1]) * 3.502
         except Exception as e:
             logger.debug(f"DXY fetch error: {e}")
 
