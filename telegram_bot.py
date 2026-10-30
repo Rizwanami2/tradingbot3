@@ -144,6 +144,60 @@ ACTIVE_CHAT_ID = ""
 # Strategy Profile Auto-Switch (False = Manual Profile Locked; True = Auto-Adapts to Regime)
 STRATEGY_AUTO_SWITCH = False
 
+# Post-Trade Cooldown & Live Candle Gate
+LAST_CLOSED_TRADE_TIME = {"GOLD": 0.0, "BTC": 0.0}
+POST_TRADE_COOLDOWN_SECONDS = 600  # 10 minutes post-TP/SL rest to prevent exhaustion traps
+
+def verify_live_candle_direction(asset: str, action: str) -> tuple[bool, str]:
+    """
+    Microstructure Live Candle Momentum Gate.
+    Institutional Rules:
+      - BUY: Live 1M/5M candle MUST be Green (Close >= Open). Upper wick < 40%.
+      - SELL: Live 1M/5M candle MUST be Red (Close <= Open). Lower wick < 40%.
+    """
+    asset_norm = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
+    act_upper = action.upper()
+    bars = None
+
+    if MT5_EXECUTOR_AVAILABLE and live_broker and getattr(live_broker, "is_connected", False):
+        try:
+            bars = live_broker.get_live_1m_rates(asset_norm, count=5)
+        except Exception:
+            bars = None
+
+    if bars is None or (hasattr(bars, "empty") and bars.empty):
+        if MARKET_DATA_AVAILABLE and market_data_feed:
+            try:
+                mtf = market_data_feed.get_multitimeframe_bars(asset_norm)
+                bars = mtf.get("m1") if (mtf and "m1" in mtf) else (mtf.get("m5") if mtf else None)
+            except Exception:
+                bars = None
+
+    if bars is None or (hasattr(bars, "empty") and bars.empty) or len(bars) == 0:
+        return True, "No live candle stream available; bypass gate."
+
+    latest = bars.iloc[-1]
+    c_open = float(latest["open"] if "open" in latest else latest["Open"])
+    c_close = float(latest["close"] if "close" in latest else latest["Close"])
+    c_high = float(latest["high"] if "high" in latest else latest["High"])
+    c_low = float(latest["low"] if "low" in latest else latest["Low"])
+    c_range = max(c_high - c_low, 0.001)
+
+    if act_upper in ("BUY", "LONG"):
+        if c_close < c_open:
+            return False, f"Live candle is RED / DUMPING (Close ${c_close:,.2f} < Open ${c_open:,.2f}). Entry blocked to avoid catching falling knife."
+        upper_wick = c_high - max(c_open, c_close)
+        if (upper_wick / c_range) >= 0.40:
+            return False, "Live candle rejected with >=40% upper wick (Bull Trap resistance). Buy blocked."
+    elif act_upper in ("SELL", "SHORT"):
+        if c_close > c_open:
+            return False, f"Live candle is GREEN / PUMPING (Close ${c_close:,.2f} > Open ${c_open:,.2f}). Entry blocked to avoid shorting momentum."
+        lower_wick = min(c_open, c_close) - c_low
+        if (lower_wick / c_range) >= 0.40:
+            return False, "Live candle bounced with >=40% lower wick (Bear Trap support). Sell blocked."
+
+    return True, "Live candle aligned with order momentum."
+
 def is_auto_push_active(asset: str) -> bool:
     """Returns True if automated order push is active for the specified asset."""
     mode = (AUTO_PUSH_MODE or AUTO_TRADE_MODE or "OFF").upper()
@@ -240,8 +294,15 @@ def should_send_alert(asset: str, action: str, price: float, score: float, coold
         price_chg_pct = (abs(price - last_price) / last_price * 100.0) if last_price > 0 else 999.0
         same_action = (last.get("action", "").upper() == action.upper())
 
-        if time_diff < cooldown_seconds and price_chg_pct < 0.35 and same_action:
-            return False  # Suppress duplicate alert in identical consolidation zone
+        # Symmetrical Breakout Expansion:
+        # - BUY: Price expanding upward > 0.35% (Real bullish breakout)
+        # - SELL: Price expanding downward > 0.35% (Real bearish breakdown)
+        # Pullbacks and dumps counter to trade direction do NOT bypass cooldown!
+        is_breakout_expansion = (action.upper() in ("BUY", "LONG") and price > last_price and price_chg_pct >= 0.35) or \
+                                (action.upper() in ("SELL", "SHORT") and price < last_price and price_chg_pct >= 0.35)
+
+        if time_diff < cooldown_seconds and same_action and not is_breakout_expansion:
+            return False  # Suppress duplicate alert in identical consolidation zone or counter-trend pullbacks
 
         # Register fresh alert timestamp and price
         LAST_ALERTED[asset_key] = {
@@ -770,10 +831,25 @@ def _analyze_single_side(symbol: str, asset_type: str, macro: dict, hist, levels
     # Valuation
     mayer = (curr / ma200) if not np.isnan(ma200) and ma200 > 0 else 1.0
 
-    # Candle wicks
+    # Candle wicks (Timeframe-Adaptive: In Scalp mode, evaluates active 5M candle for real-time wick precision)
     curr_bar = hist.iloc[-1]
     c_open, c_high, c_low, c_close = curr_bar["Open"], curr_bar["High"], curr_bar["Low"], curr_bar["Close"]
     c_range = c_high - c_low
+
+    strat_chk = get_active_strategy()["code"] if RISK_ENGINE_AVAILABLE else "SCALP"
+    if strat_chk == "SCALP" and MARKET_DATA_AVAILABLE and market_data_feed:
+        try:
+            micro_bars = market_data_feed.get_multitimeframe_bars(asset_type)
+            if micro_bars and "m5" in micro_bars and not micro_bars["m5"].empty:
+                mb = micro_bars["m5"].iloc[-1]
+                c_open = float(mb["open"] if "open" in mb else mb["Open"])
+                c_high = float(mb["high"] if "high" in mb else mb["High"])
+                c_low = float(mb["low"] if "low" in mb else mb["Low"])
+                c_close = float(mb["close"] if "close" in mb else mb["Close"])
+                c_range = max(c_high - c_low, 0.001)
+        except Exception:
+            pass
+
     up_wick_pct = ((c_high - max(c_open, c_close)) / c_range * 100) if c_range > 0 else 0.0
     low_wick_pct = ((min(c_open, c_close) - c_low) / c_range * 100) if c_range > 0 else 0.0
     candle_body_pct = ((abs(c_close - c_open)) / c_range * 100) if c_range > 0 else 50.0
@@ -1644,6 +1720,7 @@ def trailing_monitor_worker(token: str, chat_id_getter):
                     if action_name in ("TP_HIT", "SL_HIT"):
                         asset_key = ev.get("asset", "GOLD")
                         clear_active_setup(asset_key)
+                        LAST_CLOSED_TRADE_TIME[asset_key] = time.time()
 
                         if LEARNING_AVAILABLE and learning_engine:
                             try:
@@ -1703,12 +1780,30 @@ def execute_setup_order(asset: str, setup_data: dict, token: str, chat_id: str, 
     if live_broker.has_open_position(asset):
         return {"success": False, "error": f"Open position already exists for {asset}."}
 
-    prefix = "AutoPush" if trigger_source == "AUTOPUSH" else ("Auto1M" if trigger_source == "AUTO" else "Approve")
-    comment = f"{prefix}-{setup_data.get('strategy', 'SCALP')}"
-    lots = setup_data.get("lots", 0.05)
+    asset_norm = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
+    action_to_check = setup_data.get("action", "BUY").upper()
     entry = setup_data["entry"]
     sl = setup_data["sl"]
     tp1 = setup_data["tp1"]
+    lots = setup_data.get("lots", 0.05)
+
+    # In AUTOPUSH mode, verify live candle direction and post-trade rest
+    if trigger_source == "AUTOPUSH":
+        last_close = LAST_CLOSED_TRADE_TIME.get(asset_norm, 0.0)
+        time_since_close = time.time() - last_close
+        if time_since_close < POST_TRADE_COOLDOWN_SECONDS and not setup_data.get("bypass_cooldown"):
+            rem_sec = int(POST_TRADE_COOLDOWN_SECONDS - time_since_close)
+            return {"success": False, "error": f"Post-trade cooldown active for {asset_norm} ({rem_sec}s remaining). Waiting for market stabilization."}
+
+        # Validate live candle if order entry is live market (not synthetic test mock)
+        cur_p = market_data_feed.get_live_price(asset_norm).get("price", entry) if (MARKET_DATA_AVAILABLE and market_data_feed) else entry
+        if cur_p and abs(entry - cur_p) / cur_p <= 0.08 and not setup_data.get("bypass_candle_gate"):
+            candle_ok, candle_msg = verify_live_candle_direction(asset_norm, action_to_check)
+            if not candle_ok:
+                return {"success": False, "error": f"Live Candle Gate: {candle_msg}"}
+
+    prefix = "AutoPush" if trigger_source == "AUTOPUSH" else ("Auto1M" if trigger_source == "AUTO" else "Approve")
+    comment = f"{prefix}-{setup_data.get('strategy', 'SCALP')}"
 
     action = setup_data.get("action", "BUY").upper()
     res = live_broker.execute_live_sniper_order(
@@ -2866,8 +2961,8 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
         send_message(token, sender_id, msg)
         return
 
-    # ── 4. MODERN STRATEGY HUB (/strategy [scalp|swing|balance|swap]) ──
-    if cmd == "/strategy":
+    # ── 4. MODERN STRATEGY & PROFILE HUB (/strategy or /profile [scalp|swing|balance|swap]) ──
+    if cmd in ("/strategy", "/profile"):
         global STRATEGY_AUTO_SWITCH
         sub = args_lower.strip()
         if sub in ("auto on", "auto_on", "autoon"):

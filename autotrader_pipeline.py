@@ -149,11 +149,14 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
     daily_rets = hist["Close"].pct_change().dropna()
     vol30 = float(daily_rets.tail(30).std() * np.sqrt(365) * 100) if len(daily_rets) >= 30 else 30.0
 
-    # STAGE 4: CONFLUENCE SCORING & ACTIVE FEATURES
-    score = 0
-    factors = []
+    # STAGE 4: DUAL-SIDED CONFLUENCE SCORING & ACTIVE FEATURES (BUY & SELL)
+    score_buy = 0
+    factors_buy = []
+    score_sell = 0
+    factors_sell = []
 
     if asset_type == "BTC":
+        # Buy Factors
         feat_dxy = dxy_chg < 0.2
         feat_yield = tnx_chg < 1.0
         feat_ma200 = curr > ma200
@@ -165,32 +168,42 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
         feat_vol = vol30 < 75
         feat_near_support = (curr - sw_low) / curr <= 0.05
 
-        if feat_dxy: score += 1; factors.append("Macro: DXY favorable (USD weakness/neutral)")
-        if feat_yield: score += 1; factors.append("Macro: 10Y Yields controlled")
-        if feat_ma200: score += 1; factors.append(f"Trend: Above 200 SMA (${ma200:,.0f})")
-        if feat_mayer: score += 1; factors.append(f"Valuation: Mayer Multiple healthy ({mayer:.2f})")
-        if feat_rsi: score += 1; factors.append(f"Momentum: RSI in healthy expansion zone ({rsi:.1f})")
-        if in_golden_pocket: score += 1; factors.append("Level: Resting in Golden Pocket (0.618 Fib)")
-        if feat_fg: score += 1; factors.append(f"Sentiment: Fear & Greed balanced ({fg_val})")
-        if feat_no_trap: score += 1; factors.append("Microstructure: Zero Bull Trap rejection")
-        if feat_ma50: score += 1; factors.append("Momentum: Above 50 SMA")
-        if feat_vol: score += 1; factors.append(f"Risk: Volatility normalized ({vol30:.1f}%)")
+        if feat_dxy: score_buy += 1; factors_buy.append("Macro: DXY favorable (USD weakness/neutral)")
+        if feat_yield: score_buy += 1; factors_buy.append("Macro: 10Y Yields controlled")
+        if feat_ma200: score_buy += 1; factors_buy.append(f"Trend: Above 200 SMA (${ma200:,.0f})")
+        if feat_mayer: score_buy += 1; factors_buy.append(f"Valuation: Mayer Multiple healthy ({mayer:.2f})")
+        if feat_rsi: score_buy += 1; factors_buy.append(f"Momentum: RSI in healthy expansion zone ({rsi:.1f})")
+        if in_golden_pocket: score_buy += 1; factors_buy.append("Level: Resting in Golden Pocket (0.618 Fib)")
+        if feat_fg: score_buy += 1; factors_buy.append(f"Sentiment: Fear & Greed balanced ({fg_val})")
+        if feat_no_trap: score_buy += 1; factors_buy.append("Microstructure: Zero Bull Trap rejection")
+        if feat_ma50: score_buy += 1; factors_buy.append("Momentum: Above 50 SMA")
+        if feat_vol: score_buy += 1; factors_buy.append(f"Risk: Volatility normalized ({vol30:.1f}%)")
 
-        active_features = {
-            "in_golden_pocket": bool(in_golden_pocket),
-            "no_trap": bool(feat_no_trap),
-            "macro_dxy_tailwind": bool(feat_dxy),
-            "macro_yield_tailwind": bool(feat_yield),
-            "trend_ma200": bool(feat_ma200),
-            "trend_ma50": bool(feat_ma50),
-            "rsi_sweet_spot": bool(feat_rsi),
-            "mayer_sweet_spot": bool(feat_mayer),
-            "gsr_undervalued": False,
-            "volatility_orderly": bool(feat_vol),
-            "near_swing_support": bool(feat_near_support)
-        }
+        # Symmetrical Sell Factors
+        sell_dxy = dxy_chg > -0.2
+        sell_yield = tnx_chg > -1.0
+        sell_ma200 = curr < ma200
+        sell_mayer = (mayer > 1.80 or mayer < 0.85)
+        sell_rsi = (rsi <= 48 or rsi >= 70)
+        sell_fg = (fg_val >= 75 or fg_val <= 20)
+        sell_no_trap = trap_state != "BEAR_TRAP"
+        sell_ma50 = curr < ma50
+        sell_vol = vol30 < 75
+        sell_near_res = (sw_high - curr) / curr <= 0.05
+
+        if sell_dxy: score_sell += 1; factors_sell.append("Macro: USD resilient (Headwind for BTC)")
+        if sell_yield: score_sell += 1; factors_sell.append("Macro: Yields firm")
+        if sell_ma200: score_sell += 1; factors_sell.append(f"Trend: Below 200 SMA (${ma200:,.0f})")
+        if sell_mayer: score_sell += 1; factors_sell.append(f"Valuation: Mayer Multiple stretched/weak ({mayer:.2f})")
+        if sell_rsi: score_sell += 1; factors_sell.append(f"Momentum: RSI bearish or overbought ({rsi:.1f})")
+        if sell_near_res: score_sell += 1; factors_sell.append("Level: Testing swing resistance ceiling")
+        if sell_fg: score_sell += 1; factors_sell.append(f"Sentiment: Extreme sentiment exhaustion ({fg_val})")
+        if sell_no_trap: score_sell += 1; factors_sell.append("Microstructure: Clean bear auction; zero Bear Trap")
+        if sell_ma50: score_sell += 1; factors_sell.append("Momentum: Below 50 SMA")
+        if sell_vol: score_sell += 1; factors_sell.append(f"Risk: Volatility tradeable ({vol30:.1f}%)")
 
     else:  # GOLD
+        # Buy Factors
         feat_dxy = dxy_chg <= 0.05
         feat_yield = tnx_chg <= 0.2
         feat_ma200 = curr > ma200
@@ -201,73 +214,105 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
         feat_no_trap = trap_state != "BULL_TRAP"
         feat_near_support = (curr - sw_low) / curr <= 0.05
 
-        if feat_dxy: score += 1; factors.append("Macro: DXY weakness (Gold tailwind)")
-        if feat_yield: score += 1; factors.append("Macro: 10Y Yields easing (Real yield tailwind)")
-        if feat_ma200: score += 1; factors.append(f"Trend: Above 200 SMA (${ma200:,.0f})")
-        if feat_ma50: score += 1; factors.append("Trend: Above 50 SMA")
-        if feat_rsi: score += 1; factors.append(f"Momentum: RSI pullback sweet spot ({rsi:.1f})")
-        if in_golden_pocket: score += 1; factors.append("Level: Resting in Golden Pocket (0.618 Fib)")
-        if feat_gsr: score += 1; factors.append(f"Metals Value: GSR elevated ({gsr:.1f}x)")
-        if feat_vol: score += 1; factors.append(f"Risk: Orderly volatility ({vol30:.1f}%)")
-        if feat_no_trap: score += 1; factors.append("Microstructure: Clean auction; no Bull Trap")
-        if feat_near_support: score += 1; factors.append("Structure: Near major swing support floor")
+        if feat_dxy: score_buy += 1; factors_buy.append("Macro: DXY weakness (Gold tailwind)")
+        if feat_yield: score_buy += 1; factors_buy.append("Macro: 10Y Yields easing (Real yield tailwind)")
+        if feat_ma200: score_buy += 1; factors_buy.append(f"Trend: Above 200 SMA (${ma200:,.0f})")
+        if feat_ma50: score_buy += 1; factors_buy.append("Trend: Above 50 SMA")
+        if feat_rsi: score_buy += 1; factors_buy.append(f"Momentum: RSI pullback sweet spot ({rsi:.1f})")
+        if in_golden_pocket: score_buy += 1; factors_buy.append("Level: Resting in Golden Pocket (0.618 Fib)")
+        if feat_gsr: score_buy += 1; factors_buy.append(f"Metals Value: GSR elevated ({gsr:.1f}x)")
+        if feat_vol: score_buy += 1; factors_buy.append(f"Risk: Orderly volatility ({vol30:.1f}%)")
+        if feat_no_trap: score_buy += 1; factors_buy.append("Microstructure: Clean auction; no Bull Trap")
+        if feat_near_support: score_buy += 1; factors_buy.append("Structure: Near major swing support floor")
 
-        active_features = {
-            "in_golden_pocket": bool(in_golden_pocket),
-            "no_trap": bool(feat_no_trap),
-            "macro_dxy_tailwind": bool(feat_dxy),
-            "macro_yield_tailwind": bool(feat_yield),
-            "trend_ma200": bool(feat_ma200),
-            "trend_ma50": bool(feat_ma50),
-            "rsi_sweet_spot": bool(feat_rsi),
-            "mayer_sweet_spot": False,
-            "gsr_undervalued": bool(feat_gsr),
-            "volatility_orderly": bool(feat_vol),
-            "near_swing_support": bool(feat_near_support)
-        }
+        # Symmetrical Sell Factors
+        sell_dxy = dxy_chg >= -0.05
+        sell_yield = tnx_chg >= -0.2
+        sell_ma200 = curr < ma200
+        sell_ma50 = curr < ma50
+        sell_rsi = (rsi <= 45 or rsi >= 65)
+        sell_gsr = gsr < 75
+        sell_vol = vol30 < 25
+        sell_no_trap = trap_state != "BEAR_TRAP"
+        sell_near_res = (sw_high - curr) / curr <= 0.05
+
+        if sell_dxy: score_sell += 1; factors_sell.append("Macro: DXY firm (Gold headwind)")
+        if sell_yield: score_sell += 1; factors_sell.append("Macro: 10Y Yields firming")
+        if sell_ma200: score_sell += 1; factors_sell.append(f"Trend: Below 200 SMA (${ma200:,.0f})")
+        if sell_ma50: score_sell += 1; factors_sell.append("Trend: Below 50 SMA")
+        if sell_rsi: score_sell += 1; factors_sell.append(f"Momentum: RSI bearish or overbought ({rsi:.1f})")
+        if sell_near_res: score_sell += 1; factors_sell.append("Level: Near major swing resistance ceiling")
+        if sell_gsr: score_sell += 1; factors_sell.append(f"Metals Value: GSR compressed ({gsr:.1f}x)")
+        if sell_vol: score_sell += 1; factors_sell.append(f"Risk: Volatility tradeable ({vol30:.1f}%)")
+        if sell_no_trap: score_sell += 1; factors_sell.append("Microstructure: Clean auction; no Bear Trap")
+        if (sw_high - curr) / curr <= 0.08: score_sell += 1; factors_sell.append("Structure: Distribution near resistance")
+
+    # Select Dominant Direction
+    is_short = score_sell > score_buy
+    score = score_sell if is_short else score_buy
+    factors = factors_sell if is_short else factors_buy
+    side_action = "SELL" if is_short else "BUY"
+
+    active_features = {
+        "in_golden_pocket": bool(in_golden_pocket),
+        "no_trap": bool(sell_no_trap if is_short else feat_no_trap),
+        "macro_dxy_tailwind": bool(sell_dxy if is_short else feat_dxy),
+        "macro_yield_tailwind": bool(sell_yield if is_short else feat_yield),
+        "trend_ma200": bool(sell_ma200 if is_short else feat_ma200),
+        "trend_ma50": bool(sell_ma50 if is_short else feat_ma50),
+        "rsi_sweet_spot": bool(sell_rsi if is_short else feat_rsi),
+        "mayer_sweet_spot": bool(mayer >= 0.85 and mayer <= 1.50) if asset_type == "BTC" else False,
+        "gsr_undervalued": bool(gsr >= 75) if asset_type == "GOLD" else False,
+        "volatility_orderly": True,
+        "near_swing_support": bool(sell_near_res if is_short else feat_near_support)
+    }
 
     # Adaptive Self-Learned Confluence Score
     if LEARNING_AVAILABLE and learning_engine:
-        adaptive_score, breakdown = learning_engine.calculate_score(asset_type, active_features)
+        adaptive_score, breakdown = learning_engine.calculate_score(asset_type, active_features, action=side_action)
     else:
         adaptive_score = float(score)
         breakdown = []
 
-    # Final Execution Verdict (Considers both base score & learned adaptive weights)
     final_score = max(score, int(round(adaptive_score)))
-    at_good_level = in_golden_pocket or feat_near_support
     if final_score >= 9:
-        verdict = "🟢 A+ SETUP (EXECUTE ORDER)"
-        action = "BUY"
+        verdict = f"🟢 A+ {side_action} SETUP (EXECUTE ORDER)"
+        action = side_action
     elif final_score >= 8:
-        verdict = "🟢 A SETUP (EXECUTE ORDER)"
-        action = "BUY"
+        verdict = f"🟢 A {side_action} SETUP (EXECUTE ORDER)"
+        action = side_action
     elif final_score >= 7:
-        verdict = "🟢 SCALP SETUP @ KEY LEVEL (EXECUTE ORDER)"
-        action = "BUY"
+        verdict = f"🟢 SCALP {side_action} @ KEY LEVEL (EXECUTE ORDER)"
+        action = side_action
     else:
         verdict = "🔴 VETOED (WAIT FOR CONFLUENCE)"
         action = "STAND_ASIDE"
 
-    # Small Practical TP & SL Calculation for Profile Execution
+    # Symmetrical TP & SL Calculation for Profile Execution
+    sl_dist = 3.80 if asset_type == "GOLD" else 350.0
     if RISK_ENGINE_AVAILABLE:
         active_strat_code = risk_engine.get_active_strategy()["code"] if hasattr(risk_engine, "get_active_strategy") else "SCALP"
         strat_calc = risk_engine.calculate_strategy_levels(
-            asset_type, curr, atr=vol30, action="BUY", strategy=active_strat_code,
-            levels={"in_golden_pocket": in_golden_pocket, "sw_low": sw_low}
+            asset_type, curr, atr=vol30, action=action if action != "STAND_ASIDE" else side_action,
+            strategy=active_strat_code,
+            levels={"in_golden_pocket": in_golden_pocket, "sw_low": sw_low, "sw_high": sw_high}
         )
         stop_loss = strat_calc["stop_loss"]
         tp1 = strat_calc["tp1"]
         tp2 = strat_calc["tp2"]
     else:
-        sl_dist = 3.80 if asset_type == "GOLD" else 350.0
-        stop_loss = round(curr - sl_dist, 2)
-        tp1 = round(curr + (sl_dist * 1.25), 2)
-        tp2 = round(curr + (sl_dist * 1.85), 2)
+        if side_action == "SELL":
+            stop_loss = round(curr + sl_dist, 2)
+            tp1 = round(curr - (sl_dist * 1.25), 2)
+            tp2 = round(curr - (sl_dist * 1.85), 2)
+        else:
+            stop_loss = round(curr - sl_dist, 2)
+            tp1 = round(curr + (sl_dist * 1.25), 2)
+            tp2 = round(curr + (sl_dist * 1.85), 2)
 
     # Log signal to self-learning journal if actionable
     trade_id = None
-    if action in ("BUY", "BUY_HALF") and LEARNING_AVAILABLE and learning_engine:
+    if action in ("BUY", "SELL", "BUY_HALF", "SELL_HALF") and LEARNING_AVAILABLE and learning_engine:
         trade_id = learning_engine.log_signal(
             asset=asset_type,
             symbol=symbol,

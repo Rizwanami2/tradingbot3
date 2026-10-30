@@ -281,6 +281,16 @@ class SafetyManager:
             if sl_dist and sl_dist > 0 and (spread_val / sl_dist) > 0.15:
                 return False, f"⚠️ High Spread-to-Risk: Spread ${spread_val:.2f} consumes {(spread_val/sl_dist*100):.1f}% of SL distance (${sl_dist:.2f}) > 15% limit."
 
+        # Check 7: High-Impact Macroeconomic News Shield (CPI / NFP / FOMC)
+        now_utc = datetime.now(timezone.utc)
+        if now_utc.weekday() < 5:  # Monday through Friday
+            min_day = now_utc.hour * 60 + now_utc.minute
+            # US Inflation & Employment window: 13:20 - 13:45 UTC
+            # FOMC Rate Decision window: 18:50 - 19:20 UTC
+            is_news_window = (800 <= min_day <= 825) or (1130 <= min_day <= 1160)
+            if is_news_window and spread_val and spread_val > (MAX_ALLOWED_SPREAD.get(asset_key, 0.60) * 0.70):
+                return False, f"📰 High-Impact News Shield ACTIVE: Economic release volatility window in progress (Spread ${spread_val:.2f}). Order blocked to prevent slippage."
+
         return True, "Safety Verification Passed: All Circuit Breakers Armed ✅"
 
     # ── 5. Post-Order Slippage Verification ────────────────────────
@@ -488,8 +498,9 @@ class SafetyManager:
             peak_profit_dist = (peak_price - entry) if is_buy else (entry - peak_price)
             peak_r = peak_profit_dist / initial_risk_dist
 
-            # 5. Breakeven Trigger
-            breakeven_sl = round(entry + spread_buffer if is_buy else entry - spread_buffer, 2)
+            # 5. Breakeven Trigger (BE+ Offset: Minimum +$0.50 Net Profit Guarantee)
+            be_offset = max(0.50, spread_buffer + 0.30) if asset == "GOLD" else max(50.0, spread_buffer + 25.0)
+            breakeven_sl = round(entry + be_offset if is_buy else entry - be_offset, 2)
             needs_be = False
             if is_buy and current_r >= active_be_r and curr_sl < entry:
                 needs_be = True

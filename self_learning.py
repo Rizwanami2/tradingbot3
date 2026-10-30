@@ -787,10 +787,17 @@ class SelfLearningEngine:
             if already_closed: continue
 
             matched_pending = None
+            ext_close_time = ext.get("close_time") or time.time()
             for t in self.memory["trade_journal"]:
-                if t.get("status") == "PENDING" and (str(t.get("ticket")) == t_id or t.get("asset") == ext.get("asset")):
-                    matched_pending = t
-                    break
+                if t.get("status") == "PENDING":
+                    is_exact_ticket = (str(t.get("ticket")) == t_id) if (t.get("ticket") and t_id) else False
+                    sig_time = t.get("timestamp") or 0.0
+                    time_diff = abs(ext_close_time - sig_time)
+                    # Safe match: exact ticket OR matching asset+action within 4-hour window
+                    is_safe_window = (t.get("asset") == ext.get("asset") and t.get("action") == ext.get("action") and time_diff <= 14400)
+                    if is_exact_ticket or (not t.get("ticket") and is_safe_window):
+                        matched_pending = t
+                        break
 
             outcome = ext.get("outcome", "WIN" if ext.get("pnl", 0) > 0 else "LOSS")
             r_mult = ext.get("r_multiple", 1.20 if outcome == "WIN" else -1.0)

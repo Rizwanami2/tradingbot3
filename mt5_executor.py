@@ -37,6 +37,8 @@ except Exception:
     safety_manager = None
 
 
+BOT_MAGIC = 999888  # Institutional Magic Number to isolate Bot from Manual phone trades
+
 # Common symbol variations used across institutional and retail brokers
 GOLD_SYMBOL_CANDIDATES = [
     "XAUUSD", "XAUUSDm", "GOLD", "XAUUSD.a", "XAUUSD.raw", "XAUUSD.ecn",
@@ -60,6 +62,7 @@ class MT5LiveBroker:
         self.last_path = None
         self.position_initial_risks = {}
         self.position_peak_prices = {}
+        self.tracked_live_tickets = {}
 
     def connect(self, login: int = None, password: str = None, server: str = None, path: str = None) -> tuple:
         """
@@ -542,18 +545,54 @@ class MT5LiveBroker:
         if (now_utc.hour == 21 and now_utc.minute >= 50) or (now_utc.hour == 22 and now_utc.minute <= 15):
             return []
 
-        positions = mt5.positions_get()
-        if not positions:
-            self.position_initial_risks.clear()
-            self.position_peak_prices.clear()
-            return []
+        all_positions = mt5.positions_get()
+        if not all_positions:
+            all_positions = []
 
-        # Cleanup closed tickets from tracking dictionaries
+        # Strictly isolate bot positions from user's manual trades
+        positions = [p for p in all_positions if getattr(p, "magic", 0) == BOT_MAGIC]
+
+        events = []
         open_tickets = {p.ticket for p in positions}
+
+        # Detect closed live positions and check deals history for TP_HIT / SL_HIT
         for t in list(self.position_initial_risks.keys()):
             if t not in open_tickets:
                 self.position_initial_risks.pop(t, None)
                 self.position_peak_prices.pop(t, None)
+                meta = self.tracked_live_tickets.pop(t, None) if hasattr(self, "tracked_live_tickets") else None
+                if meta:
+                    try:
+                        deals = mt5.history_deals_get(position=t)
+                        if deals:
+                            close_deal = deals[-1]
+                            pnl = float(sum(getattr(d, "profit", 0.0) for d in deals))
+                            exit_price = float(getattr(close_deal, "price", 0.0))
+                            deal_reason = getattr(close_deal, "reason", 0)
+                            is_win = pnl > 0 or deal_reason == getattr(mt5, "DEAL_REASON_TP", 4)
+                            action_type = "TP_HIT" if is_win else "SL_HIT"
+                            sym = meta.get("symbol", "XAUUSD")
+                            strat = meta.get("strategy", "SCALP")
+                            asset_n = meta.get("asset", "GOLD")
+                            msg = (f"🎯 *[{strat}] TAKE-PROFIT ACHIEVED:* #{t} `{sym}` Target Reached @ `${exit_price:,.2f}` (PnL: `${pnl:+,.2f}` 💰)"
+                                   if is_win else
+                                   f"🛑 *[{strat}] STOP-LOSS HIT:* #{t} `{sym}` Closed @ `${exit_price:,.2f}` (PnL: `${pnl:+,.2f}`)")
+                            events.append({
+                                "ticket": t,
+                                "symbol": sym,
+                                "asset": asset_n,
+                                "type": meta.get("type", "BUY"),
+                                "strategy": strat,
+                                "action": action_type,
+                                "price": exit_price,
+                                "pnl": pnl,
+                                "msg": msg
+                            })
+                    except Exception:
+                        pass
+
+        if not positions:
+            return events
 
         events = []
         for p in positions:
@@ -568,6 +607,9 @@ class MT5LiveBroker:
             digits = sym_info.digits
             point = sym_info.point or (10 ** -digits)
             spread_buffer = max(sym_info.spread * point, 2 * point)
+            is_gold = ("XAU" in symbol.upper() or "GOLD" in symbol.upper())
+            # Break-Even Plus (BE+): Guarantee covering spread, commissions, and min +$0.50 profit
+            be_offset = max(0.50, round(spread_buffer + 0.35, digits)) if is_gold else max(50.0, round(spread_buffer + 25.0, digits))
 
             is_buy = p.type == mt5.ORDER_TYPE_BUY
             curr_price = tick.bid if is_buy else tick.ask
@@ -618,8 +660,19 @@ class MT5LiveBroker:
             peak_profit_dist = (peak_price - entry) if is_buy else (entry - peak_price)
             peak_r = peak_profit_dist / risk_dist
 
-            # ── 2. Strategy-Specific Breakeven Trigger ──
-            breakeven_sl = round(entry + spread_buffer if is_buy else entry - spread_buffer, digits)
+            # ── 2. Strategy-Specific Breakeven Trigger (BE+ Offset) ──
+            breakeven_sl = round(entry + be_offset if is_buy else entry - be_offset, digits)
+            if not hasattr(self, "tracked_live_tickets"):
+                self.tracked_live_tickets = {}
+            self.tracked_live_tickets[ticket] = {
+                "symbol": symbol,
+                "asset": "GOLD" if is_gold else "BTC",
+                "type": "BUY" if is_buy else "SELL",
+                "strategy": strat_name,
+                "entry": entry,
+                "sl": curr_sl,
+                "tp": curr_tp
+            }
             needs_breakeven = False
             if is_buy and current_r >= active_be_r and curr_sl < entry:
                 needs_breakeven = True
@@ -943,7 +996,10 @@ class MT5LiveBroker:
             return False
         symbol = self.resolve_symbol(asset)
         positions = mt5.positions_get(symbol=symbol)
-        return positions is not None and len(positions) > 0
+        if positions is not None and len(positions) > 0:
+            bot_pos = [p for p in positions if getattr(p, "magic", 0) == BOT_MAGIC]
+            return len(bot_pos) > 0
+        return False
 
     def get_live_1m_rates(self, asset: str, count: int = 60):
         """Fetches the latest N 1-minute candles directly from the live broker."""
