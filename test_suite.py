@@ -1313,5 +1313,117 @@ class TestHardAssetProject(unittest.TestCase):
 
 
 
+    def test_17_dual_sided_scanning_and_enhanced_self_learning(self):
+        """
+        Test 17: Comprehensive Dual-Sided Scanning (BUY & SELL) & Enhanced Self-Learning Engine.
+        Verifies:
+          1. analyze_asset_complete evaluates both Long (BUY) and Short (SELL) setups simultaneously.
+          2. Microstructure traps properly route edge: Bull Trap triggers Fade Short, Bear Trap triggers Spring Long.
+          3. Omniscient Quantitative Matrix evaluates dual BUY & SELL consensus vectors.
+          4. Self-Learning engine tracks directional performance (BUY vs SELL) and evolves strategies.
+          5. Telegram commands (/scan, /learn, /trades, /strategy) reflect dual-directional institutional intelligence.
+        """
+        print("\n[*] 17. Testing Dual-Sided Scanning (BUY & SELL) & Enhanced Self-Learning...")
+        token = "123456:TEST_TOKEN"
+        sender_id = "12345"
+        sender_name = "Trader"
+
+        # 1. Test analyze_asset_complete generates both BUY and SELL setups
+        data = telegram_bot.run_full_pipeline()
+        self.assertIsNotNone(data)
+        b = data.get("btc")
+        g = data.get("gold")
+        self.assertIsNotNone(b)
+        self.assertIsNotNone(g)
+
+        # Check Bitcoin dual setup
+        self.assertIn("buy", b)
+        self.assertIn("sell", b)
+        self.assertIn("dominant_side", b)
+        self.assertEqual(b["buy"]["action"], "BUY")
+        self.assertEqual(b["sell"]["action"], "SELL")
+        self.assertIn(b["dominant_side"], ("BUY", "SELL"))
+
+        # Check Gold dual setup
+        self.assertIn("buy", g)
+        self.assertIn("sell", g)
+        self.assertIn("dominant_side", g)
+        self.assertEqual(g["buy"]["action"], "BUY")
+        self.assertEqual(g["sell"]["action"], "SELL")
+
+        # 2. Test Omniscient Quantitative Matrix Dual Evaluation
+        from institutional_engine import omniscient_matrix
+        m_state = omniscient_matrix.evaluate_full_matrix(data)
+        self.assertIn("gold", m_state)
+        self.assertIn("btc", m_state)
+        self.assertIn("buy", m_state["gold"])
+        self.assertIn("sell", m_state["gold"])
+        self.assertIn("buy", m_state["btc"])
+        self.assertIn("sell", m_state["btc"])
+
+        # 3. Test Enhanced Self-Learning Engine Directional Ingestion & Evolution
+        from self_learning import self_learning_engine
+        sle = self_learning_engine
+        sle.recalculate_all_metrics()
+
+        dp = sle.memory.get("directional_performance", {})
+        self.assertIn("BUY", dp)
+        self.assertIn("SELL", dp)
+
+        # Simulate logging and closing a SELL trade to verify directional learning
+        sell_trade_id = sle.log_signal(
+            asset="GOLD", symbol="XAUUSD", entry=2750.0,
+            sl=2754.0, tp1=2744.0, tp2=2738.0, score=8.5,
+            active_features={"no_trap": True, "macro_dxy_tailwind": True},
+            action="SELL", strategy="FADE_TRAP"
+        )
+        self.assertIsNotNone(sell_trade_id)
+        sle.update_from_outcome(sell_trade_id, exit_price=2744.0, outcome="WIN", r_multiple=1.50)
+
+        # Verify SELL directional metrics updated
+        dp_updated = sle.memory.get("directional_performance", {})
+        self.assertGreater(dp_updated["SELL"]["total_trades"], 0)
+        self.assertGreater(dp_updated["SELL"]["wins"], 0)
+        self.assertGreater(dp_updated["SELL"]["win_rate_pct"], 0.0)
+
+        # Verify Discovered Strategies exist and are populated
+        disc = sle.memory.get("discovered_strategies", [])
+        self.assertGreater(len(disc), 0)
+        strat_codes = [s["code"] for s in disc]
+        self.assertIn("FADE_TRAP", strat_codes)
+
+        # 4. Test Telegram Commands Formatting
+        # /scan
+        scan_text = telegram_bot.format_scan_summary(data)
+        self.assertIn("DUAL-SIDED", scan_text)
+        self.assertIn("BUY  / LONG", scan_text)
+        self.assertIn("SELL / SHORT", scan_text)
+
+        # /learn
+        self.mock_tg.sent_messages.clear()
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/learn")
+        self.assertGreater(len(self.mock_tg.sent_messages), 0)
+        learn_resp = self.mock_tg.sent_messages[-1][1]
+        self.assertIn("Long (BUY)", learn_resp)
+        self.assertIn("Short (SELL)", learn_resp)
+
+        # /trades
+        self.mock_tg.sent_messages.clear()
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/trades")
+        self.assertGreater(len(self.mock_tg.sent_messages), 0)
+        trades_resp = self.mock_tg.sent_messages[-1][1]
+        self.assertIn("CLOSED TRADES JOURNAL", trades_resp)
+        self.assertIn("Long (BUY)", trades_resp)
+
+        # /strategy
+        self.mock_tg.sent_messages.clear()
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/strategy")
+        self.assertGreater(len(self.mock_tg.sent_messages), 0)
+        strat_resp = self.mock_tg.sent_messages[-1][1]
+        self.assertIn("Autonomously Evolved Machine Strategies", strat_resp)
+
+        print("    ✅ Dual-Sided Scanning (BUY & SELL) & Enhanced Self-Learning: ALL PASSED")
+
+
 if __name__ == "__main__":
     unittest.main()

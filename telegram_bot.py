@@ -627,16 +627,7 @@ def fetch_macro_context():
 # SKILL 7, 8 & 9: MULTI-FACTOR AUDIT, CONFLUENCE SCORING & RISK SIZING
 # ==============================================================================
 
-def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
-    if MARKET_DATA_AVAILABLE and market_data_feed:
-        hist = market_data_feed.get_historical_bars(asset_type, period="350d", min_bars=30)
-    else:
-        t = yf.Ticker(symbol)
-        hist = t.history(period="350d")
-    if hist.empty or len(hist) < 30:
-        return None
-
-    levels = compute_key_levels(hist)
+def _analyze_single_side(symbol: str, asset_type: str, macro: dict, hist, levels: dict, action: str = "BUY") -> dict:
     curr = levels["curr"]
     ma50 = levels["ma50"]
     ma200 = levels["ma200"]
@@ -657,90 +648,160 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
     # Valuation
     mayer = (curr / ma200) if not np.isnan(ma200) and ma200 > 0 else 1.0
 
-    # 10-Point Hard Asset Confluence Matrix
-    factors_hit = []
-    active_features = {}
-
-    if asset_type == "BTC":
-        feat_dxy = macro["dxy_chg"] < 0.2
-        feat_yield = macro["tnx_chg"] < 1.0
-        feat_trend200 = curr > ma200
-        feat_trend50 = curr > ma50
-        feat_mayer = 0.85 <= mayer <= 1.50
-        feat_rsi = 40 <= rsi <= 65
-        feat_gp = levels["in_golden_pocket"]
-        feat_no_trap = trap_type != "BULL_TRAP"
-        feat_vol = vol30 < 75
-        feat_support = (curr - levels["sw_low"]) / curr <= 0.05
-
-        if feat_dxy: factors_hit.append("Macro: USD tailwind (DXY flat/falling)")
-        if feat_yield: factors_hit.append("Yields: 10Y real yield controlled")
-        if feat_trend200: factors_hit.append(f"Trend: Above 200 SMA (${ma200:,.0f})")
-        if feat_trend50: factors_hit.append("Trend: Above 50 SMA")
-        if feat_mayer: factors_hit.append(f"Valuation: Mayer Multiple healthy ({mayer:.2f}x)")
-        if feat_rsi: factors_hit.append(f"Momentum: RSI sweet spot ({rsi:.1f})")
-        if feat_gp: factors_hit.append("Key Level: Resting in Golden Pocket (0.618 Fib)")
-        if feat_no_trap: factors_hit.append("Auction: Clean auction (no bull trap wicks)")
-        if feat_vol: factors_hit.append(f"Volatility: Orderly ({vol30:.1f}%)")
-        if feat_support: factors_hit.append("Structure: Near major swing support floor")
-
-        active_features = {
-            "in_golden_pocket": bool(feat_gp),
-            "no_trap": bool(feat_no_trap),
-            "macro_dxy_tailwind": bool(feat_dxy),
-            "macro_yield_tailwind": bool(feat_yield),
-            "trend_ma200": bool(feat_trend200),
-            "trend_ma50": bool(feat_trend50),
-            "rsi_sweet_spot": bool(feat_rsi),
-            "mayer_sweet_spot": bool(feat_mayer),
-            "gsr_undervalued": False,
-            "volatility_orderly": bool(feat_vol),
-            "near_swing_support": bool(feat_support)
-        }
-
-    else:  # GOLD
-        feat_dxy = macro["dxy_chg"] <= 0.05
-        feat_yield = macro["tnx_chg"] <= 0.2
-        feat_trend200 = curr > ma200
-        feat_trend50 = curr > ma50
-        feat_rsi = 40 <= rsi <= 60
-        feat_gp = levels["in_golden_pocket"]
-        feat_gsr = macro["gsr"] >= 75
-        feat_no_trap = trap_type != "BULL_TRAP"
-        feat_vol = vol30 < 22
-        feat_support = (curr - levels["sw_low"]) / curr <= 0.05
-
-        if feat_dxy: factors_hit.append("Macro: DXY weakness (Gold tailwind)")
-        if feat_yield: factors_hit.append("Yields: 10Y real yields easing")
-        if feat_trend200: factors_hit.append(f"Trend: Above 200 SMA (${ma200:,.0f})")
-        if feat_trend50: factors_hit.append("Trend: Above 50 SMA")
-        if feat_rsi: factors_hit.append(f"Momentum: RSI pullback sweet spot ({rsi:.1f})")
-        if feat_gp: factors_hit.append("Key Level: Resting in Golden Pocket (0.618 Fib)")
-        if feat_gsr: factors_hit.append(f"Metals Value: GSR elevated ({macro['gsr']:.1f}x)")
-        if feat_no_trap: factors_hit.append("Auction: Zero Bull Trap rejection")
-        if feat_vol: factors_hit.append(f"Volatility: Orderly ({vol30:.1f}%)")
-        if feat_support: factors_hit.append("Structure: Near major swing support floor")
-
-        active_features = {
-            "in_golden_pocket": bool(feat_gp),
-            "no_trap": bool(feat_no_trap),
-            "macro_dxy_tailwind": bool(feat_dxy),
-            "macro_yield_tailwind": bool(feat_yield),
-            "trend_ma200": bool(feat_trend200),
-            "trend_ma50": bool(feat_trend50),
-            "rsi_sweet_spot": bool(feat_rsi),
-            "mayer_sweet_spot": False,
-            "gsr_undervalued": bool(feat_gsr),
-            "volatility_orderly": bool(feat_vol),
-            "near_swing_support": bool(feat_support)
-        }
-
+    # Candle wicks
     curr_bar = hist.iloc[-1]
     c_open, c_high, c_low, c_close = curr_bar["Open"], curr_bar["High"], curr_bar["Low"], curr_bar["Close"]
     c_range = c_high - c_low
     up_wick_pct = ((c_high - max(c_open, c_close)) / c_range * 100) if c_range > 0 else 0.0
     low_wick_pct = ((min(c_open, c_close) - c_low) / c_range * 100) if c_range > 0 else 0.0
     candle_body_pct = ((abs(c_close - c_open)) / c_range * 100) if c_range > 0 else 50.0
+
+    factors_hit = []
+    active_features = {}
+    is_buy = (action.upper() == "BUY")
+
+    if is_buy:
+        if asset_type == "BTC":
+            feat_dxy = macro["dxy_chg"] < 0.2
+            feat_yield = macro["tnx_chg"] < 1.0
+            feat_trend200 = curr > ma200
+            feat_trend50 = curr > ma50
+            feat_mayer = 0.85 <= mayer <= 1.50
+            feat_rsi = 40 <= rsi <= 65
+            feat_gp = levels["in_golden_pocket"]
+            feat_no_trap = trap_type != "BULL_TRAP"
+            feat_vol = vol30 < 75
+            feat_support = (curr - levels["sw_low"]) / curr <= 0.05
+
+            if feat_dxy: factors_hit.append("Macro: USD tailwind (DXY flat/falling)")
+            if feat_yield: factors_hit.append("Yields: 10Y real yield controlled")
+            if feat_trend200: factors_hit.append(f"Trend: Above 200 SMA (${ma200:,.0f})")
+            if feat_trend50: factors_hit.append("Trend: Above 50 SMA")
+            if feat_mayer: factors_hit.append(f"Valuation: Mayer Multiple healthy ({mayer:.2f}x)")
+            if feat_rsi: factors_hit.append(f"Momentum: RSI sweet spot ({rsi:.1f})")
+            if feat_gp: factors_hit.append("Key Level: Resting in Golden Pocket (0.618 Fib)")
+            if feat_no_trap: factors_hit.append("Auction: Clean auction (no bull trap wicks)")
+            if feat_vol: factors_hit.append(f"Volatility: Orderly ({vol30:.1f}%)")
+            if feat_support: factors_hit.append("Structure: Near major swing support floor")
+
+            active_features = {
+                "in_golden_pocket": bool(feat_gp),
+                "no_trap": bool(feat_no_trap),
+                "macro_dxy_tailwind": bool(feat_dxy),
+                "macro_yield_tailwind": bool(feat_yield),
+                "trend_ma200": bool(feat_trend200),
+                "trend_ma50": bool(feat_trend50),
+                "rsi_sweet_spot": bool(feat_rsi),
+                "mayer_sweet_spot": bool(feat_mayer),
+                "gsr_undervalued": False,
+                "volatility_orderly": bool(feat_vol),
+                "near_swing_support": bool(feat_support)
+            }
+        else:  # GOLD BUY
+            feat_dxy = macro["dxy_chg"] <= 0.05
+            feat_yield = macro["tnx_chg"] <= 0.2
+            feat_trend200 = curr > ma200
+            feat_trend50 = curr > ma50
+            feat_rsi = 40 <= rsi <= 60
+            feat_gp = levels["in_golden_pocket"]
+            feat_gsr = macro["gsr"] >= 75
+            feat_no_trap = trap_type != "BULL_TRAP"
+            feat_vol = vol30 < 22
+            feat_support = (curr - levels["sw_low"]) / curr <= 0.05
+
+            if feat_dxy: factors_hit.append("Macro: DXY weakness (Gold tailwind)")
+            if feat_yield: factors_hit.append("Yields: 10Y real yields easing")
+            if feat_trend200: factors_hit.append(f"Trend: Above 200 SMA (${ma200:,.0f})")
+            if feat_trend50: factors_hit.append("Trend: Above 50 SMA")
+            if feat_rsi: factors_hit.append(f"Momentum: RSI pullback sweet spot ({rsi:.1f})")
+            if feat_gp: factors_hit.append("Key Level: Resting in Golden Pocket (0.618 Fib)")
+            if feat_gsr: factors_hit.append(f"Metals Value: GSR elevated ({macro['gsr']:.1f}x)")
+            if feat_no_trap: factors_hit.append("Auction: Zero Bull Trap rejection")
+            if feat_vol: factors_hit.append(f"Volatility: Orderly ({vol30:.1f}%)")
+            if feat_support: factors_hit.append("Structure: Near major swing support floor")
+
+            active_features = {
+                "in_golden_pocket": bool(feat_gp),
+                "no_trap": bool(feat_no_trap),
+                "macro_dxy_tailwind": bool(feat_dxy),
+                "macro_yield_tailwind": bool(feat_yield),
+                "trend_ma200": bool(feat_trend200),
+                "trend_ma50": bool(feat_trend50),
+                "rsi_sweet_spot": bool(feat_rsi),
+                "mayer_sweet_spot": False,
+                "gsr_undervalued": bool(feat_gsr),
+                "volatility_orderly": bool(feat_vol),
+                "near_swing_support": bool(feat_support)
+            }
+    else:  # SELL / SHORT
+        sw_h = levels.get("sw_high", curr)
+        feat_res = ((sw_h - curr) / curr <= 0.05) if curr > 0 else False
+        is_bull_trap = (trap_type in ("BULL_TRAP", "UPTHRUST"))
+        feat_no_bear_trap = (trap_type not in ("BEAR_TRAP", "SPRING"))
+
+        if asset_type == "BTC":
+            feat_dxy = macro["dxy_chg"] >= -0.15
+            feat_yield = macro["tnx_chg"] >= -0.2
+            feat_trend200 = curr < ma200
+            feat_trend50 = curr < ma50
+            feat_mayer = mayer >= 1.50 or mayer < 0.85
+            feat_rsi = 42 <= rsi <= 72
+            feat_vol = vol30 < 75
+
+            if feat_dxy: factors_hit.append("Macro: USD stability/strength (Short tailwind)")
+            if feat_yield: factors_hit.append("Yields: 10Y real yields supportive for Short")
+            if feat_trend200: factors_hit.append(f"Trend: Below 200 SMA (${ma200:,.0f})")
+            if feat_trend50: factors_hit.append("Trend: Below 50 SMA")
+            if feat_mayer: factors_hit.append(f"Valuation: Mayer Multiple overbought/exhausted ({mayer:.2f}x)")
+            if feat_rsi: factors_hit.append(f"Momentum: RSI short sweet spot ({rsi:.1f})")
+            if is_bull_trap: factors_hit.append("Microstructure: Bull Trap at Resistance (Prime Fade Opportunity)")
+            if feat_res: factors_hit.append(f"Structure: Near major swing resistance ceiling (${sw_h:,.0f})")
+            if feat_vol: factors_hit.append(f"Volatility: Orderly ({vol30:.1f}%)")
+
+            active_features = {
+                "in_golden_pocket": False,
+                "no_trap": bool(feat_no_bear_trap),
+                "macro_dxy_tailwind": bool(feat_dxy),
+                "macro_yield_tailwind": bool(feat_yield),
+                "trend_ma200": bool(feat_trend200),
+                "trend_ma50": bool(feat_trend50),
+                "rsi_sweet_spot": bool(feat_rsi),
+                "mayer_sweet_spot": bool(feat_mayer),
+                "gsr_undervalued": False,
+                "volatility_orderly": bool(feat_vol),
+                "near_swing_support": bool(feat_res)
+            }
+        else:  # GOLD SELL
+            feat_dxy = macro["dxy_chg"] >= -0.10
+            feat_yield = macro["tnx_chg"] >= -0.10
+            feat_trend200 = curr < ma200
+            feat_trend50 = curr < ma50
+            feat_rsi = 45 <= rsi <= 70
+            feat_gsr = macro["gsr"] <= 75
+            feat_vol = vol30 < 25
+
+            if feat_dxy: factors_hit.append("Macro: DXY firming (Short tailwind)")
+            if feat_yield: factors_hit.append("Yields: 10Y real yields firm")
+            if feat_trend200: factors_hit.append(f"Trend: Below 200 SMA (${ma200:,.0f})")
+            if feat_trend50: factors_hit.append("Trend: Below 50 SMA")
+            if feat_rsi: factors_hit.append(f"Momentum: RSI overextended ({rsi:.1f})")
+            if is_bull_trap: factors_hit.append("Microstructure: Bull Trap rejection at ceiling (Fade Opportunity)")
+            if feat_res: factors_hit.append(f"Structure: Near major swing resistance ceiling (${sw_h:,.0f})")
+            if feat_vol: factors_hit.append(f"Volatility: Orderly ({vol30:.1f}%)")
+
+            active_features = {
+                "in_golden_pocket": False,
+                "no_trap": bool(feat_no_bear_trap),
+                "macro_dxy_tailwind": bool(feat_dxy),
+                "macro_yield_tailwind": bool(feat_yield),
+                "trend_ma200": bool(feat_trend200),
+                "trend_ma50": bool(feat_trend50),
+                "rsi_sweet_spot": bool(feat_rsi),
+                "mayer_sweet_spot": False,
+                "gsr_undervalued": bool(feat_gsr),
+                "volatility_orderly": bool(feat_vol),
+                "near_swing_support": bool(feat_res)
+            }
 
     acc_data = live_broker.get_live_account_data() if (MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected) else None
     broker_lev = acc_data.get("leverage") if acc_data else None
@@ -753,7 +814,7 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
     htf_bias = institutional_engine.compute_htf_bias(hist, asset_type) if (INSTITUTIONAL_AVAILABLE and institutional_engine) else {
         "bias": "NEUTRAL", "simple_bias": "Neutral", "summary": "⚪ Neutral", "details": ""
     }
-    htf_eval = institutional_engine.evaluate_htf_alignment(htf_bias, action="BUY", strategy=active_strat["code"]) if (INSTITUTIONAL_AVAILABLE and institutional_engine) else {
+    htf_eval = institutional_engine.evaluate_htf_alignment(htf_bias, action=action, strategy=active_strat["code"]) if (INSTITUTIONAL_AVAILABLE and institutional_engine) else {
         "aligned": True, "status": "NEUTRAL", "confluence_delta": 0, "risk_multiplier": 1.0, "veto": False, "display_badge": "⚪ Neutral"
     }
 
@@ -779,46 +840,69 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
             minus_di=minus_di,
             macro=macro,
             swap_info=swap_info,
-            action="BUY"
+            action=action
         )
 
     base_score = len(factors_hit)
     adaptive_score = base_score
     if LEARNING_AVAILABLE and learning_engine:
-        adaptive_score, _ = learning_engine.calculate_score(asset_type, active_features)
+        adaptive_score, _ = learning_engine.calculate_score(asset_type, active_features, action=action)
 
     final_score = max(base_score, int(round(adaptive_score)))
-    is_a_plus = final_score >= 8
+    is_a_plus = (final_score >= 8)
 
-    # Key institutional level detection for Scalp execution
-    sw_low = levels.get("sw_low", 0.0)
-    at_good_level = strat_accuracy.get("at_good_level", False) or \
-                    levels.get("in_golden_pocket", False) or \
-                    (sw_low > 0 and curr > 0 and (curr - sw_low) / curr <= 0.05) or \
-                    (levels.get("ma20_ema") and abs(curr - levels["ma20_ema"]) / curr <= 0.02) or \
-                    (levels.get("s1") and abs(curr - levels["s1"]) / curr <= 0.02)
     is_scalp_strategy = (active_strat["code"] == "SCALP")
-    can_execute_scalp = is_scalp_strategy and (final_score >= 7) and (trap_type != "BULL_TRAP") and not htf_eval.get("veto")
 
-    # VETO conditions: Anti-Trap, HTF Bias & Strategy Accuracy Filters
-    if trap_type == "BULL_TRAP":
-        is_a_plus = False
-        verdict = "🔴 VETOED: Bull Trap at Resistance! Stand Aside or Fade."
-    elif htf_eval.get("veto"):
-        is_a_plus = False
-        verdict = f"🔴 VETOED [HTF BIAS]: {htf_eval['veto_reason']}"
-    elif can_execute_scalp:
-        is_a_plus = True  # Qualified for practical key level scalp execution
-        verdict = f"🟢 SCALP EXECUTION [{active_strat['code']}] (Score: {final_score}/10) - High Probability Execution"
-    elif not strat_accuracy["passed"]:
-        is_a_plus = False
-        verdict = f"🔴 VETOED [{active_strat['code']}]: {strat_accuracy['veto_reasons'][0]}"
-    elif is_a_plus:
-        verdict = f"🟢 A+ SETUP [{active_strat['code']}] (Score: {final_score}/10) - High Probability Execution"
-    elif final_score >= 6:
-        verdict = f"🟡 B SETUP [{active_strat['code']}] (Score: {final_score}/10) - Watchlist / Reduced Size"
-    else:
-        verdict = f"🔴 VETOED (Score: {final_score}/10) - Insufficient Confluence"
+    if is_buy:
+        sw_low = levels.get("sw_low", 0.0)
+        at_good_level = strat_accuracy.get("at_good_level", False) or                         levels.get("in_golden_pocket", False) or                         (sw_low > 0 and curr > 0 and (curr - sw_low) / curr <= 0.05) or                         (levels.get("ma20_ema") and abs(curr - levels["ma20_ema"]) / curr <= 0.02) or                         (levels.get("s1") and abs(curr - levels["s1"]) / curr <= 0.02)
+        can_execute_scalp = is_scalp_strategy and (final_score >= 7) and (trap_type != "BULL_TRAP") and not htf_eval.get("veto")
+
+        if trap_type == "BULL_TRAP":
+            is_a_plus = False
+            verdict = "🔴 VETOED: Bull Trap at Resistance! Stand Aside or Fade."
+        elif htf_eval.get("veto"):
+            is_a_plus = False
+            verdict = f"🔴 VETOED [HTF BIAS]: {htf_eval['veto_reason']}"
+        elif can_execute_scalp:
+            is_a_plus = True
+            verdict = f"🟢 SCALP BUY [{active_strat['code']}] (Score: {final_score}/10) - High Probability Execution"
+        elif not strat_accuracy["passed"]:
+            is_a_plus = False
+            verdict = f"🔴 VETOED [{active_strat['code']}]: {strat_accuracy['veto_reasons'][0]}"
+        elif is_a_plus:
+            verdict = f"🟢 A+ BUY SETUP [{active_strat['code']}] (Score: {final_score}/10) - High Probability Execution"
+        elif final_score >= 6:
+            verdict = f"🟡 B BUY SETUP [{active_strat['code']}] (Score: {final_score}/10) - Watchlist / Reduced Size"
+        else:
+            verdict = f"🔴 VETOED (Score: {final_score}/10) - Insufficient Confluence"
+    else:  # SELL / SHORT
+        sw_high = levels.get("sw_high", 0.0)
+        at_good_res = (sw_high > 0 and curr > 0 and (sw_high - curr) / curr <= 0.05) or                       (levels.get("r1") and abs(curr - levels["r1"]) / curr <= 0.02)
+        is_fade_trap = (trap_type in ("BULL_TRAP", "UPTHRUST")) and (final_score >= 7)
+        can_execute_scalp = is_scalp_strategy and (final_score >= 7) and (trap_type not in ("BEAR_TRAP", "SPRING")) and not htf_eval.get("veto")
+
+        if trap_type in ("BEAR_TRAP", "SPRING"):
+            is_a_plus = False
+            verdict = "🔴 VETOED: Wyckoff Spring at Support! Stand Aside on Shorts."
+        elif is_fade_trap:
+            is_a_plus = True
+            verdict = f"🟢 FADE THE TRAP SHORT [{active_strat['code']}] (Score: {final_score}/10) - High Probability Reversal"
+        elif htf_eval.get("veto"):
+            is_a_plus = False
+            verdict = f"🔴 VETOED [HTF BIAS]: {htf_eval['veto_reason']}"
+        elif can_execute_scalp:
+            is_a_plus = True
+            verdict = f"🟢 SCALP SHORT [{active_strat['code']}] (Score: {final_score}/10) - High Probability Short"
+        elif not strat_accuracy["passed"]:
+            is_a_plus = False
+            verdict = f"🔴 VETOED [{active_strat['code']}]: {strat_accuracy['veto_reasons'][0]}"
+        elif is_a_plus:
+            verdict = f"🟢 A+ SHORT SETUP [{active_strat['code']}] (Score: {final_score}/10) - High Probability Execution"
+        elif final_score >= 6:
+            verdict = f"🟡 B SHORT SETUP [{active_strat['code']}] (Score: {final_score}/10) - Watchlist / Reduced Size"
+        else:
+            verdict = f"🔴 VETOED (Score: {final_score}/10) - Insufficient Confluence"
 
     account_balance, base_risk = get_risk_config()
     target_risk = (base_risk if is_a_plus else (base_risk * 0.5)) * htf_eval.get("risk_multiplier", 1.0)
@@ -826,7 +910,7 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
     # Multi-Strategy Parameter Calculation (SCALP, SWING, BALANCE, SWAP)
     if RISK_ENGINE_AVAILABLE:
         strat_calc = calculate_strategy_levels(
-            asset_type, curr, atr=atr, action="BUY",
+            asset_type, curr, atr=atr, action=action,
             strategy=active_strat["code"],
             account_balance=account_balance, risk_pct=target_risk,
             broker_leverage=broker_lev, margin_free=free_mrg,
@@ -852,9 +936,14 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
         }
     else:
         sl_dist = 4.0 if asset_type == "GOLD" else 350.0
-        stop_loss = round(curr - sl_dist, 2)
-        tp1 = round(curr + (sl_dist * 1.2), 2)
-        tp2 = round(curr + (sl_dist * 2.0), 2)
+        if is_buy:
+            stop_loss = round(curr - sl_dist, 2)
+            tp1 = round(curr + (sl_dist * 1.2), 2)
+            tp2 = round(curr + (sl_dist * 2.0), 2)
+        else:
+            stop_loss = round(curr + sl_dist, 2)
+            tp1 = round(curr - (sl_dist * 1.2), 2)
+            tp2 = round(curr - (sl_dist * 2.0), 2)
         risk_pct = 1.0
         reward_pct = 1.2
         rr = 1.2
@@ -868,10 +957,13 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
             "swap_note": ""
         }
 
-    # ── Neuro-Symbolic Digital Twin Outcome Prediction Gatekeeper ──
+    # Outcome Prediction Gatekeeper
     prediction = None
     if INSTITUTIONAL_AVAILABLE and neuro_predictor:
-        opp_levels = [levels.get("r1"), levels.get("sw_high"), levels.get("fib_382")]
+        if is_buy:
+            opp_levels = [levels.get("r1"), levels.get("sw_high"), levels.get("fib_382")]
+        else:
+            opp_levels = [levels.get("s1"), levels.get("sw_low"), levels.get("fib_618")]
         opp_levels = [float(x) for x in opp_levels if x is not None and not np.isnan(x) and x > 0]
         prediction = neuro_predictor.predict_trade_outcome(
             asset=asset_type,
@@ -881,7 +973,7 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
             atr=atr,
             active_features=active_features,
             opposing_levels=opp_levels,
-            action="BUY",
+            action=action,
             is_scalp=is_scalp_strategy
         )
         if prediction:
@@ -895,6 +987,7 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
     return {
         "asset": asset_type,
         "symbol": symbol,
+        "action": action.upper(),
         "price": curr,
         "levels": levels,
         "htf_bias": htf_bias,
@@ -929,6 +1022,45 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
         "prediction": prediction,
         "hist": hist
     }
+
+
+def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
+    """
+    Institutional Dual-Directional Market Analyzer.
+    Evaluates both BUY (Long) and SELL (Short) setups for the asset simultaneously.
+    Maps top-level fields to the dominant institutional setup for complete backward compatibility.
+    """
+    if MARKET_DATA_AVAILABLE and market_data_feed:
+        hist = market_data_feed.get_historical_bars(asset_type, period="350d", min_bars=30)
+    else:
+        t = yf.Ticker(symbol)
+        hist = t.history(period="350d")
+    if hist.empty or len(hist) < 30:
+        return None
+
+    levels = compute_key_levels(hist)
+
+    buy_setup = _analyze_single_side(symbol, asset_type, macro, hist, levels, action="BUY")
+    sell_setup = _analyze_single_side(symbol, asset_type, macro, hist, levels, action="SELL")
+
+    # Select dominant institutional side
+    if sell_setup["is_a_plus"] and not buy_setup["is_a_plus"]:
+        dominant_side = "SELL"
+    elif buy_setup["is_a_plus"] and not sell_setup["is_a_plus"]:
+        dominant_side = "BUY"
+    elif sell_setup["final_score"] > buy_setup["final_score"]:
+        dominant_side = "SELL"
+    else:
+        dominant_side = "BUY"
+
+    dom = buy_setup if dominant_side == "BUY" else sell_setup
+
+    res = dict(dom)
+    res["buy"] = buy_setup
+    res["sell"] = sell_setup
+    res["dominant_side"] = dominant_side
+    res["action"] = dominant_side
+    return res
 
 
 _last_pipeline_cache = {
@@ -1053,72 +1185,67 @@ def format_scan_summary(data: dict) -> str:
     session_info = get_market_session() if RISK_ENGINE_AVAILABLE else None
     strat = get_active_strategy() if RISK_ENGINE_AVAILABLE else {"name": "Scalp Sniper", "code": "SCALP"}
     session_badge = f"{session_info.get('badge', '🌐')} {session_info.get('name', 'Active')}" if session_info else "Active Market"
-    edge_str = session_info.get('win_rate_edge', 'Normal') if session_info else 'Normal'
 
     gold_buf = learning_engine.get_dynamic_sl_buffer("GOLD") if (LEARNING_AVAILABLE and learning_engine) else 0.0
     btc_buf = learning_engine.get_dynamic_sl_buffer("BTC") if (LEARNING_AVAILABLE and learning_engine) else 0.0
 
-    b_gp_str = f"✅ INSIDE (${b['levels']['fib_650']:,.0f} - ${b['levels']['fib_618']:,.0f})" if b['levels']['in_golden_pocket'] else "Outside GP"
-    g_gp_str = f"✅ INSIDE (${g['levels']['fib_650']:,.0f} - ${g['levels']['fib_618']:,.0f})" if g['levels']['in_golden_pocket'] else "Outside GP"
+    b_buy = b.get("buy", b)
+    b_sell = b.get("sell", b)
+    g_buy = g.get("buy", g)
+    g_sell = g.get("sell", g)
 
     b_pred = b.get("prediction") or {}
     g_pred = g.get("prediction") or {}
 
+    b_dom_act = b.get("dominant_side", "BUY")
+    g_dom_act = g.get("dominant_side", "BUY")
+
     lines = [
-        f"📊 *HARD-ASSET ALL-AGENT MULTI-FACTOR SCAN* ({session_badge})",
+        f"📊 *HARD-ASSET DUAL-SIDED ALL-AGENT SCAN* ({session_badge})",
         f"🌐 *Cross-Asset Flow:* {regime_badge} | Profile: *{strat['name']} ({strat['code']})*",
         "",
-        f"🌐 *Agent 1: Macro & Liquidity Sovereign:*",
+        f"🌐 *Agent 1: Macro & Global Liquidity Sovereign:*",
         f"• DXY: `{m['dxy']:.2f}` ({m['dxy_chg']:+.2f}%) | 10Y Yield: `{m['tnx']:.2f}%`",
         f"• GSR: `{m['gsr']:.1f}x` | VIX: `{m['vix']:.1f}` | F&G: `{m['fg_val']}` ({m['fg_label']})",
         "",
         f"₿ *Bitcoin (BTC-USD):* `${b['price']:,.2f}`",
         f"• Omniscient Index: *{b_mat.get('oci', b['base_score']*10)}/100* {b_mat.get('bar', '')} ──► *{b_mat.get('consensus', 'Approved')}*",
-        f"• HTF Bias: `{b.get('htf_bias', {}).get('summary', 'Neutral')}`",
-        f"• Structural Golden Pocket: {b_gp_str}",
-        f"• Microstructure Sentinel: `{b['trap_type']}` | Body: `{b.get('candle_body_pct', 50):.0f}%`",
-        f"• Predictive Twin: `{b_pred.get('win_probability', 75.0):.1f}% Win` | EV: `{b_pred.get('expected_value_r', 1.2):+.2f}R`",
-        f"• Dynamic Risk & SL Cushion: `+{btc_buf:.2f} ATR` | Score: `{b['base_score']}/10` ──► {b['verdict']}",
+        f"• HTF Bias: `{b.get('htf_bias', {}).get('summary', 'Neutral')}` | Microstructure: `{b['trap_type']}`",
+        f"• 🟢 BUY  / LONG  (Score: `{b_buy['final_score']}/10`): SL `${b_buy['stop_loss']:,.1f}` | TP1 `${b_buy['tp1']:,.1f}` (1:{b_buy['rr']:.1f}R) ──► {b_buy['verdict'][:28]}",
+        f"• 🔴 SELL / SHORT (Score: `{b_sell['final_score']}/10`): SL `${b_sell['stop_loss']:,.1f}` | TP1 `${b_sell['tp1']:,.1f}` (1:{b_sell['rr']:.1f}R) ──► {b_sell['verdict'][:28]}",
+        f"• 🎯 Institutional Stance: *{b_dom_act}* ({b['verdict']})",
+        f"• Predictive Twin: `{b_pred.get('win_probability', 75.0):.1f}% Win` | Dynamic Buffer: `+{btc_buf:.2f} ATR`",
         "",
         f"🥇 *Gold (XAU/USD):* `${g['price']:,.2f}`",
         f"• Omniscient Index: *{g_mat.get('oci', g['base_score']*10)}/100* {g_mat.get('bar', '')} ──► *{g_mat.get('consensus', 'Approved')}*",
-        f"• HTF Bias: `{g.get('htf_bias', {}).get('summary', 'Neutral')}`",
-        f"• Structural Golden Pocket: {g_gp_str}",
-        f"• Microstructure Sentinel: `{g['trap_type']}` | Body: `{g.get('candle_body_pct', 50):.0f}%`",
-        f"• Predictive Twin: `{g_pred.get('win_probability', 75.0):.1f}% Win` | EV: `{g_pred.get('expected_value_r', 1.2):+.2f}R`",
-        f"• Dynamic Risk & SL Cushion: `+{gold_buf:.2f} ATR` | Score: `{g['base_score']}/10` ──► {g['verdict']}",
+        f"• HTF Bias: `{g.get('htf_bias', {}).get('summary', 'Neutral')}` | Microstructure: `{g['trap_type']}`",
+        f"• 🟢 BUY  / LONG  (Score: `{g_buy['final_score']}/10`): SL `${g_buy['stop_loss']:,.2f}` | TP1 `${g_buy['tp1']:,.2f}` (1:{g_buy['rr']:.1f}R) ──► {g_buy['verdict'][:28]}",
+        f"• 🔴 SELL / SHORT (Score: `{g_sell['final_score']}/10`): SL `${g_sell['stop_loss']:,.2f}` | TP1 `${g_sell['tp1']:,.2f}` (1:{g_sell['rr']:.1f}R) ──► {g_sell['verdict'][:28]}",
+        f"• 🎯 Institutional Stance: *{g_dom_act}* ({g['verdict']})",
+        f"• Predictive Twin: `{g_pred.get('win_probability', 75.0):.1f}% Win` | Dynamic Buffer: `+{gold_buf:.2f} ATR`",
         ""
     ]
 
-    if b['is_a_plus']:
-        b_lot = b.get('lot_info', {})
-        b_lot_str = f"{b_lot.get('lots', 0.05)} BTC Lots (${b_lot.get('actual_risk_usd', 100.0):,.0f} risk)"
-        lines.extend([
-            f"⚡ *ACTIONABLE BTC ORDER TICKET:*",
-            f"• Entry Zone: `${b['entry']:,.2f}`",
-            f"• Stop-Loss:  `${b['stop_loss']:,.2f}` (-{b['risk_pct']:.2f}%)",
-            f"• Target 1:   `${b['tp1']:,.2f}` (+{b['reward_pct']:.2f}%)",
-            f"• Target 2:   `${b['tp2']:,.2f}`",
-            f"• Position Size: `{b_lot_str}`",
-            f"• Risk/Reward: 1:{b['rr']:.2f}",
-            ""
-        ])
+    # Render actionable order tickets for any side qualifying with A+ or Scalp
+    for asset_label, item, side_name, is_gold in [("BTC", b_buy, "BUY / LONG", False),
+                                                  ("BTC", b_sell, "SELL / SHORT", False),
+                                                  ("GOLD", g_buy, "BUY / LONG", True),
+                                                  ("GOLD", g_sell, "SELL / SHORT", True)]:
+        if item.get("is_a_plus"):
+            lot_i = item.get("lot_info", {})
+            lot_unit = "Standard Lots" if is_gold else "BTC Lots"
+            lot_str = f"{lot_i.get('lots', 0.05)} {lot_unit} (${lot_i.get('actual_risk_usd', 100.0):,.0f} risk)"
+            lines.extend([
+                f"⚡ *ACTIONABLE {asset_label} ORDER TICKET [{side_name}]:*",
+                f"• Entry Zone: `${item['entry']:,.2f}`",
+                f"• Stop-Loss:  `${item['stop_loss']:,.2f}` (-{item['risk_pct']:.2f}%)",
+                f"• Target 1:   `${item['tp1']:,.2f}` (+{item['reward_pct']:.2f}%)",
+                f"• Target 2:   `${item['tp2']:,.2f}`",
+                f"• Position Size: `{lot_str}`",
+                f"• Risk/Reward: 1:{item['rr']:.2f}",
+                ""
+            ])
 
-    if g['is_a_plus']:
-        g_lot = g.get('lot_info', {})
-        g_lot_str = f"{g_lot.get('lots', 0.05)} Standard Lots (${g_lot.get('actual_risk_usd', 100.0):,.0f} risk)"
-        lines.extend([
-            f"⚡ *ACTIONABLE GOLD ORDER TICKET:*",
-            f"• Entry Zone: `${g['entry']:,.2f}`",
-            f"• Stop-Loss:  `${g['stop_loss']:,.2f}` (-{g['risk_pct']:.2f}%)",
-            f"• Target 1:   `${g['tp1']:,.2f}` (+{g['reward_pct']:.2f}%)",
-            f"• Target 2:   `${g['tp2']:,.2f}`",
-            f"• Position Size: `{g_lot_str}`",
-            f"• Risk/Reward: 1:{g['rr']:.2f}",
-            ""
-        ])
-
-    lines.append("Menu: `/scan`, `/btc`, `/gold`, `/levels`, `/traps`, `/debate`, `/macro`, `/learn`")
     return "\n".join(lines)
 
 
@@ -1725,20 +1852,24 @@ def auto_scanner_worker(token: str, chat_id_getter):
             g = data["gold"]
             current_time = time.time()
 
-            # ── 1. Bitcoin (BTC/USD) Continuous Scanner ──
-            is_scalp_b = (active_strat['code'] == "SCALP" and b['final_score'] >= 7 and b['trap_type'] != "BULL_TRAP")
-            if b['is_a_plus'] or is_scalp_b:
-                if should_send_alert("BTC", "BUY", b['price'], b['final_score'], cooldown_seconds=ALERT_COOLDOWN_SECONDS):
+            # ── 1. Bitcoin (BTC/USD) Continuous Scanner (Dual-Sided: BUY & SELL) ──
+            b_target = b.get("buy") if b.get("dominant_side") == "BUY" else b.get("sell")
+            if not b_target: b_target = b
+            b_act = b_target.get("action", b.get("dominant_side", "BUY"))
+            is_scalp_b = (active_strat['code'] == "SCALP" and b_target['final_score'] >= 7 and not b_target['verdict'].startswith("🔴"))
+            if b_target['is_a_plus'] or is_scalp_b:
+                if should_send_alert("BTC", b_act, b_target['price'], b_target['final_score'], cooldown_seconds=ALERT_COOLDOWN_SECONDS):
                     setup_data = {
                         "asset": "BTC",
-                        "symbol": b['symbol'],
-                        "entry": b['entry'],
-                        "sl": b['stop_loss'],
-                        "tp1": b['tp1'],
-                        "tp2": b['tp2'],
-                        "lots": b['lot_info']['lots'],
-                        "risk_usd": b['lot_info']['actual_risk_usd'],
-                        "score": b['final_score'],
+                        "symbol": b_target['symbol'],
+                        "action": b_act,
+                        "entry": b_target['entry'],
+                        "sl": b_target['stop_loss'],
+                        "tp1": b_target['tp1'],
+                        "tp2": b_target['tp2'],
+                        "lots": b_target['lot_info']['lots'],
+                        "risk_usd": b_target['lot_info']['actual_risk_usd'],
+                        "score": b_target['final_score'],
                         "time": current_time,
                         "strategy": active_strat['code'],
                         "executed": False,
@@ -1770,20 +1901,24 @@ def auto_scanner_worker(token: str, chat_id_getter):
                         ).start()
 
 
-            # ── 2. Gold (XAU/USD) Continuous Scanner ──
-            is_scalp_g = (active_strat['code'] == "SCALP" and g['final_score'] >= 7 and g['trap_type'] != "BULL_TRAP")
-            if g['is_a_plus'] or is_scalp_g:
-                if should_send_alert("GOLD", "BUY", g['price'], g['final_score'], cooldown_seconds=ALERT_COOLDOWN_SECONDS):
+            # ── 2. Gold (XAU/USD) Continuous Scanner (Dual-Sided: BUY & SELL) ──
+            g_target = g.get("buy") if g.get("dominant_side") == "BUY" else g.get("sell")
+            if not g_target: g_target = g
+            g_act = g_target.get("action", g.get("dominant_side", "BUY"))
+            is_scalp_g = (active_strat['code'] == "SCALP" and g_target['final_score'] >= 7 and not g_target['verdict'].startswith("🔴"))
+            if g_target['is_a_plus'] or is_scalp_g:
+                if should_send_alert("GOLD", g_act, g_target['price'], g_target['final_score'], cooldown_seconds=ALERT_COOLDOWN_SECONDS):
                     setup_data = {
                         "asset": "GOLD",
-                        "symbol": g['symbol'],
-                        "entry": g['entry'],
-                        "sl": g['stop_loss'],
-                        "tp1": g['tp1'],
-                        "tp2": g['tp2'],
-                        "lots": g['lot_info']['lots'],
-                        "risk_usd": g['lot_info']['actual_risk_usd'],
-                        "score": g['final_score'],
+                        "symbol": g_target['symbol'],
+                        "action": g_act,
+                        "entry": g_target['entry'],
+                        "sl": g_target['stop_loss'],
+                        "tp1": g_target['tp1'],
+                        "tp2": g_target['tp2'],
+                        "lots": g_target['lot_info']['lots'],
+                        "risk_usd": g_target['lot_info']['actual_risk_usd'],
+                        "score": g_target['final_score'],
                         "time": current_time,
                         "strategy": active_strat['code'],
                         "executed": False,
@@ -2352,6 +2487,17 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
 
         # Default /strategy: comparison table & current state
         curr_s = get_active_strategy()
+        disc_lines = []
+        if LEARNING_AVAILABLE and learning_engine:
+            disc_strats = learning_engine.memory.get("discovered_strategies", [])
+            for ds in disc_strats:
+                disc_lines.append(
+                    f"• 🤖 *{ds.get('name', 'Evolved')}* (`/strategy {ds.get('code', 'SCALP').lower()}`)\n"
+                    f"   Win Rate: `{ds.get('empirical_win_rate', 75.0):.1f}%` | Edge: `{ds.get('expected_r', 1.5):+.2f}R` | SL: `{ds.get('sl_mult', 0.5)}x ATR` | Action: `{ds.get('action', 'DUAL')}`\n"
+                    f"   _{ds.get('description', '')}_"
+                )
+        disc_text = ("\n\n🧠 *Autonomously Evolved Machine Strategies:*\n" + "\n".join(disc_lines)) if disc_lines else ""
+
         table = (
             f"🎯 *MODULAR STRATEGY & PROFILE CONTROLLER*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -2376,7 +2522,8 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             f"   • Profile Risk: `0.75%` | Target Win Rate: `~70-75%`\n"
             f"   • SL: `0.90x ATR` | Targets: `2.0R` with Positive Carry\n"
             f"   • Trail: BE at `+0.50R` | Trail at `+1.00R` (0.45R step)\n"
-            f"   • Accuracy: Positive rollover carry financing side only\n"
+            f"   • Accuracy: Positive rollover carry financing side only"
+            f"{disc_text}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"💡 _Tap an option below to switch profile instantly._"
         )
@@ -2834,9 +2981,21 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
                     learning_engine.sync_all_closed_trades(live_broker=live_broker, safety_manager=safety_manager)
                 except Exception as e:
                     pass
-                trades_card = learning_engine.format_recent_trades_card(limit=3)
+                trades_card = learning_engine.format_recent_trades_card(limit=4)
                 summary = learning_engine.get_summary_text()
-                send_message(token, sender_id, f"{trades_card}\n\n```\n{summary}\n```\n💡 _To retrain on history: `/learn train` | To view full trade journal: `/trades`_")
+                learn_markup = {
+                    "inline_keyboard": [
+                        [
+                            {"text": "🧠 Train 180D (BUY & SELL)", "callback_data": "train_model"},
+                            {"text": "📜 Full Trades Journal", "callback_data": "trades"}
+                        ],
+                        [
+                            {"text": "🎯 Strategy Profiles", "callback_data": "strategy"},
+                            {"text": "🔬 Forensics Council", "callback_data": "forensics"}
+                        ]
+                    ]
+                }
+                send_message(token, sender_id, f"{trades_card}\n\n```\n{summary}\n```\n💡 _To retrain dual-sided walk-forward engine: `/train` | To inspect trade journal: `/trades`_", reply_markup=learn_markup)
             else:
                 send_message(token, sender_id, "⚠️ Self-Learning module not available.")
             return

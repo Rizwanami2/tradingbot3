@@ -690,10 +690,11 @@ class OmniscientQuantitativeMatrix:
         empty = width - filled
         return f"[{'█' * filled}{'░' * empty}]"
 
-    def _eval_macro(self, asset: str, asset_data: Dict[str, Any], macro: Dict[str, Any]) -> Dict[str, Any]:
-        """Agent 1: Macro & Global Liquidity Sovereign."""
+    def _eval_macro(self, asset: str, asset_data: Dict[str, Any], macro: Dict[str, Any], action: str = "BUY") -> Dict[str, Any]:
+        """Agent 1: Macro & Global Liquidity Sovereign (Evaluates both BUY & SELL edge)."""
         score = 75.0
         notes = []
+        is_buy = (action.upper() == "BUY")
         adx = float(asset_data.get("adx", 25.0))
         dxy_chg = float(macro.get("dxy_chg", 0.0))
         tnx_chg = float(macro.get("tnx_chg", 0.0))
@@ -707,29 +708,48 @@ class OmniscientQuantitativeMatrix:
             score += 10.0
             notes.append(f"Strong directional momentum (ADX {adx:.1f} > 25)")
 
-        if dxy_chg < -0.15:
-            score += 10.0
-            notes.append(f"USD weakness tailwind (DXY {dxy_chg:+.2f}%)")
-        elif dxy_chg > 0.25:
-            score -= 15.0
-            notes.append(f"USD surge monetary headwind (DXY {dxy_chg:+.2f}%)")
+        if is_buy:
+            if dxy_chg < -0.15:
+                score += 10.0
+                notes.append(f"USD weakness tailwind (DXY {dxy_chg:+.2f}%)")
+            elif dxy_chg > 0.25:
+                score -= 15.0
+                notes.append(f"USD surge monetary headwind (DXY {dxy_chg:+.2f}%)")
 
-        if tnx_chg < -0.20:
-            score += 10.0
-            notes.append(f"Yield easing tailwind (10Y {tnx_chg:+.2f}%)")
-        elif tnx_chg > 0.50:
-            score -= 10.0
-            notes.append(f"Yield spike drag (10Y {tnx_chg:+.2f}%)")
+            if tnx_chg < -0.20:
+                score += 10.0
+                notes.append(f"Yield easing tailwind (10Y {tnx_chg:+.2f}%)")
+            elif tnx_chg > 0.50:
+                score -= 10.0
+                notes.append(f"Yield spike drag (10Y {tnx_chg:+.2f}%)")
 
-        if asset == "GOLD" and gsr > 80.0:
-            score += 10.0
-            notes.append(f"High GSR ({gsr:.1f}x) monetary undervaluation")
+            if asset == "GOLD" and gsr > 80.0:
+                score += 10.0
+                notes.append(f"High GSR ({gsr:.1f}x) monetary undervaluation")
+        else:  # SELL
+            if dxy_chg > 0.20:
+                score += 15.0
+                notes.append(f"USD surge short tailwind (DXY {dxy_chg:+.2f}%)")
+            elif dxy_chg < -0.20:
+                score -= 10.0
+                notes.append(f"USD drop headwind for shorts (DXY {dxy_chg:+.2f}%)")
+
+            if tnx_chg > 0.30:
+                score += 12.0
+                notes.append(f"Yield surge short tailwind (10Y {tnx_chg:+.2f}%)")
+            elif tnx_chg < -0.30:
+                score -= 10.0
+                notes.append(f"Yield drop headwind for shorts (10Y {tnx_chg:+.2f}%)")
+
+            if asset == "GOLD" and gsr < 70.0:
+                score += 10.0
+                notes.append(f"Low GSR ({gsr:.1f}x) gold relative overvaluation")
 
         if vix < 20.0:
             score += 5.0
             notes.append("Orderly risk environment (VIX < 20)")
         elif vix > 35.0:
-            score -= 15.0
+            score -= 15.0 if is_buy else -5.0
             notes.append(f"High volatility panic (VIX {vix:.1f})")
 
         score = float(np.clip(score, 10.0, 100.0))
@@ -747,33 +767,60 @@ class OmniscientQuantitativeMatrix:
             "details": " | ".join(notes) if notes else "Macro parameters within baseline limits."
         }
 
-    def _eval_structure(self, asset: str, asset_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Agent 2: Structural SMC & Levels Specialist."""
+    def _eval_structure(self, asset: str, asset_data: Dict[str, Any], action: str = "BUY") -> Dict[str, Any]:
+        """Agent 2: Structural SMC & Levels Specialist (Evaluates both BUY & SELL edge)."""
         score = 70.0
         notes = []
+        is_buy = (action.upper() == "BUY")
         htf = str(asset_data.get("htf_bias") or {}).upper()
         levels = asset_data.get("levels") or {}
         price = float(asset_data.get("price", 0.0))
-
-        if "STRONG_BULL" in htf or "GOLDEN STACK" in htf:
-            score += 20.0
-            notes.append("HTF 50/200 EMA Golden Stack alignment")
-        elif "BULL" in htf:
-            score += 10.0
-            notes.append("Bullish market structure alignment")
-        elif "BEAR" in htf:
-            score -= 25.0
-            notes.append("Counter-trend against HTF Bearish stack")
-
-        fib_618 = float(levels.get("fib_618") or 0.0)
-        fib_650 = float(levels.get("fib_650") or 0.0)
         atr = float(asset_data.get("atr", 10.0))
-        if fib_618 > 0 and fib_650 > 0:
-            lower = min(fib_618, fib_650) - (0.5 * atr)
-            upper = max(fib_618, fib_650) + (0.5 * atr)
-            if lower <= price <= upper:
-                score += 15.0
-                notes.append(f"Fibonacci Golden Pocket confluence (${lower:,.1f}-${upper:,.1f})")
+
+        if is_buy:
+            if "STRONG_BULL" in htf or "GOLDEN STACK" in htf:
+                score += 20.0
+                notes.append("HTF 50/200 EMA Golden Stack alignment")
+            elif "BULL" in htf:
+                score += 10.0
+                notes.append("Bullish market structure alignment")
+            elif "BEAR" in htf:
+                score -= 25.0
+                notes.append("Counter-trend against HTF Bearish stack")
+
+            fib_618 = float(levels.get("fib_618") or 0.0)
+            fib_650 = float(levels.get("fib_650") or 0.0)
+            if fib_618 > 0 and fib_650 > 0:
+                lower = min(fib_618, fib_650) - (0.5 * atr)
+                upper = max(fib_618, fib_650) + (0.5 * atr)
+                if lower <= price <= upper:
+                    score += 15.0
+                    notes.append(f"Fibonacci Golden Pocket confluence (${lower:,.1f}-${upper:,.1f})")
+
+            sw_l = float(levels.get("sw_low") or 0.0)
+            if sw_l > 0 and price > 0 and (price - sw_l) / price <= 0.04:
+                score += 10.0
+                notes.append(f"Near swing low support floor (${sw_l:,.1f})")
+        else:  # SELL
+            if "STRONG_BEAR" in htf or "DEATH CROSS" in htf:
+                score += 20.0
+                notes.append("HTF 50/200 EMA Bearish Stack alignment")
+            elif "BEAR" in htf:
+                score += 10.0
+                notes.append("Bearish market structure alignment")
+            elif "BULL" in htf:
+                score -= 20.0
+                notes.append("Counter-trend against HTF Bullish stack")
+
+            sw_h = float(levels.get("sw_high") or 0.0)
+            if sw_h > 0 and price > 0 and (sw_h - price) / price <= 0.04:
+                score += 18.0
+                notes.append(f"At major swing resistance ceiling (${sw_h:,.1f})")
+
+            r1 = float(levels.get("r1") or 0.0)
+            if r1 > 0 and price > 0 and abs(price - r1) <= (1.0 * atr):
+                score += 10.0
+                notes.append(f"Near institutional R1 pivot barrier (${r1:,.1f})")
 
         vpoc = float(levels.get("vpoc") or 0.0)
         if vpoc > 0 and abs(price - vpoc) <= (1.2 * atr):
@@ -795,36 +842,63 @@ class OmniscientQuantitativeMatrix:
             "details": " | ".join(notes) if notes else "Market structure within normal ranges."
         }
 
-    def _eval_microstructure(self, asset: str, asset_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Agent 3: Microstructure & Anti-Trap Sentinel."""
+    def _eval_microstructure(self, asset: str, asset_data: Dict[str, Any], action: str = "BUY") -> Dict[str, Any]:
+        """Agent 3: Microstructure & Anti-Trap Sentinel (Evaluates both BUY & SELL edge)."""
+        is_buy = (action.upper() == "BUY")
         trap_type = str(asset_data.get("trap_type", "NONE")).upper()
         trap_detail = asset_data.get("trap_detail", "")
         candle_body = float(asset_data.get("candle_body_pct", 55.0))
 
-        if trap_type in ("BULL_TRAP", "UPTHRUST"):
-            score = 15.0
-            vote = "VETO"
-            badge = "🔴"
-            headline = "Lethal Bull Trap / Upthrust at resistance (VETO ALL LONGS)"
-            details = f"Rejection wick detected at resistance ({trap_detail}). High probability trap."
-        elif trap_type in ("BEAR_TRAP", "SPRING"):
-            score = 95.0
-            vote = "APPROVE"
-            badge = "🟢"
-            headline = "Wyckoff Bear Trap / Spring confirmed"
-            details = "Long lower wick liquidity grab completed. Prime institutional accumulation trigger."
-        elif candle_body >= 60.0:
-            score = 85.0
-            vote = "APPROVE"
-            badge = "🟢"
-            headline = f"Dominant candle expansion ({candle_body:.0f}% body)"
-            details = "Strong auction momentum with minimal opposing wick friction."
-        else:
-            score = 78.0
-            vote = "APPROVE"
-            badge = "🟢"
-            headline = "Clean auction geometry (Zero retail traps)"
-            details = "Candle geometry and order flow order book orderly."
+        if is_buy:
+            if trap_type in ("BULL_TRAP", "UPTHRUST"):
+                score = 15.0
+                vote = "VETO"
+                badge = "🔴"
+                headline = "Lethal Bull Trap / Upthrust at resistance (VETO ALL LONGS)"
+                details = f"Rejection wick detected at resistance ({trap_detail}). Longs strictly prohibited."
+            elif trap_type in ("BEAR_TRAP", "SPRING"):
+                score = 96.0
+                vote = "APPROVE"
+                badge = "🟢"
+                headline = "Wyckoff Bear Trap / Spring confirmed"
+                details = "Long lower wick liquidity grab completed. Prime institutional accumulation trigger."
+            elif candle_body >= 60.0:
+                score = 85.0
+                vote = "APPROVE"
+                badge = "🟢"
+                headline = f"Dominant bullish expansion ({candle_body:.0f}% body)"
+                details = "Strong auction momentum with minimal opposing upper wick friction."
+            else:
+                score = 78.0
+                vote = "APPROVE"
+                badge = "🟢"
+                headline = "Clean auction geometry (Zero retail traps)"
+                details = "Candle geometry and order flow order book orderly."
+        else:  # SELL
+            if trap_type in ("BULL_TRAP", "UPTHRUST"):
+                score = 96.0
+                vote = "APPROVE"
+                badge = "🟢"
+                headline = "Lethal Bull Trap at resistance (PRIME SHORT FADE)"
+                details = f"Rejection wick detected at resistance ({trap_detail}). High probability trap fade opportunity."
+            elif trap_type in ("BEAR_TRAP", "SPRING"):
+                score = 15.0
+                vote = "VETO"
+                badge = "🔴"
+                headline = "Wyckoff Spring / Bear Trap at support (VETO ALL SHORTS)"
+                details = "Lower wick liquidity grab completed. Shorting into spring absorption strictly prohibited."
+            elif candle_body >= 60.0:
+                score = 85.0
+                vote = "APPROVE"
+                badge = "🟢"
+                headline = f"Dominant bearish breakdown ({candle_body:.0f}% body)"
+                details = "Strong downward auction momentum with minimal opposing lower wick friction."
+            else:
+                score = 76.0
+                vote = "APPROVE"
+                badge = "🟢"
+                headline = "Orderly auction geometry for short positioning"
+                details = "Clean resistance auction with zero aggressive buy absorptions."
 
         return {
             "name": "Microstructure & Anti-Trap Sentinel",
@@ -880,20 +954,26 @@ class OmniscientQuantitativeMatrix:
             "details": " | ".join(notes) if notes else "Bull and Bear theses evenly matched."
         }
 
-    def _eval_neuro_prediction(self, asset: str, asset_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Agent 5: Autonomous Neuro-Symbolic Alpha Predictor."""
-        pred = asset_data.get("prediction")
-        if not pred:
+    def _eval_neuro_prediction(self, asset: str, asset_data: Dict[str, Any], action: str = "BUY") -> Dict[str, Any]:
+        """Agent 5: Autonomous Neuro-Symbolic Alpha Predictor (Evaluates both BUY & SELL edge)."""
+        act_norm = action.upper()
+        # Look for direction-specific prediction if present
+        pred = asset_data.get(f"prediction_{act_norm.lower()}") or asset_data.get("prediction")
+        if not pred or pred.get("action", "BUY").upper() != act_norm:
             price = float(asset_data.get("price", 2700.0 if asset == "GOLD" else 80000.0))
-            sl = float(asset_data.get("stop_loss", price * 0.99))
-            tp = float(asset_data.get("tp1", price * 1.015))
             atr = float(asset_data.get("atr", 20.0))
+            if act_norm == "BUY":
+                sl = float(asset_data.get("stop_loss", price - (0.45 * atr)))
+                tp = float(asset_data.get("tp1", price + (0.65 * atr)))
+            else:
+                sl = float(asset_data.get("stop_loss", price + (0.45 * atr)))
+                tp = float(asset_data.get("tp1", price - (0.65 * atr)))
             levels = asset_data.get("levels") or {}
-            opp = [levels.get("r1"), levels.get("sw_high")]
+            opp = [levels.get("s1"), levels.get("sw_low")] if act_norm == "SELL" else [levels.get("r1"), levels.get("sw_high")]
             opp = [float(x) for x in opp if x is not None and not np.isnan(x) and x > 0]
             pred = neuro_predictor.predict_trade_outcome(
                 asset=asset, current_price=price, sl_price=sl, tp_price=tp,
-                atr=atr, opposing_levels=opp, action="BUY", is_scalp=False
+                atr=atr, opposing_levels=opp, action=act_norm, is_scalp=False
             )
 
         win_prob = float(pred.get("win_probability", 70.0))
@@ -1010,20 +1090,21 @@ class OmniscientQuantitativeMatrix:
     # 2. COMPOSITE ASSET & MATRIX EVALUATION
     # ==========================================================================
 
-    def evaluate_asset(self, asset: str, asset_data: Dict[str, Any], macro: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def evaluate_asset(self, asset: str, asset_data: Dict[str, Any], macro: Optional[Dict[str, Any]] = None, action: str = "BUY") -> Dict[str, Any]:
         """
-        Coordinates all 7 specialized agents on an individual asset,
+        Coordinates all 7 specialized agents on an individual asset for a specific direction (BUY or SELL),
         synthesizing their ballots and scoring into the Omniscient Confluence Index (OCI).
         """
         m_data = macro or {}
         a_norm = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
+        act_norm = action.upper()
 
         agents = {
-            "macro": self._eval_macro(a_norm, asset_data, m_data),
-            "structure": self._eval_structure(a_norm, asset_data),
-            "microstructure": self._eval_microstructure(a_norm, asset_data),
+            "macro": self._eval_macro(a_norm, asset_data, m_data, action=act_norm),
+            "structure": self._eval_structure(a_norm, asset_data, action=act_norm),
+            "microstructure": self._eval_microstructure(a_norm, asset_data, action=act_norm),
             "debate": self._eval_debate(a_norm, asset_data, m_data),
-            "neuro_prediction": self._eval_neuro_prediction(a_norm, asset_data),
+            "neuro_prediction": self._eval_neuro_prediction(a_norm, asset_data, action=act_norm),
             "risk_volatility": self._eval_risk_volatility(a_norm, asset_data),
             "self_learning": self._eval_self_learning(a_norm, asset_data)
         }
@@ -1035,19 +1116,20 @@ class OmniscientQuantitativeMatrix:
         vetoes = sum(1 for a in agents.values() if a["vote"] == "VETO")
 
         has_veto = vetoes > 0
+        direction_label = "BULLISH" if act_norm == "BUY" else "BEARISH"
         if has_veto:
             consensus_str = f"VETOED ({vetoes} Agent Veto{'es' if vetoes > 1 else ''})"
             conviction = "🔴 STAND ASIDE / VETOED"
             is_permitted = False
             verdict_badge = "🔴 VETOED"
         elif approvals == 7:
-            consensus_str = "UNANIMOUS BULLISH (7/7)"
-            conviction = "🟢 A+ SUPREME CONVICTION" if oci >= 85.0 else "🟢 A QUALIFIED CONVICTION"
+            consensus_str = f"UNANIMOUS {direction_label} (7/7)"
+            conviction = f"🟢 A+ SUPREME {direction_label} CONVICTION" if oci >= 85.0 else f"🟢 A QUALIFIED {direction_label} CONVICTION"
             is_permitted = True
             verdict_badge = "🟢 A+ SUPREME"
         elif approvals >= 5:
-            consensus_str = f"STRONG BULLISH ({approvals}/7)"
-            conviction = "🟢 A QUALIFIED CONVICTION" if oci >= 75.0 else "🟡 B SPECULATIVE / SCALP"
+            consensus_str = f"STRONG {direction_label} ({approvals}/7)"
+            conviction = f"🟢 A QUALIFIED {direction_label} CONVICTION" if oci >= 75.0 else "🟡 B SPECULATIVE / SCALP"
             is_permitted = (oci >= 65.0)
             verdict_badge = "🟢 QUALIFIED" if oci >= 75.0 else "🟡 SCALP ONLY"
         else:
@@ -1060,6 +1142,7 @@ class OmniscientQuantitativeMatrix:
 
         return {
             "asset": a_norm,
+            "action": act_norm,
             "symbol": asset_data.get("symbol", "GC=F" if a_norm == "GOLD" else "BTC-USD"),
             "price": float(asset_data.get("price", 0.0)),
             "oci": oci,
@@ -1079,7 +1162,7 @@ class OmniscientQuantitativeMatrix:
 
     def evaluate_full_matrix(self, pipeline_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Synthesizes the complete Omniscient Quantitative Matrix for both Hard Assets.
+        Synthesizes the complete Omniscient Quantitative Matrix for both Hard Assets across BOTH BUY & SELL sides.
         Evaluates cross-asset monetary rotation and updates background cache.
         """
         macro = pipeline_data.get("macro") or {
@@ -1089,8 +1172,24 @@ class OmniscientQuantitativeMatrix:
         b_data = pipeline_data.get("btc") or {"price": 80000.0, "atr": 1200.0, "adx": 25.0}
         g_data = pipeline_data.get("gold") or {"price": 2750.0, "atr": 25.0, "adx": 25.0}
 
-        gold_res = self.evaluate_asset("GOLD", g_data, macro)
-        btc_res = self.evaluate_asset("BTC", b_data, macro)
+        # Dual-Directional Multi-Agent Evaluation
+        gold_buy = self.evaluate_asset("GOLD", g_data, macro, action="BUY")
+        gold_sell = self.evaluate_asset("GOLD", g_data, macro, action="SELL")
+        btc_buy = self.evaluate_asset("BTC", b_data, macro, action="BUY")
+        btc_sell = self.evaluate_asset("BTC", b_data, macro, action="SELL")
+
+        gold_dom = "BUY" if gold_buy["oci"] >= gold_sell["oci"] else "SELL"
+        btc_dom = "BUY" if btc_buy["oci"] >= btc_sell["oci"] else "SELL"
+
+        gold_res = dict(gold_buy if gold_dom == "BUY" else gold_sell)
+        gold_res["buy"] = gold_buy
+        gold_res["sell"] = gold_sell
+        gold_res["dominant_action"] = gold_dom
+
+        btc_res = dict(btc_buy if btc_dom == "BUY" else btc_sell)
+        btc_res["buy"] = btc_buy
+        btc_res["sell"] = btc_sell
+        btc_res["dominant_action"] = btc_dom
 
         g_oci = gold_res["oci"]
         b_oci = btc_res["oci"]
