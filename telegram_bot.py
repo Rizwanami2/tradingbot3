@@ -2157,7 +2157,8 @@ def auto_scanner_worker(token: str, chat_id_getter):
             if LEARNING_AVAILABLE and learning_engine:
                 if (current_time - _last_auto_learning_sync) >= 300:
                     try:
-                        synced_cnt = learning_engine.sync_all_closed_trades(live_broker=live_broker, safety_manager=safety_manager)
+                        synced_res = learning_engine.sync_all_closed_trades(live_broker=live_broker, safety_manager=safety_manager)
+                        synced_cnt = len(synced_res) if isinstance(synced_res, (list, tuple)) else (int(synced_res) if synced_res else 0)
                         learning_engine.recalculate_all_metrics()
                         learning_engine.refine_semantic_knowledge_graph()
                         learning_engine.mine_negative_memory_bank()
@@ -2167,6 +2168,7 @@ def auto_scanner_worker(token: str, chat_id_getter):
                         if synced_cnt > 0:
                             print(f"🧠 [{datetime.now().strftime('%H:%M:%S')}] Autonomous Background Memory: Synced {synced_cnt} closed trades | Weights & Rules Evolved")
                     except Exception as le:
+                        _last_auto_learning_sync = current_time
                         print(f"⚠️ Periodic auto-learning sync error: {le}")
 
         except Exception as scan_err:
@@ -3455,7 +3457,8 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
                 send_message(token, sender_id, "⚠️ Failed to create memory backup.")
             return
         elif subcmd in ("sync", "refresh"):
-            count = learning_engine.sync_all_closed_trades(live_broker=live_broker, safety_manager=safety_manager)
+            raw_synced = learning_engine.sync_all_closed_trades(live_broker=live_broker, safety_manager=safety_manager)
+            count = len(raw_synced) if isinstance(raw_synced, (list, tuple)) else (int(raw_synced) if raw_synced else 0)
             send_message(token, sender_id, f"🔄 *Hierarchical Memory Synchronized!*\n  • Synced `{count}` new closed trades from MT5 broker/paper logs.")
             return
         elif subcmd in ("export", "download"):
