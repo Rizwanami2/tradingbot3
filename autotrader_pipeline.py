@@ -41,6 +41,7 @@ import json
 import time
 import urllib.request
 import ssl
+from typing import Dict, Tuple, Any
 
 # Fix for Windows VPS missing root CA certificates or hosting provider SSL inspection
 try:
@@ -132,12 +133,29 @@ def fetch_fear_greed():
         return 50, "Neutral"
 
 
+# ── Indicator Cache (TTL) to avoid redundant yfinance fetches ──
+_indicator_cache: Dict[str, Tuple[float, Any]] = {}
+_CACHE_TTL_SECONDS = int(os.environ.get("INDICATOR_CACHE_TTL_SECONDS", "30"))
+
+
+def _get_cached_hist(symbol: str, period: str = "350d"):
+    """Fetch historical bars with TTL caching to avoid redundant yfinance calls."""
+    now = time.time()
+    if symbol in _indicator_cache:
+        cached_time, cached_hist = _indicator_cache[symbol]
+        if now - cached_time < _CACHE_TTL_SECONDS:
+            return cached_hist
+    t = yf.Ticker(symbol)
+    hist = t.history(period=period)
+    _indicator_cache[symbol] = (now, hist)
+    return hist
+
+
 def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg: float, gsr: float, fg_val: int):
     if MARKET_DATA_AVAILABLE and market_data_feed:
         hist = market_data_feed.get_historical_bars(asset_type, period="350d", min_bars=30)
     else:
-        t = yf.Ticker(symbol)
-        hist = t.history(period="350d")
+        hist = _get_cached_hist(symbol, period="350d")
     if hist.empty or len(hist) < 30:
         return None
 

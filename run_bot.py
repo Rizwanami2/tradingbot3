@@ -72,7 +72,8 @@ signal.signal(signal.SIGTERM, _signal_handler)
 def main():
     parser = argparse.ArgumentParser(description="tradingbot3 Precision Engine Runner")
     parser.add_argument("--once", action="store_true", help="Run one cycle then exit")
-    parser.add_argument("--interval", type=float, default=60.0, help="Seconds between cycles (default: 60)")
+    parser.add_argument("--interval", type=float, default=5.0, help="Seconds between cycles (default: 5.0 for scalping, use --fast for 1s)")
+    parser.add_argument("--fast", action="store_true", help="Ultra-fast mode: 1s interval for scalping")
     parser.add_argument("--dry-run", action="store_true", help="Validate config only, do not trade")
     args = parser.parse_args()
 
@@ -96,6 +97,11 @@ def main():
             logger.critical("LIVE mode requires LIVE_CONFIRM=CONFIRM in .env. Aborting for safety.")
             sys.exit(1)
         logger.warning("⚠️  LIVE CAPITAL MODE ENABLED — Real orders will be sent to MT5.")
+
+    # Fast mode override
+    if args.fast:
+        args.interval = 1.0
+        logger.warning("⚡ FAST MODE: 1s cycle interval — intended for scalping only")
 
     # Acquire single-instance lock
     if single_instance_lock:
@@ -124,7 +130,7 @@ def main():
         while not _stop_requested.is_set():
             cycle_count += 1
             try:
-                result = orchestrator.run_cycle()
+                result = asyncio.run(orchestrator.async_run_cycle())
                 decision = result.get("decision", "UNKNOWN")
                 logger.info(f"Cycle #{cycle_count}: decision={decision}")
 

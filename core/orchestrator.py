@@ -22,6 +22,7 @@ Decision flow:
 import os
 import sys
 import time
+import asyncio
 import threading
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -302,6 +303,95 @@ class Orchestrator:
                 cycle_record["decision"] = "ERROR"
                 cycle_record["error"] = str(exc)
                 return cycle_record
+
+    async def async_run_cycle(self) -> Dict[str, Any]:
+        """
+        Async decision cycle — runs safety gates and candidate gathering
+        concurrently for reduced latency on scalping timeframes.
+        """
+        with self._lock:
+            if not self.running:
+                return {"decision": "STOPPED", "reason": "Orchestrator not running"}
+            if self.state != self.IDLE:
+                return {"decision": "BUSY", "reason": f"Orchestrator in {self.state} state"}
+
+            self.state = self.EVALUATING
+            self.cycle_count += 1
+            cycle_record: Dict[str, Any] = {
+                "cycle": self.cycle_count,
+                "timestamp": time.time(),
+                "datetime": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "decisions": [],
+            }
+
+        try:
+            # Step 0: Manage existing positions (can run concurrently with gates)
+            mgmt_events = await asyncio.to_thread(self.manage_positions)
+            mgmt_events = mgmt_events or []
+            cycle_record["position_management"] = mgmt_events
+
+            # Step 1: Pull fresh state + run safety gates concurrently
+            async def _refresh_and_gates():
+                bot_state.refresh_from_mt5(self.broker)
+                bot_state.refresh_from_safety_manager()
+                snapshot = bot_state.get_snapshot()
+                gates_results = self._run_safety_gates()
+                return snapshot, gates_results
+
+            # Step 2: Get candidates concurrently with state/gates
+            async def _get_candidates_async():
+                return self._get_candidates()
+
+            # Run state refresh + gates AND candidate gathering in parallel
+            (snapshot, gates_results), candidates = await asyncio.gather(
+                _refresh_and_gates(),
+                _get_candidates_async()
+            )
+
+            cycle_record["state_snapshot"] = snapshot
+            cycle_record["gates"] = gates_results
+            cycle_record["candidates"] = candidates
+
+            if not all(r["pass"] for r in gates_results):
+                failed = [r for r in gates_results if not r["pass"]]
+                reasons = "; ".join(r["reason"] for r in failed)
+                logger.warning(f"Cycle {self.cycle_count}: Gates blocked — {reasons}")
+                self.state = self.IDLE
+                cycle_record["decision"] = "BLOCKED"
+                cycle_record["block_reason"] = reasons
+                return cycle_record
+
+            if not candidates:
+                logger.info(f"Cycle {self.cycle_count}: No actionable candidates")
+                self.state = self.IDLE
+                cycle_record["decision"] = "SKIP"
+                cycle_record["skip_reason"] = "No candidates"
+                return cycle_record
+
+            # Step 4: Evaluate each candidate sequentially (evaluation is CPU-bound)
+            for candidate in candidates:
+                decision = await asyncio.to_thread(self._evaluate_candidate, candidate, snapshot)
+                cycle_record["decisions"].append(decision)
+
+                if decision["action"] in ("BUY", "SELL"):
+                    exec_result = await asyncio.to_thread(self._execute_decision, decision)
+                    decision["execution"] = exec_result
+                    if exec_result.get("success"):
+                        logger.info(f"EXECUTED: {decision['side']} {decision['asset']} @ ${decision['entry']:,.2f}")
+                    else:
+                        logger.warning(f"Execution rejected: {exec_result.get('error')}")
+
+            self.last_decision = cycle_record["decisions"][-1] if cycle_record["decisions"] else None
+            self.state = self.IDLE
+            cycle_record["decision"] = "COMPLETED"
+            return cycle_record
+
+        except Exception as exc:
+            logger.critical(f"Orchestrator async cycle error: {exc}", exc_info=True)
+            self.state = self.IDLE
+            cycle_record["decision"] = "ERROR"
+            cycle_record["error"] = str(exc)
+            return cycle_record
 
     def _run_safety_gates(self) -> List[Dict[str, Any]]:
         """Run all safety gates and return results."""
