@@ -84,6 +84,8 @@ class MT5LiveBroker:
         self.position_initial_risks = {}
         self.position_peak_prices = {}
         self.tracked_live_tickets = {}
+        self.position_partial_tp_closed = {}
+        self.pending_orders = {}
         # Exponential backoff parameters (2s up to 60s)
         self.reconnect_delay = 2.0
         self.max_reconnect_delay = 60.0
@@ -966,6 +968,211 @@ class MT5LiveBroker:
                             "msg": f"📈 *[{strat_name}] TRAILING ADVANCED:* #{ticket} `{symbol}` SL trailed to `${trailing_sl:,.2f}` (+{current_r:.2f}R — Profit Secured!)"
                         })
 
+        return events
+
+
+    def execute_live_limit_order(self, asset: str, action: str,
+                                 limit_price: float, stop_loss: float,
+                                 take_profit: float, lot_size: float,
+                                 zone: tuple = None, expiry_minutes: int = 35,
+                                 comment: str = "GoldBTC-Limit") -> dict:
+        """
+        Places a limit order inside the Golden Pocket or confluence zone.
+        Supports both Paper Simulation and Live MT5 Broker.
+        """
+        current_mode = safety_manager.get_trading_mode() if safety_manager else "LIVE"
+        asset_key = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
+        is_buy = action.upper() in ("BUY", "BUY_LIMIT", "LONG")
+
+        if current_mode == "PAPER" and safety_manager:
+            return safety_manager.execute_paper_limit_order(
+                asset=asset_key, action=action, limit_price=limit_price,
+                stop_loss=stop_loss, tp1=take_profit, tp2=take_profit,
+                lots=lot_size, zone=zone, expiry_minutes=expiry_minutes,
+                comment=comment
+            )
+
+        if not self.ensure_connected():
+            return {"success": False, "error": "MT5 is disconnected."}
+
+        symbol = self.resolve_symbol(asset_key)
+        sym_info = mt5.symbol_info(symbol)
+        if not sym_info:
+            return {"success": False, "error": f"Symbol '{symbol}' not recognized by broker."}
+
+        tick = mt5.symbol_info_tick(symbol)
+        if not tick:
+            return {"success": False, "error": f"Failed to get price tick for {symbol}"}
+
+        digits = sym_info.digits
+        point = sym_info.point or (10 ** -digits)
+        spread_pts = (tick.ask - tick.bid)
+        max_spread_pips = float(os.environ.get("MAX_SPREAD_PIPS", "30"))
+        pip_size = (point * 10) if digits in (3, 5) else point
+        current_spread_pips = (spread_pts / pip_size) if pip_size > 0 else 0.0
+
+        if current_spread_pips > max_spread_pips:
+            msg = f"Spread Guard REJECTED: Current spread {current_spread_pips:.1f} pips > max {max_spread_pips:.1f} pips."
+            logger.warning(msg)
+            return {"success": False, "error": msg}
+
+        # Lot Normalization Gate
+        broker_min_lot = sym_info.volume_min or 0.01
+        step_lot = sym_info.volume_step or 0.01
+        steps = math.floor(round(lot_size / step_lot, 6)) if step_lot > 0 else 1
+        aligned_lot = steps * step_lot
+        step_decimals = max(0, -int(math.floor(math.log10(step_lot)))) if (0 < step_lot < 1) else 2
+        aligned_lot = round(aligned_lot, step_decimals)
+        if aligned_lot < broker_min_lot:
+            return {"success": False, "error": f"Lot {aligned_lot} < min {broker_min_lot}"}
+
+        # Margin Check (25% buffer)
+        acc = mt5.account_info()
+        if acc:
+            req_margin = mt5.order_calc_margin(
+                mt5.ORDER_TYPE_BUY_LIMIT if is_buy else mt5.ORDER_TYPE_SELL_LIMIT,
+                symbol, aligned_lot, limit_price
+            )
+            if req_margin is not None and (req_margin * 1.25) > acc.margin_free:
+                msg = f"Margin Check REJECTED: Required margin ${req_margin:,.2f} (+25% buffer) > free margin ${acc.margin_free:,.2f}."
+                logger.warning(msg)
+                return {"success": False, "error": msg}
+
+        aligned_limit = round(limit_price, digits)
+        aligned_sl = round(stop_loss, digits)
+        aligned_tp = round(take_profit, digits)
+        if is_buy:
+            if not (aligned_sl < aligned_limit < aligned_tp):
+                logger.warning(f"Inverted SL/TP for Limit BUY on {symbol}. Correcting.")
+                dist = abs(aligned_limit - aligned_sl)
+                aligned_sl = round(aligned_limit - dist, digits)
+                aligned_tp = round(aligned_limit + (dist * 1.5), digits)
+        else:
+            if not (aligned_tp < aligned_limit < aligned_sl):
+                logger.warning(f"Inverted SL/TP for Limit SELL on {symbol}. Correcting.")
+                dist = abs(aligned_limit - aligned_sl)
+                aligned_sl = round(aligned_limit + dist, digits)
+                aligned_tp = round(aligned_limit - (dist * 1.5), digits)
+
+        order_type = mt5.ORDER_TYPE_BUY_LIMIT if is_buy else mt5.ORDER_TYPE_SELL_LIMIT
+        expiration_time = int(time.time() + (expiry_minutes * 60))
+
+        req = {
+            "action": mt5.TRADE_ACTION_PENDING,
+            "symbol": symbol,
+            "volume": aligned_lot,
+            "type": order_type,
+            "price": aligned_limit,
+            "sl": aligned_sl,
+            "tp": aligned_tp,
+            "magic": BOT_MAGIC,
+            "comment": comment,
+            "type_time": mt5.ORDER_TIME_SPECIFIED,
+            "expiration": expiration_time,
+            "type_filling": mt5.ORDER_FILLING_IOC
+        }
+        res = mt5.order_send(req)
+        if res is None or res.retcode != mt5.TRADE_RETCODE_DONE:
+            for filling in [mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN]:
+                req["type_filling"] = filling
+                res = mt5.order_send(req)
+                if res is not None and res.retcode == mt5.TRADE_RETCODE_DONE:
+                    break
+
+        if res is not None and res.retcode == mt5.TRADE_RETCODE_DONE:
+            order_ticket = res.order
+            logger.info(f"Placed MT5 Limit Order #{order_ticket} on {symbol} @ ${aligned_limit:,.2f}")
+            return {
+                "success": True,
+                "ticket": order_ticket,
+                "symbol": symbol,
+                "asset": asset_key,
+                "action": "BUY_LIMIT" if is_buy else "SELL_LIMIT",
+                "limit_price": aligned_limit,
+                "sl": aligned_sl,
+                "tp": aligned_tp,
+                "volume": aligned_lot,
+                "mode": "LIVE"
+            }
+        err_msg = getattr(res, "comment", "Unknown order placement error")
+        return {"success": False, "error": f"MT5 Limit Order Failed: {err_msg} (retcode: {getattr(res, 'retcode', 'N/A')})"}
+
+    def get_pending_orders(self) -> list:
+        """Returns all pending limit orders (Paper or Live MT5)."""
+        mode = safety_manager.get_trading_mode() if safety_manager else "LIVE"
+        if mode == "PAPER" and safety_manager:
+            return safety_manager.get_paper_pending_orders()
+
+        if not self.ensure_connected():
+            return []
+        orders = mt5.orders_get()
+        if not orders:
+            return []
+        bot_orders = [o for o in orders if getattr(o, "magic", 0) == BOT_MAGIC]
+        res = []
+        for o in bot_orders:
+            res.append({
+                "ticket": o.ticket,
+                "symbol": o.symbol,
+                "type": o.type,
+                "price_open": o.price_open,
+                "sl": o.sl,
+                "tp": o.tp,
+                "volume_current": o.volume_current,
+                "time_expiration": getattr(o, "time_expiration", 0)
+            })
+        return res
+
+    def cancel_pending_order(self, ticket: str | int, reason: str = "MANUAL_CANCEL") -> dict:
+        """Cancels a pending order."""
+        str_ticket = str(ticket)
+        mode = safety_manager.get_trading_mode() if safety_manager else "LIVE"
+        if str_ticket.startswith("PAPER-") or mode == "PAPER":
+            if safety_manager:
+                return safety_manager.cancel_paper_pending_order(str_ticket, reason=reason)
+            return {"success": False, "error": "Safety manager unavailable."}
+
+        if not self.ensure_connected():
+            return {"success": False, "error": "MT5 is disconnected."}
+        try:
+            num_ticket = int(str_ticket)
+        except ValueError:
+            return {"success": False, "error": f"Invalid ticket {ticket}"}
+
+        req = {
+            "action": mt5.TRADE_ACTION_REMOVE,
+            "order": num_ticket
+        }
+        res = mt5.order_send(req)
+        if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+            logger.info(f"Cancelled MT5 pending order #{num_ticket} (Reason: {reason})")
+            return {"success": True, "ticket": num_ticket, "reason": reason}
+        return {"success": False, "error": f"Failed to cancel order #{num_ticket}: {getattr(res, 'comment', 'Unknown')}"}
+
+    def manage_pending_orders(self, current_prices: dict = None, trap_states: dict = None) -> list:
+        """Checks fills, expirations, and trap invalidations for pending orders."""
+        mode = safety_manager.get_trading_mode() if safety_manager else "LIVE"
+        if mode == "PAPER" and safety_manager:
+            prices = dict(current_prices) if current_prices else {}
+            return safety_manager.check_and_update_pending_orders(prices, trap_states=trap_states)
+
+        events = []
+        if not self.ensure_connected():
+            return events
+        orders = self.get_pending_orders()
+        for o in orders:
+            sym = o.get("symbol", "")
+            asset = "GOLD" if ("XAU" in sym or "GOLD" in sym) else "BTC"
+            trap = (trap_states or {}).get(asset, "CLEAN")
+            is_buy = o.get("type") == getattr(mt5, "ORDER_TYPE_BUY_LIMIT", 2)
+            if is_buy and trap == "BULL_TRAP":
+                c_res = self.cancel_pending_order(o["ticket"], reason="INVALIDATED_BULL_TRAP")
+                if c_res.get("success"):
+                    events.append({"ticket": o["ticket"], "action": "INVALIDATED", "msg": f"⚠️ MT5 BUY Limit #{o['ticket']} cancelled due to Bull Trap."})
+            elif (not is_buy) and trap == "BEAR_TRAP":
+                c_res = self.cancel_pending_order(o["ticket"], reason="INVALIDATED_BEAR_TRAP")
+                if c_res.get("success"):
+                    events.append({"ticket": o["ticket"], "action": "INVALIDATED", "msg": f"⚠️ MT5 SELL Limit #{o['ticket']} cancelled due to Bear Trap."})
         return events
 
     def get_open_positions(self) -> list:

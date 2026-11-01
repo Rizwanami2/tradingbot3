@@ -693,6 +693,204 @@ class SafetyManager:
                     })
 
         return events
+
+    def execute_paper_limit_order(self, asset: str, action: str, limit_price: float,
+                                  stop_loss: float, tp1: float, tp2: float, lots: float,
+                                  zone: tuple = None, expiry_minutes: int = 35,
+                                  comment: str = "Limit-Zone") -> dict:
+        """
+        Places a pending limit order inside the Golden Pocket or key S/R zone.
+        Tracks ticket, zone, and expiry.
+        """
+        asset_norm = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
+        is_buy = action.upper() in ("BUY", "BUY_LIMIT", "LONG")
+        is_gold = asset_norm == "GOLD"
+
+        # Margin check with 25% buffer
+        paper_bal = self.state.get("paper_account", {}).get("balance", 10000.0)
+        contract_size = 100.0 if is_gold else 1.0
+        req_margin = (contract_size * lots * limit_price) / 100.0
+        if (req_margin * 1.25) > paper_bal:
+            msg = f"Margin Check REJECTED: Limit order required margin ${req_margin:,.2f} (+25% buffer) exceeds balance ${paper_bal:,.2f}."
+            logger.warning(msg)
+            return {"success": False, "error": msg}
+
+        # Validate SL/TP side directionality
+        sl_dist = abs(limit_price - stop_loss) if (limit_price > 0 and stop_loss > 0) else (3.80 if is_gold else 350.0)
+        tp_dist = abs(tp1 - limit_price) if (limit_price > 0 and tp1 > 0) else (sl_dist * 1.25)
+        if is_buy:
+            if not (stop_loss < limit_price < tp1):
+                logger.warning(f"Inverted SL/TP for Limit BUY on {asset_norm}. Auto-correcting.")
+                stop_loss = round(limit_price - sl_dist, 2)
+                tp1 = round(limit_price + tp_dist, 2)
+                tp2 = round(limit_price + (tp_dist * 1.5), 2)
+        else:
+            if not (tp1 < limit_price < stop_loss):
+                logger.warning(f"Inverted SL/TP for Limit SELL on {asset_norm}. Auto-correcting.")
+                stop_loss = round(limit_price + sl_dist, 2)
+                tp1 = round(limit_price - tp_dist, 2)
+                tp2 = round(limit_price - (tp_dist * 1.5), 2)
+
+        ticket = f"PAPER-LMT-{int(time.time()*100) % 10000000}"
+        expiry_ts = time.time() + (expiry_minutes * 60)
+        order_record = {
+            "ticket": ticket,
+            "mode": "PAPER",
+            "asset": asset_norm,
+            "symbol": "XAUUSD" if is_gold else "BTCUSD",
+            "action": "BUY_LIMIT" if is_buy else "SELL_LIMIT",
+            "limit_price": round(limit_price, 2),
+            "stop_loss": round(stop_loss, 2),
+            "tp1": round(tp1, 2),
+            "tp2": round(tp2, 2),
+            "lots": round(lots, 2),
+            "zone": [round(zone[0], 2), round(zone[1], 2)] if zone and len(zone) >= 2 else [round(limit_price, 2), round(limit_price, 2)],
+            "placed_at": datetime.now(timezone.utc).isoformat(),
+            "expiry_ts": expiry_ts,
+            "status": "PENDING",
+            "comment": comment
+        }
+
+        self.state.setdefault("paper_account", {}).setdefault("pending_orders", []).append(order_record)
+        self.save_state()
+
+        self.log_order_audit({
+            "event": "LIMIT_ORDER_PLACED",
+            "ticket": ticket,
+            "asset": asset_norm,
+            "action": order_record["action"],
+            "limit_price": limit_price,
+            "stop_loss": stop_loss,
+            "tp1": tp1,
+            "lots": lots,
+            "expiry_minutes": expiry_minutes,
+            "zone": order_record["zone"]
+        })
+        logger.info(f"Placed Limit Order #{ticket} {order_record['action']} @ ${limit_price:,.2f} on {asset_norm} (Expires in {expiry_minutes}m)")
+        return {"success": True, "ticket": ticket, "status": "PENDING", "limit_price": limit_price, "order": order_record}
+
+    def get_paper_pending_orders(self) -> list:
+        """Returns all pending paper limit orders."""
+        return self.state.get("paper_account", {}).get("pending_orders", [])
+
+    def cancel_paper_pending_order(self, ticket: str, reason: str = "MANUAL_CANCEL") -> dict:
+        """Cancels a pending paper limit order."""
+        orders = self.state.get("paper_account", {}).get("pending_orders", [])
+        for i, o in enumerate(orders):
+            if str(o.get("ticket")) == str(ticket):
+                removed = orders.pop(i)
+                self.save_state()
+                self.log_order_audit({
+                    "event": "LIMIT_ORDER_CANCELLED",
+                    "ticket": ticket,
+                    "reason": reason,
+                    "limit_price": removed.get("limit_price")
+                })
+                logger.info(f"Cancelled Pending Order #{ticket} (Reason: {reason})")
+                return {"success": True, "ticket": ticket, "reason": reason}
+        return {"success": False, "error": f"Pending order #{ticket} not found."}
+
+    def check_and_update_pending_orders(self, current_prices: dict, trap_states: dict = None) -> list:
+        """
+        Manages pending limit orders: checks fills, invalidations (bull/bear trap), and expirations.
+        """
+        orders = list(self.state.get("paper_account", {}).get("pending_orders", []))
+        if not orders:
+            return []
+
+        now_ts = time.time()
+        events = []
+        for o in orders:
+            ticket = o.get("ticket")
+            asset = o.get("asset", "GOLD")
+            symbol = o.get("symbol", "XAUUSD")
+            curr_p = current_prices.get(asset) or current_prices.get(symbol) or current_prices.get(asset.lower())
+            is_buy = "BUY" in o.get("action", "")
+
+            # 1. Expiration Check
+            if now_ts >= o.get("expiry_ts", 0):
+                self.cancel_paper_pending_order(ticket, reason="EXPIRED")
+                events.append({"ticket": ticket, "action": "EXPIRED", "msg": f"⏳ Pending limit order #{ticket} on {asset} EXPIRED."})
+                continue
+
+            # 2. Trap Invalidation Check
+            trap = (trap_states or {}).get(asset, "CLEAN")
+            if is_buy and trap == "BULL_TRAP":
+                self.cancel_paper_pending_order(ticket, reason="INVALIDATED_BULL_TRAP")
+                events.append({"ticket": ticket, "action": "INVALIDATED", "msg": f"⚠️ Pending BUY limit #{ticket} cancelled due to Bull Trap invalidation."})
+                continue
+            elif (not is_buy) and trap == "BEAR_TRAP":
+                self.cancel_paper_pending_order(ticket, reason="INVALIDATED_BEAR_TRAP")
+                events.append({"ticket": ticket, "action": "INVALIDATED", "msg": f"⚠️ Pending SELL limit #{ticket} cancelled due to Bear Trap invalidation."})
+                continue
+
+            # 3. Execution (Fill) Check
+            if curr_p and curr_p > 0:
+                lmt = o.get("limit_price", 0.0)
+                fill_condition = (is_buy and curr_p <= lmt) or ((not is_buy) and curr_p >= lmt)
+                if fill_condition:
+                    # Remove from pending and execute as active paper position
+                    self.cancel_paper_pending_order(ticket, reason="FILLED")
+                    exec_res = self.execute_paper_order(
+                        asset=asset,
+                        action="BUY" if is_buy else "SELL",
+                        price=lmt,
+                        stop_loss=o.get("stop_loss"),
+                        tp1=o.get("tp1"),
+                        tp2=o.get("tp2"),
+                        lots=o.get("lots", 0.05),
+                        risk_usd=50.0,
+                        risk_pct=0.5,
+                        strategy="SCALP",
+                        comment=f"LIMIT-FILL-#{ticket}"
+                    )
+                    events.append({
+                        "ticket": ticket,
+                        "action": "FILLED",
+                        "fill_price": lmt,
+                        "position_ticket": exec_res.get("ticket"),
+                        "msg": f"⚡ Pending limit #{ticket} FILLED at ${lmt:,.2f} on {asset}! Position #{exec_res.get('ticket')} active."
+                    })
+        return events
+
+    def close_paper_position_partial(self, ticket: str, fraction: float = 0.50,
+                                     exit_price: float = None, reason: str = "PARTIAL_TP") -> dict:
+        """
+        Closes a partial fraction (e.g. 50%) of an active paper position.
+        """
+        str_ticket = str(ticket)
+        positions = self.state.get("paper_account", {}).get("positions", [])
+        for p in positions:
+            if str(p.get("ticket")) == str_ticket:
+                curr_lots = p.get("lots", 0.05)
+                close_lots = round(curr_lots * fraction, 2)
+                rem_lots = round(curr_lots - close_lots, 2)
+                if close_lots <= 0.0 or rem_lots <= 0.0:
+                    return self.close_paper_position(str_ticket, exit_price=exit_price or p.get("open_price"), reason=reason)
+
+                p["lots"] = rem_lots
+                asset_key = p.get("asset", "GOLD")
+                mult = 100.0 if asset_key == "GOLD" else 1.0
+                price = exit_price or p.get("open_price", 0.0)
+                is_buy = p.get("action") == "BUY"
+                pnl = round(((price - p["open_price"]) if is_buy else (p["open_price"] - price)) * close_lots * mult, 2)
+
+                self.record_pnl(pnl)
+                self.save_state()
+                self.log_order_audit({
+                    "event": "PARTIAL_CLOSE_PAPER",
+                    "ticket": str_ticket,
+                    "asset": asset_key,
+                    "closed_lots": close_lots,
+                    "remaining_lots": rem_lots,
+                    "pnl_usd": pnl,
+                    "exit_price": price,
+                    "reason": reason
+                })
+                logger.info(f"Partial Close #{str_ticket}: Closed {close_lots} lots, remaining {rem_lots} lots, PnL: ${pnl:+,.2f}")
+                return {"success": True, "ticket": str_ticket, "partial_lots": close_lots, "closed_lots": close_lots, "remaining_lots": rem_lots, "pnl": pnl}
+        return {"success": False, "error": f"Paper position #{ticket} not found for partial close."}
+
     def get_closed_paper_positions(self, limit: int = 30) -> list:
         history = self.state.get("paper_account", {}).get("closed_history", [])
         return history[-limit:] if history else []
@@ -1681,3 +1879,39 @@ if __name__ == "__main__":
         gold_data={"entry": 2_740.0, "stop_loss": 2_722.0},
         win_rate=0.55
     ))
+
+
+def get_regime_risk_pct(regime: str) -> float:
+    """
+    Returns dynamically scaled risk % based on market regime.
+    Scale:
+      - TREND_EXPANSION: 0.8% - 1.0% (default 0.8%)
+      - CHOP_CONSOLIDATION: 0.4% - 0.6% (default 0.5%)
+      - VOLATILITY_SHOCK: 0.25% - 0.5% (default 0.35%)
+    Respects MAX_RISK_PER_TRADE_PCT and MAX_TOTAL_OPEN_RISK_PCT.
+    """
+    try:
+        risk_trend = float(os.environ.get("TRADE_RISK_TREND", "0.8"))
+    except Exception:
+        risk_trend = 0.8
+    try:
+        risk_chop = float(os.environ.get("TRADE_RISK_CHOP", "0.5"))
+    except Exception:
+        risk_chop = 0.5
+    try:
+        risk_shock = float(os.environ.get("TRADE_RISK_SHOCK", "0.35"))
+    except Exception:
+        risk_shock = 0.35
+
+    regime_upper = (regime or "TREND_EXPANSION").upper()
+    if "TREND" in regime_upper or "EXPANSION" in regime_upper:
+        scaled_risk = max(0.8, min(1.0, risk_trend))
+    elif "CHOP" in regime_upper or "CONSOLIDATION" in regime_upper:
+        scaled_risk = max(0.4, min(0.6, risk_chop))
+    elif "SHOCK" in regime_upper or "VOLATILITY" in regime_upper:
+        scaled_risk = max(0.25, min(0.5, risk_shock))
+    else:
+        scaled_risk = 0.50
+
+    max_cap = float(os.environ.get("RISK_PCT_PER_TRADE", "1.0"))
+    return round(min(scaled_risk, max_cap), 2)

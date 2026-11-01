@@ -1,0 +1,49 @@
+{
+  "version": "1.0",
+  "trading_mode": "paper",
+  "live_confirm": "",
+  "telegram": {
+    "token": "",
+    "chat_id": "",
+    "allowed_ids": []
+  },
+  "mt5": {
+    "login": "",
+    "password": "",
+    "server": "",
+    "path": "",
+    "btc_symbol": "BTCUSD",
+    "gold_symbol": "XAUUSD"
+  },
+  "risk": {
+    "account_balance": 10000.0,
+    "risk_pct_per_trade": 1.0,
+    "max_daily_loss_pct": 1.5,
+    "max_total_open_risk_pct": 2.5,
+    "max_spread_pips": 30.0,
+    "max_slippage_pips": 3.0,
+    "max_total_drawdown_pct": 6.0,
+    "min_confluence_score": 8,
+    "trade_risk_trend": 0.8,
+    "trade_risk_chop": 0.5,
+    "trade_risk_shock": 0.35
+  },
+  "limit_orders": {
+    "enabled": true,
+    "offset_pips": 2.0,
+    "expiry_min": 35
+  },
+  "news_avoidance": {
+    "enabled": true,
+    "block_before_min": 15,
+    "block_after_min": 30,
+    "calendar_file": "news_calendar.json"
+  },
+  "automation": {
+    "partial_tp_pct": 50.0,
+    "be_trigger_r": 0.6,
+    "trail_trigger_r": 1.0,
+    "atr_trail_mult": 1.0
+  }
+}
+

@@ -35,7 +35,7 @@ import urllib.request
 import urllib.parse
 import urllib.error
 import ssl
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import numpy as np
 import pandas as pd
 import concurrent.futures
@@ -404,6 +404,186 @@ def load_env():
             pass
 
 
+
+def is_sender_authorized(sender_id: str) -> bool:
+    """Verifies whether Telegram sender is whitelisted via ALLOWED_TELEGRAM_IDS or TELEGRAM_CHAT_ID."""
+    try:
+        from config_validator import parse_allowed_telegram_ids
+        allowed = parse_allowed_telegram_ids(os.environ.get("ALLOWED_TELEGRAM_IDS", ""))
+        if not allowed:
+            configured_id = str(os.environ.get("TELEGRAM_CHAT_ID", "")).strip()
+            if configured_id and configured_id not in ("YOUR_TELEGRAM_CHAT_ID_HERE", "0", ""):
+                return str(sender_id) == configured_id
+            return True
+        return str(sender_id) in allowed
+    except Exception:
+        return True
+
+
+STATS_CACHE = {
+    "last_mtime": 0.0,
+    "last_calc_time": 0.0,
+    "cached_data": None
+}
+
+
+def compute_live_stats(audit_file: str = "trade_audit.jsonl") -> dict:
+    """
+    Computes institutional performance metrics from trade_audit.jsonl with 15s caching.
+    """
+    now = time.time()
+    mtime = os.path.getmtime(audit_file) if os.path.exists(audit_file) else 0.0
+    if STATS_CACHE["cached_data"] and (now - STATS_CACHE["last_calc_time"] < 15.0) and (mtime == STATS_CACHE["last_mtime"]):
+        return STATS_CACHE["cached_data"]
+
+    total_trades = 0
+    wins = 0
+    losses = 0
+    be_trades = 0
+    gross_profit = 0.0
+    gross_loss = 0.0
+    total_pnl = 0.0
+    r_multiples = []
+
+    today_utc_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    week_ago_utc = datetime.now(timezone.utc) - timedelta(days=7)
+    daily_pnl = 0.0
+    weekly_pnl = 0.0
+
+    cumulative_pnl = 0.0
+    peak_pnl = 0.0
+    max_drawdown_usd = 0.0
+
+    if os.path.exists(audit_file):
+        try:
+            with open(audit_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except Exception:
+                        continue
+                    event = row.get("event")
+                    if event in ("POSITION_CLOSED", "PARTIAL_CLOSE_PAPER", "PARTIAL_CLOSE_MT5"):
+                        total_trades += 1
+                        pnl = float(row.get("pnl_usd", 0.0))
+                        total_pnl += pnl
+                        r_val = float(row.get("r_multiple", 0.0))
+                        r_multiples.append(r_val)
+
+                        if pnl > 0.001:
+                            wins += 1
+                            gross_profit += pnl
+                        elif pnl < -0.001:
+                            losses += 1
+                            gross_loss += abs(pnl)
+                        else:
+                            be_trades += 1
+
+                        # Date tracking
+                        ts_str = row.get("timestamp", "")
+                        if ts_str:
+                            try:
+                                clean_ts = ts_str.replace("Z", "+00:00")
+                                dt = datetime.fromisoformat(clean_ts)
+                                if dt.strftime("%Y-%m-%d") == today_utc_str:
+                                    daily_pnl += pnl
+                                if dt >= week_ago_utc:
+                                    weekly_pnl += pnl
+                            except Exception:
+                                pass
+
+                        # Drawdown tracking
+                        cumulative_pnl += pnl
+                        if cumulative_pnl > peak_pnl:
+                            peak_pnl = cumulative_pnl
+                        dd = peak_pnl - cumulative_pnl
+                        if dd > max_drawdown_usd:
+                            max_drawdown_usd = dd
+        except Exception as e:
+            logger.warning(f"Error parsing trade_audit.jsonl for stats: {e}")
+
+    winrate = (wins / total_trades * 100.0) if total_trades > 0 else 0.0
+    profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (gross_profit if gross_profit > 0 else 1.0)
+    expectancy_r = (sum(r_multiples) / len(r_multiples)) if r_multiples else 0.0
+
+    mode = safety_manager.get_trading_mode() if safety_manager else "PAPER"
+    if mode == "PAPER" and safety_manager:
+        paper_acc = safety_manager.state.get("paper_account", {})
+        balance = paper_acc.get("balance", 10000.0)
+        equity = balance + safety_manager.state.get("realized_daily_pnl", 0.0)
+        open_pos = safety_manager.get_paper_positions()
+    else:
+        acc_data = live_broker.get_live_account_data() if (MT5_EXECUTOR_AVAILABLE and live_broker) else {}
+        balance = acc_data.get("balance", 10000.0)
+        equity = acc_data.get("equity", balance)
+        open_pos = live_broker.get_open_positions() if (MT5_EXECUTOR_AVAILABLE and live_broker) else []
+
+    open_count = len(open_pos) if isinstance(open_pos, list) else 0
+    max_dd_pct = (max_drawdown_usd / (balance if balance > 0 else 10000.0)) * 100.0
+
+    # Calculate open risk %
+    open_risk_pct = 0.0
+    if isinstance(open_pos, list) and equity > 0:
+        for p in open_pos:
+            r_pct = float(p.get("risk_pct", 0.50))
+            open_risk_pct += r_pct
+
+    data = {
+        "mode": mode,
+        "balance": balance,
+        "equity": equity,
+        "open_positions": open_count,
+        "open_risk_pct": open_risk_pct,
+        "total_trades": total_trades,
+        "wins": wins,
+        "losses": losses,
+        "breakeven": be_trades,
+        "winrate": winrate,
+        "profit_factor": profit_factor,
+        "expectancy_r": expectancy_r,
+        "net_pnl": total_pnl,
+        "daily_pnl": daily_pnl,
+        "weekly_pnl": weekly_pnl,
+        "max_drawdown_usd": max_drawdown_usd,
+        "max_drawdown_pct": max_dd_pct
+    }
+    STATS_CACHE["last_mtime"] = mtime
+    STATS_CACHE["last_calc_time"] = now
+    STATS_CACHE["cached_data"] = data
+    return data
+
+
+def format_stats_dashboard(stats: dict) -> str:
+    """Formats performance stats cleanly for mobile Telegram."""
+    pnl_sign = "+" if stats["net_pnl"] >= 0 else ""
+    daily_sign = "+" if stats["daily_pnl"] >= 0 else ""
+    weekly_sign = "+" if stats["weekly_pnl"] >= 0 else ""
+    pf_str = f"{stats['profit_factor']:.2f}" if stats['profit_factor'] < 100.0 else "∞ (Clean)"
+
+    lines_out = [
+        "📊 *INSTITUTIONAL PERFORMANCE STATS*",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"• *Account:* Equity `${stats['equity']:,.2f}` | Bal `${stats['balance']:,.2f}`",
+        f"• *Mode:* `{stats['mode']}` | *Open Positions:* `{stats['open_positions']}` (Risk: `{stats['open_risk_pct']:.2f}%`)",
+        "",
+        "📈 *Trade Execution Metrics:*",
+        f"• Total Closed Trades: `{stats['total_trades']}`",
+        f"• Wins / Losses: `🟢 {stats['wins']}W - 🔴 {stats['losses']}L` (BE: `{stats['breakeven']}`)",
+        f"• Winrate: *{stats['winrate']:.1f}%*",
+        f"• Profit Factor: *{pf_str}*",
+        f"• Expectancy: *{stats['expectancy_r']:+.2f}R* per trade",
+        "",
+        "💰 *PnL Breakdown:*",
+        f"• Today's PnL: `{daily_sign}${stats['daily_pnl']:,.2f}`",
+        f"• 7-Day PnL: `{weekly_sign}${stats['weekly_pnl']:,.2f}`",
+        f"• All-Time Net PnL: *`{pnl_sign}${stats['net_pnl']:,.2f}`*",
+        f"• Max Drawdown: `-${stats['max_drawdown_usd']:,.2f}` ({stats['max_drawdown_pct']:.2f}%)",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    ]
+    return "\n".join(lines_out)
 def get_risk_config():
     """Loads account balance (auto-fetched from live MT5 if connected) and risk %."""
     load_env()
@@ -1936,13 +2116,32 @@ def execute_setup_order(asset: str, setup_data: dict, token: str, chat_id: str, 
             if not candle_ok:
                 return {"success": False, "error": f"Live Candle Gate: {candle_msg}"}
 
+    # News Avoidance Gate: Block new entries around high-impact events
+    if MARKET_DATA_AVAILABLE and market_data_feed:
+        is_news_blk, news_msg, _ = market_data_feed.is_news_blocked(asset_norm)
+        if is_news_blk:
+            if token and chat_id:
+                send_message(token, chat_id, f"📰 *NEWS AVOIDANCE ACTIVE:*\nNew entry blocked for {asset_norm}.\n• `{news_msg}`\n_Exits and trailing management remain active._")
+            return {"success": False, "error": f"News Avoidance Gate: {news_msg}"}
+
     prefix = "AutoPush" if trigger_source == "AUTOPUSH" else ("Auto1M" if trigger_source == "AUTO" else "Approve")
     comment = f"{prefix}-{setup_data.get('strategy', 'SCALP')}"
 
     action = setup_data.get("action", "BUY").upper()
-    res = live_broker.execute_live_sniper_order(
-        asset, action, entry, sl, tp1, lots, comment=comment
-    )
+
+    # Limit Order in Zone Check
+    ot_check = setup_data.get("order_ticket", {})
+    if ot_check.get("order_type") == "LIMIT" or setup_data.get("order_type") == "LIMIT":
+        lmt_p = ot_check.get("limit_price") or setup_data.get("limit_price") or entry
+        z_bounds = ot_check.get("zone") or setup_data.get("zone")
+        exp_m = ot_check.get("expiry_minutes") or setup_data.get("expiry_minutes") or 35
+        res = live_broker.execute_live_limit_order(
+            asset, action, lmt_p, sl, tp1, lots, zone=z_bounds, expiry_minutes=exp_m, comment=comment
+        )
+    else:
+        res = live_broker.execute_live_sniper_order(
+            asset, action, entry, sl, tp1, lots, comment=comment
+        )
     return res
 
 
@@ -2095,6 +2294,10 @@ def handle_callback_query(token: str, cq: dict):
                 send_message(token, sender_id, f"❌ *POSITION CLOSED:* #{t_id} closed at market.")
             else:
                 send_message(token, sender_id, f"⚠️ Close failed: {res.get('error')}")
+    elif data in ("stats", "refresh_stats"):
+        process_telegram_command(token, sender_id, sender_name, "/stats")
+    elif data in ("news", "calendar"):
+        process_telegram_command(token, sender_id, sender_name, "/news")
     elif data in ("close_all", "close"):
         process_telegram_command(token, sender_id, sender_name, "/close_all")
     elif data in ("buy_gold", "order_buy_gold"):
@@ -2283,9 +2486,24 @@ def format_elite_alert(asset: str, data: dict, setup_data: dict = None, exec_res
         f"• Stop-Loss:     `${sl_val:,.2f}`",
         f"• Take-Profit 1: `${tp1_val:,.2f}`",
         f"• Take-Profit 2: `${tp2_val:,.2f}`",
-        f"• Position Size: `{lots_val}` Lots (${risk_val:,.0f} risk | 1.0% max)",
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        f"• Position Size: `{lots_val}` Lots (${risk_val:,.0f} risk | 1.0% max)"
     ]
+
+    # Setup Confluence Breakdown section
+    bdown = item.get("score_breakdown", [])
+    if bdown:
+        lines.append("")
+        lines.append("📋 *Setup Confluence Breakdown:*")
+        for b_item in bdown:
+            icon_b = "✅" if b_item.get("status") == "PASS" else "❌"
+            factor_label = b_item.get("factor", "").split(":")[0] if ":" in b_item.get("factor", "") else b_item.get("factor", "")
+            lines.append(f"• {factor_label}: {icon_b} {b_item.get('status')} (+{b_item.get('earned', 0):.1f})")
+
+    ot_data = item.get("order_ticket", {})
+    if ot_data.get("order_type") == "LIMIT":
+        lines.append(f"• Order Type: ⏳ *LIMIT ORDER* (Inside {ot_data.get('zone', 'Zone')})")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
     a_low = asset.lower()
     if is_auto_trade and exec_result and exec_result.get("success"):
@@ -2568,6 +2786,45 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
     cmd = raw_cmd.split("@")[0]
     args = text[len(cmd_parts[0]):].strip()
     args_lower = args.lower()
+
+    # ── LIVE PERFORMANCE STATS HUB (/stats, /performance, /pnl) ──
+    if cmd in ("/stats", "/performance", "/pnl", "/winrate", "/metrics"):
+        if not is_sender_authorized(sender_id):
+            send_message(token, sender_id, "⛔ *Access Denied:* Your Telegram ID is not authorized to view live stats.")
+            return
+        stats_info = compute_live_stats()
+        stats_msg = format_stats_dashboard(stats_info)
+        stats_markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "🔄 Refresh Stats", "callback_data": "refresh_stats"},
+                    {"text": "💼 Positions", "callback_data": "positions"}
+                ],
+                [
+                    {"text": "📜 Closed Trades", "callback_data": "trades"},
+                    {"text": "⚙️ Status", "callback_data": "status"}
+                ]
+            ]
+        }
+        send_message(token, sender_id, stats_msg, reply_markup=stats_markup)
+        return
+
+    # ── ECONOMIC NEWS CALENDAR HUB (/news, /calendar, /events) ──
+    if cmd in ("/news", "/calendar", "/events"):
+        if MARKET_DATA_AVAILABLE and market_data_feed:
+            upcoming = market_data_feed.get_upcoming_news(hours=72)
+            if not upcoming:
+                send_message(token, sender_id, "📅 *ECONOMIC NEWS CALENDAR (72H)*\n\n🟢 No high-impact events scheduled in the next 72 hours. All systems clear.")
+            else:
+                lines_n = ["📅 *UPCOMING HIGH-IMPACT ECONOMIC EVENTS (72H)*", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
+                for ev in upcoming:
+                    lines_n.append(f"• 🔴 *{ev.get('title')}* ({ev.get('currency')})")
+                    lines_n.append(f"  📅 `{ev.get('datetime_utc')}` | Affects: `{', '.join(ev.get('affected_assets', []))}`")
+                lines_n.append("\n_New entries automatically blocked 15m before and 30m after events._")
+                send_message(token, sender_id, "\n".join(lines_n))
+        else:
+            send_message(token, sender_id, "⚠️ News calendar unavailable.")
+        return
 
     # ── 1. WELCOME & HELP HUB ──
     if cmd in ("/all", "/cockpit", "/omni", "/terminal", "/combined"):

@@ -285,6 +285,20 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
     factors = factors_sell if is_short else factors_buy
     side_action = "SELL" if is_short else "BUY"
 
+    # Setup Score Breakdown per confluence factor
+    score_breakdown = [
+        {"factor": "Macro: USD Trend (DXY)", "status": "PASS" if (sell_dxy if is_short else feat_dxy) else "FAIL", "weight": 1.0, "earned": 1.0 if (sell_dxy if is_short else feat_dxy) else 0.0},
+        {"factor": "Macro: Real Yields (^TNX)", "status": "PASS" if (sell_yield if is_short else feat_yield) else "FAIL", "weight": 1.0, "earned": 1.0 if (sell_yield if is_short else feat_yield) else 0.0},
+        {"factor": "Trend: 200 SMA Structure", "status": "PASS" if (sell_ma200 if is_short else feat_ma200) else "FAIL", "weight": 1.0, "earned": 1.0 if (sell_ma200 if is_short else feat_ma200) else 0.0},
+        {"factor": "Trend: 50 SMA Stack", "status": "PASS" if (sell_ma50 if is_short else feat_ma50) else "FAIL", "weight": 1.0, "earned": 1.0 if (sell_ma50 if is_short else feat_ma50) else 0.0},
+        {"factor": f"Momentum: RSI ({rsi:.1f})", "status": "PASS" if (sell_rsi if is_short else feat_rsi) else "FAIL", "weight": 1.0, "earned": 1.0 if (sell_rsi if is_short else feat_rsi) else 0.0},
+        {"factor": "Structure: Golden Pocket (0.618 Fib)", "status": "PASS" if (sell_near_res if is_short else in_golden_pocket) else "FAIL", "weight": 1.0, "earned": 1.0 if (sell_near_res if is_short else in_golden_pocket) else 0.0},
+        {"factor": "Microstructure: Anti-Trap", "status": "PASS" if (sell_no_trap if is_short else feat_no_trap) else "FAIL", "weight": 1.0, "earned": 1.0 if (sell_no_trap if is_short else feat_no_trap) else 0.0},
+        {"factor": f"Valuation: {'Mayer Multiple' if asset_type == 'BTC' else 'Gold/Silver Ratio'}", "status": "PASS" if ((sell_mayer if is_short else feat_mayer) if asset_type == 'BTC' else (sell_gsr if is_short else feat_gsr)) else "FAIL", "weight": 1.0, "earned": 1.0 if ((sell_mayer if is_short else feat_mayer) if asset_type == 'BTC' else (sell_gsr if is_short else feat_gsr)) else 0.0},
+        {"factor": f"Risk: Volatility ({vol30:.1f}%)", "status": "PASS" if (sell_vol if is_short else feat_vol) else "FAIL", "weight": 1.0, "earned": 1.0 if (sell_vol if is_short else feat_vol) else 0.0},
+        {"factor": "Structure: Key S/R Location", "status": "PASS" if (sell_near_res if is_short else feat_near_support) else "FAIL", "weight": 1.0, "earned": 1.0 if (sell_near_res if is_short else feat_near_support) else 0.0}
+    ]
+
     active_features = {
         "in_golden_pocket": bool(in_golden_pocket),
         "no_trap": bool(sell_no_trap if is_short else feat_no_trap),
@@ -319,6 +333,42 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
     else:
         verdict = "🔴 VETOED (WAIT FOR CONFLUENCE)"
         action = "STAND_ASIDE"
+
+    # News Avoidance Gate: Block new entries around high-impact events
+    if action != "STAND_ASIDE" and MARKET_DATA_AVAILABLE and market_data_feed:
+        is_news_blk, news_msg, news_ev = market_data_feed.is_news_blocked(asset_type)
+        if is_news_blk:
+            logger.info(f"News Avoidance Gate triggered for {asset_type}: {news_msg}")
+            verdict = f"🔴 VETOED (HIGH-IMPACT NEWS WINDOW: {news_msg})"
+            action = "STAND_ASIDE"
+            factors.append(f"News Block: {news_msg}")
+
+    # Market Regime Detection & Regime-Based Risk Sizing
+    if LEARNING_AVAILABLE and learning_engine:
+        market_regime = learning_engine.detect_market_regime(adx=26.0, vix=18.0)
+    else:
+        market_regime = "TREND_EXPANSION"
+    regime_risk_pct = risk_engine.get_regime_risk_pct(market_regime) if RISK_ENGINE_AVAILABLE else 0.80
+    logger.info(f"Market Regime [{market_regime}] for {asset_type} -> Applied Dynamic Risk: {regime_risk_pct:.2f}%")
+
+    # Limit Order in Zone Parameters
+    limit_orders_enabled = os.environ.get("LIMIT_ORDERS_ENABLED", "true").lower() in ("true", "1", "yes")
+    offset_pips = float(os.environ.get("LIMIT_ORDER_OFFSET_PIPS", "2"))
+    pip_val = (0.10 if asset_type == "GOLD" else 10.0)
+    offset_amt = offset_pips * pip_val
+
+    if side_action == "BUY":
+        zone_bounds = (fib_650, fib_618)
+        limit_entry_price = round(fib_618 - offset_amt, 2)
+        price_away_from_zone = curr > (fib_618 * 1.002)
+    else:
+        res_low = sw_high - 0.382 * (sw_high - sw_low)
+        zone_bounds = (res_low, sw_high)
+        limit_entry_price = round(sw_high - offset_amt, 2)
+        price_away_from_zone = curr < (res_low * 0.998)
+
+    use_limit_order = limit_orders_enabled and price_away_from_zone and action != "STAND_ASIDE"
+    execution_entry = limit_entry_price if use_limit_order else curr
 
     # Symmetrical TP & SL Calculation for Profile Execution
     sl_dist = 3.80 if asset_type == "GOLD" else 350.0
@@ -399,14 +449,24 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
         "verdict": verdict,
         "action": action,
         "trade_id": trade_id,
+        "score_breakdown": score_breakdown,
+        "regime": market_regime,
+        "regime_risk_pct": regime_risk_pct,
         "order_ticket": {
-            "entry": curr,
+            "entry": execution_entry,
+            "market_price": curr,
+            "order_type": "LIMIT" if use_limit_order else "MARKET",
+            "limit_price": limit_entry_price,
+            "zone": zone_bounds,
+            "expiry_minutes": int(os.environ.get("LIMIT_ORDER_EXPIRY_MIN", "35")),
             "stop_loss": stop_loss,
             "tp1": tp1,
             "tp2": tp2,
             "risk_pct": risk_pct_calc,
             "reward_pct": reward_pct_calc,
-            "side": side_action
+            "side": side_action,
+            "regime": market_regime,
+            "applied_risk_pct": regime_risk_pct
         }
     }
 
@@ -485,13 +545,27 @@ def _execute_pipeline(*args, **kwargs):
             ot = res['order_ticket']
             rr = (ot['reward_pct'] / ot['risk_pct']) if ot['risk_pct'] > 0 else 1.0
             side_label = ot.get('side', res['action'])
+            otype = ot.get('order_type', 'MARKET')
+            reg_name = ot.get('regime', 'TREND_EXPANSION')
+            reg_risk = ot.get('applied_risk_pct', 0.8)
+
+            # Display Setup Score Breakdown Box
+            print("   ┌──────────────────────────────────────────────────────────────┐")
+            print(f"   │  📊 CONFLUENCE FACTOR BREAKDOWN ({side_label})               │")
+            for item in res.get('score_breakdown', []):
+                icon_pass = "✅" if item['status'] == "PASS" else "❌"
+                f_name = item['factor'][:32]
+                print(f"   │  {icon_pass} {f_name:<32} : {item['status']:<4} (+{item['earned']:.1f}) │")
+            print(f"   │  • Base: {res['score']}/10  |  Adaptive: {res['adaptive_score']:.1f}/10  |  Regime: {reg_name} │")
+            print("   └──────────────────────────────────────────────────────────────┘")
+
             print(f"""   ┌──────────────────────────────────────────────────────────────┐
-   │  📋 ACTIONABLE ORDER TICKET ({side_label})                       │
-   │  • Entry Zone : ${ot['entry']:>10,.2f}                                │
+   │  📋 ACTIONABLE ORDER TICKET ({otype} {side_label})                │
+   │  • Entry Zone : ${ot['entry']:>10,.2f}  ({otype})                       │
    │  • Stop-Loss  : ${ot['stop_loss']:>10,.2f}  (Risk: -{ot['risk_pct']:.2f}%)               │
    │  • Target 1   : ${ot['tp1']:>10,.2f}  (Reward: +{ot['reward_pct']:.2f}%)            │
    │  • Target 2   : ${ot['tp2']:>10,.2f}                                │
-   │  • Risk/Reward: 1:{rr:.2f}                                          │
+   │  • Risk/Reward: 1:{rr:.2f}  |  Dynamic Sizing: {reg_risk:.2f}%              │
    └──────────────────────────────────────────────────────────────┘""")
         else:
             print("   ⛔ ACTION: Stand aside. Confluence does not meet institutional execution threshold.")

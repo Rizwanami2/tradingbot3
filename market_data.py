@@ -29,7 +29,7 @@ import random
 import logging
 import urllib.request
 import urllib.error
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, Optional, Tuple, List
 
 import numpy as np
@@ -829,4 +829,132 @@ class MarketDataFeed:
 
 
 # Global Singleton Feed Instance
+
+    def load_news_calendar(self) -> Dict[str, Any]:
+        """Loads high-impact news calendar with auto-recovery from .bak if corrupted."""
+        cal_file = os.path.join(os.path.dirname(__file__), "news_calendar.json")
+        bak_file = cal_file + ".bak"
+        default_data = {
+            "version": "1.0",
+            "events": [
+                {"id": "FOMC-RATE", "title": "FOMC Interest Rate Decision", "currency": "USD", "impact": "HIGH", "datetime_utc": "2026-11-05T19:00:00Z", "affected_assets": ["GOLD", "BTC"]},
+                {"id": "US-NFP", "title": "US Non-Farm Payrolls (NFP)", "currency": "USD", "impact": "HIGH", "datetime_utc": "2026-11-06T13:30:00Z", "affected_assets": ["GOLD", "BTC"]},
+                {"id": "US-CPI", "title": "US Consumer Price Index (CPI)", "currency": "USD", "impact": "HIGH", "datetime_utc": "2026-11-12T13:30:00Z", "affected_assets": ["GOLD", "BTC"]},
+                {"id": "US-PPI", "title": "US Producer Price Index (PPI)", "currency": "USD", "impact": "HIGH", "datetime_utc": "2026-11-13T13:30:00Z", "affected_assets": ["GOLD", "BTC"]},
+                {"id": "US-RETAIL", "title": "US Core Retail Sales", "currency": "USD", "impact": "HIGH", "datetime_utc": "2026-11-17T13:30:00Z", "affected_assets": ["GOLD", "BTC"]}
+            ]
+        }
+        if os.path.exists(cal_file):
+            try:
+                with open(cal_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    return data
+            except Exception as e:
+                logger.warning(f"Corrupt news calendar detected ({e}). Trying backup...")
+                if os.path.exists(bak_file):
+                    try:
+                        with open(bak_file, "r", encoding="utf-8") as bf:
+                            data = json.load(bf)
+                            with open(cal_file, "w", encoding="utf-8") as out_f:
+                                json.dump(data, out_f, indent=2)
+                            return data
+                    except Exception:
+                        pass
+        try:
+            with open(cal_file, "w", encoding="utf-8") as f:
+                json.dump(default_data, f, indent=2)
+            with open(bak_file, "w", encoding="utf-8") as bf:
+                json.dump(default_data, bf, indent=2)
+        except Exception:
+            pass
+        return default_data
+
+    def is_news_blocked(self, asset: str, current_dt_utc: datetime = None) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+        """
+        Evaluates whether new entries are blocked due to high-impact economic news.
+        Window: default 15 min before to 30 min after event.
+        Exits and trade management remain completely allowed.
+        """
+        enabled = os.environ.get("NEWS_AVOIDANCE_ENABLED", "true").lower() in ("true", "1", "yes")
+        if not enabled:
+            return False, "News avoidance disabled in config", None
+
+        try:
+            before_min = int(os.environ.get("NEWS_BLOCK_BEFORE_MIN", "15"))
+        except Exception:
+            before_min = 15
+        try:
+            after_min = int(os.environ.get("NEWS_BLOCK_AFTER_MIN", "30"))
+        except Exception:
+            after_min = 30
+
+        asset_norm = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
+        now_utc = current_dt_utc or datetime.now(timezone.utc)
+        if now_utc.tzinfo is None:
+            now_utc = now_utc.replace(tzinfo=timezone.utc)
+
+        cal = self.load_news_calendar()
+        events = cal.get("events", [])
+        for ev in events:
+            if ev.get("impact", "").upper() != "HIGH":
+                continue
+            affected = [a.upper() for a in ev.get("affected_assets", [])]
+            if asset_norm not in affected and "ALL" not in affected:
+                continue
+
+            dt_str = ev.get("datetime_utc", "")
+            if not dt_str:
+                continue
+            try:
+                clean_dt_str = dt_str.replace("Z", "+00:00")
+                ev_dt = datetime.fromisoformat(clean_dt_str)
+                if ev_dt.tzinfo is None:
+                    ev_dt = ev_dt.replace(tzinfo=timezone.utc)
+
+                block_start = ev_dt - timedelta(minutes=before_min)
+                block_end = ev_dt + timedelta(minutes=after_min)
+
+                if block_start <= now_utc <= block_end:
+                    mins_to_event = (ev_dt - now_utc).total_seconds() / 60.0
+                    if mins_to_event > 0:
+                        rel_str = f"in {int(mins_to_event)}m"
+                    else:
+                        rel_str = f"{abs(int(mins_to_event))}m ago"
+                    msg = f"High-Impact News: {ev.get('title')} ({ev.get('currency')}) scheduled {rel_str} ({dt_str})"
+                    logger.info(f"News Avoidance Gate Active: {msg}")
+                    return True, msg, ev
+            except Exception as parse_err:
+                logger.debug(f"Error parsing event datetime {dt_str}: {parse_err}")
+                continue
+
+        return False, "Clear of high-impact events", None
+
+    def get_upcoming_news(self, hours: int = 48) -> List[Dict[str, Any]]:
+        """Returns high-impact events scheduled within the next N hours."""
+        now_utc = datetime.now(timezone.utc)
+        cutoff = now_utc + timedelta(hours=hours)
+        cal = self.load_news_calendar()
+        upcoming = []
+        for ev in cal.get("events", []):
+            dt_str = ev.get("datetime_utc", "")
+            try:
+                clean_dt_str = dt_str.replace("Z", "+00:00")
+                ev_dt = datetime.fromisoformat(clean_dt_str)
+                if ev_dt.tzinfo is None:
+                    ev_dt = ev_dt.replace(tzinfo=timezone.utc)
+                if now_utc <= ev_dt <= cutoff:
+                    upcoming.append(ev)
+            except Exception:
+                continue
+        return upcoming
+
+
 market_data_feed = MarketDataFeed()
+
+def is_news_blocked(asset: str, current_dt_utc: datetime = None) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+    """Module-level gateway to check news avoidance status."""
+    if market_data_feed:
+        return market_data_feed.is_news_blocked(asset, current_dt_utc)
+    return False, "Market data feed unavailable", None
+
+
