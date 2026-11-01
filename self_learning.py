@@ -722,7 +722,8 @@ class SelfLearningEngine:
     # SIGNAL LOGGING & OUTCOME LEARNING (BAYESIAN & TEMPORAL)
     # ──────────────────────────────────────────────────────────────────────────
     def log_signal(self, asset: str, symbol: str, entry: float, sl: float, tp1: float, tp2: float,
-                   score: float, active_features: dict, action: str = "BUY", strategy: str = "SCALP") -> str:
+                   score: float, active_features: dict, action: str = "BUY", strategy: str = "SCALP",
+                   regime: str = None) -> str:
         trade_id = f"{asset}_{int(time.time() * 1000)}"
         record = {
             "trade_id": trade_id,
@@ -743,13 +744,14 @@ class SelfLearningEngine:
             "outcome": None,
             "r_multiple": 0.0,
             "exit_price": None,
-            "exit_time": None
+            "exit_time": None,
+            "regime": regime
         }
         self.memory["trade_journal"].append(record)
         self.save_memory()
         return trade_id
 
-    def update_from_outcome(self, trade_id: str, exit_price: float, outcome: str, r_multiple: float, learning_rate: float = 0.06):
+    def update_from_outcome(self, trade_id: str, exit_price: float, outcome: str, r_multiple: float, learning_rate: float = 0.06, regime: str = None) -> bool:
         target_trade = None
         for t in self.memory["trade_journal"]:
             if t["trade_id"] == trade_id or str(t.get("ticket")) == trade_id:
@@ -768,6 +770,8 @@ class SelfLearningEngine:
         target_trade["exit_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         target_trade["outcome"] = outcome
         target_trade["r_multiple"] = r_multiple
+        if regime:
+            target_trade["regime"] = regime
 
         # Post-Mortem Forensic trigger on stopped-out trades
         if outcome == "LOSS":
@@ -778,12 +782,17 @@ class SelfLearningEngine:
             except Exception as err:
                 print(f"⚠️ Forensic post-mortem execution error: {err}")
 
-        # Bayesian Beta-Binomial update & Factor Weight Drift
+        # ── Bayesian Beta-Binomial update & Factor Weight Drift ──
+        # Base weights (per-asset, regime-agnostic)
         weights = self.memory["weights"].get(asset, dict(DEFAULT_WEIGHTS))
         stats = self.memory["feature_stats"].get(asset, {})
 
-        # ── Temporal Decay: Pull weights back toward defaults over time ──
-        # Recent trades matter more; old weight drift fades with half-life from hyperparams
+        # ── Regime-conditioned weights (per-regime, per-asset) ──
+        regime_brains = self.memory.get("regime_brains", {}).get(asset, {})
+        active_regime = regime or target_trade.get("regime", "TREND_EXPANSION")
+        regime_weights = dict(regime_brains.get(active_regime, REGIME_BRAIN_DEFAULTS.get(active_regime, {})))
+
+        # ── Temporal Decay: Pull base weights back toward defaults ──
         half_life = float(self.memory.get("hyperparams", {}).get("temporal_decay_half_life_days", 45.0))
         last_update_str = self.memory.get("last_weight_update", "")
         if last_update_str:
@@ -800,10 +809,19 @@ class SelfLearningEngine:
             for feat in weights:
                 current = weights.get(feat, 1.0)
                 default = DEFAULT_WEIGHTS.get(feat, 1.0)
-                # Pull toward default: weight = default + (current - default) * decay_factor
                 weights[feat] = round(default + (current - default) * decay_factor, 4)
+            # Also decay regime-conditioned weights toward their defaults
+            for feat in regime_weights:
+                current = regime_weights.get(feat, 1.0)
+                default = REGIME_BRAIN_DEFAULTS.get(active_regime, {}).get(feat, 1.0)
+                regime_weights[feat] = round(default + (current - default) * decay_factor, 4)
 
         self.memory["last_weight_update"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # Persist updated regime weights back to memory
+        if active_regime not in self.memory.get("regime_brains", {}):
+            self.memory.setdefault("regime_brains", {})[asset] = {}
+        self.memory["regime_brains"][asset][active_regime] = regime_weights
 
         for feat, is_active in active_features.items():
             if feat not in stats:
@@ -815,14 +833,22 @@ class SelfLearningEngine:
                     stats[feat]["wins"] += 1
                     stats[feat]["total_r"] += r_multiple
                     stats[feat]["alpha"] = round(stats[feat].get("alpha", 12.0) + min(r_multiple, 2.0), 3)
+                    # Update base weight
                     delta = learning_rate * (r_multiple / 2.0)
                     weights[feat] = min(weights.get(feat, 1.0) + delta, 2.50)
+                    # Update regime-conditioned weight
+                    regime_delta = learning_rate * (r_multiple / 2.0)
+                    regime_weights[feat] = min(regime_weights.get(feat, 1.0) + regime_delta, 2.50)
                 else:
                     stats[feat]["losses"] += 1
                     stats[feat]["total_r"] += r_multiple
                     stats[feat]["beta"] = round(stats[feat].get("beta", 4.0) + 1.0, 3)
+                    # Update base weight
                     delta = learning_rate * abs(r_multiple)
                     weights[feat] = max(weights.get(feat, 1.0) - delta, 0.35)
+                    # Update regime-conditioned weight
+                    regime_delta = learning_rate * abs(r_multiple)
+                    regime_weights[feat] = max(regime_weights.get(feat, 1.0) - regime_delta, 0.35)
 
         self.memory["training_cycles"] += 1
         self.recalculate_all_metrics()
@@ -883,7 +909,8 @@ class SelfLearningEngine:
                 matched_pending["pnl"] = ext.get("pnl", 0.0)
                 matched_pending["action"] = action
                 matched_pending["strategy"] = strategy
-                self.update_from_outcome(matched_pending["trade_id"], exit_price, outcome, r_mult)
+                self.update_from_outcome(matched_pending["trade_id"], exit_price, outcome, r_mult,
+                                         regime=matched_pending.get("regime"))
                 synced_trades.append(matched_pending)
             else:
                 asset = ext.get("asset", "GOLD")
@@ -900,14 +927,15 @@ class SelfLearningEngine:
                     asset, sym, ext.get("open_price", exit_price),
                     ext.get("sl", exit_price * 0.99), ext.get("tp1", exit_price * 1.01),
                     ext.get("tp2", exit_price * 1.02), ext.get("score", 8.0), features,
-                    action=action, strategy=strategy
+                    action=action, strategy=strategy, regime=ext.get("regime")
                 )
                 for t in self.memory["trade_journal"]:
                     if t["trade_id"] == trade_id:
                         t["ticket"] = t_id
                         t["pnl"] = ext.get("pnl", 0.0)
                         break
-                self.update_from_outcome(trade_id, exit_price, outcome, r_mult)
+                self.update_from_outcome(trade_id, exit_price, outcome, r_mult,
+                                         regime=ext.get("regime"))
                 synced_trades.append({
                     "ticket": t_id, "asset": asset, "symbol": sym, "action": action,
                     "strategy": strategy, "outcome": outcome, "r_multiple": r_mult,
