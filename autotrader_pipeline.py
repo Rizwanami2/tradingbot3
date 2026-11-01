@@ -230,7 +230,7 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
         sell_yield = tnx_chg >= -0.2
         sell_ma200 = curr < ma200
         sell_ma50 = curr < ma50
-        sell_rsi = (rsi <= 45 or rsi >= 65)
+        sell_rsi = (25.0 <= rsi <= 48.0) or (rsi >= 65.0)  # bearish momentum breakdown or overbought rejection (avoids <25 oversold trap)
         sell_gsr = gsr < 75
         sell_vol = vol30 < 25
         sell_no_trap = trap_state != "BEAR_TRAP"
@@ -324,6 +324,14 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
             active_features=active_features
         )
 
+    is_sell_action = side_action == "SELL"
+    if is_sell_action:
+        risk_pct_calc = abs((curr - stop_loss) / curr) * 100 if curr != 0 else 0.0
+        reward_pct_calc = abs((tp1 - curr) / curr) * 100 if curr != 0 else 0.0
+    else:
+        risk_pct_calc = ((curr - stop_loss) / curr) * 100 if curr != 0 else 0.0
+        reward_pct_calc = ((tp1 - curr) / curr) * 100 if curr != 0 else 0.0
+
     return {
         "asset": asset_type,
         "symbol": symbol,
@@ -350,8 +358,9 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
             "stop_loss": stop_loss,
             "tp1": tp1,
             "tp2": tp2,
-            "risk_pct": ((curr - stop_loss) / curr) * 100,
-            "reward_pct": ((tp1 - curr) / curr) * 100
+            "risk_pct": risk_pct_calc,
+            "reward_pct": reward_pct_calc,
+            "side": side_action
         }
     }
 
@@ -412,11 +421,12 @@ def run_pipeline(*args, **kwargs):
         print(f"   • Trend & Momentum    : 200 SMA: ${res['ma200']:,.0f} | RSI: {res['rsi']:.1f}" + (f" | Mayer: {res['mayer']:.2f}x" if asset_type == 'BTC' else ""))
         print(f"   • Confluence Score    : {res['score']}/10 (Base) | {res['adaptive_score']:.1f}/10 (Learned) ──► {status_color} {res['verdict']}")
 
-        if res['action'] in ("BUY", "BUY_HALF"):
+        if res['action'] in ("BUY", "BUY_HALF", "SELL", "SELL_HALF"):
             ot = res['order_ticket']
             rr = (ot['reward_pct'] / ot['risk_pct']) if ot['risk_pct'] > 0 else 1.0
+            side_label = ot.get('side', res['action'])
             print(f"""   ┌──────────────────────────────────────────────────────────────┐
-   │  📋 ACTIONABLE ORDER TICKET ({res['action']})                       │
+   │  📋 ACTIONABLE ORDER TICKET ({side_label})                       │
    │  • Entry Zone : ${ot['entry']:>10,.2f}                                │
    │  • Stop-Loss  : ${ot['stop_loss']:>10,.2f}  (Risk: -{ot['risk_pct']:.2f}%)               │
    │  • Target 1   : ${ot['tp1']:>10,.2f}  (Reward: +{ot['reward_pct']:.2f}%)            │
