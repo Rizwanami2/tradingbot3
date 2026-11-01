@@ -221,6 +221,62 @@ def _get_mt5_hist(symbol: str, count: int = 400, timeframe=None) -> Any:
         return None
 
 
+def _get_mt5_multitimeframe(symbol: str, timeframes: List[str] = None) -> Dict[str, Any]:
+    """Fetch multiple timeframes from MT5 broker for confluence scanning.
+    
+    Returns dict of timeframe_name -> DataFrame (or empty DataFrame on failure).
+    Timeframes: m1, m5, m15, h1, h4, d1
+    """
+    if not MT5_BROKER_AVAILABLE or live_broker is None or not mt5:
+        return {}
+    
+    if timeframes is None:
+        timeframes = ["m1", "m5", "m15", "h1", "h4", "d1"]
+    
+    tf_map = {
+        "m1": mt5.TIMEFRAME_M1,
+        "m5": mt5.TIMEFRAME_M5,
+        "m15": mt5.TIMEFRAME_M15,
+        "h1": mt5.TIMEFRAME_H1,
+        "h4": mt5.TIMEFRAME_H4,
+        "d1": mt5.TIMEFRAME_D1,
+    }
+    
+    count_map = {
+        "m1": 200,
+        "m5": 200,
+        "m15": 200,
+        "h1": 300,
+        "h4": 300,
+        "d1": 300,
+    }
+    
+    result = {}
+    try:
+        if not live_broker.ensure_connected():
+            return result
+        mt5_symbol = _MT5_SYMBOL_MAP.get(symbol, symbol)
+        
+        for tf_name in timeframes:
+            tf = tf_map.get(tf_name)
+            count = count_map.get(tf_name, 200)
+            if tf is None:
+                continue
+            try:
+                rates = mt5.copy_rates_from_pos(mt5_symbol, tf, 0, count)
+                if rates is not None and len(rates) > 0:
+                    result[tf_name] = _mt5_rates_to_dataframe(rates, symbol)
+                else:
+                    result[tf_name] = pd.DataFrame()
+            except Exception as e:
+                logger.debug(f"MT5 {tf_name} fetch failed for {symbol}: {e}")
+                result[tf_name] = pd.DataFrame()
+    except Exception as e:
+        logger.debug(f"MT5 multi-timeframe fetch failed for {symbol}: {e}")
+    
+    return result
+
+
 def _get_cached_hist(symbol: str, period: str = "350d"):
     """Fetch historical bars with TTL caching. Prefers MT5 live broker data
     (eliminates data/execution mismatch), falls back to yfinance."""
@@ -284,6 +340,16 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
     htf_bias = institutional_engine.compute_htf_bias(hist, asset_type) if (INSTITUTIONAL_AVAILABLE and institutional_engine) else {
         "bias": "NEUTRAL", "summary": "⚪ Neutral"
     }
+
+    # STAGE 1b: MULTI-TIMEFRAME SCAN (M1/M5/M15/H1/H4/D1 via MT5)
+    mtf_bars = _get_mt5_multitimeframe(symbol, ["m1", "m5", "m15", "h1", "h4", "d1"])
+    mtf_result = None
+    if INSTITUTIONAL_AVAILABLE and institutional_engine and mtf_bars:
+        try:
+            mtf_result = institutional_engine.analyze_multitimeframe_trend(asset_type, mtf_bars)
+        except Exception as e:
+            logger.debug(f"MTF analysis failed for {asset_type}: {e}")
+            mtf_result = None
 
     # STAGE 1: LOCATION & STRUCTURE
     curr = hist["Close"].iloc[-1]
@@ -349,6 +415,14 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
         if feat_ma50: score_buy += 1; factors_buy.append("Momentum: Above 50 SMA")
         if feat_vol: score_buy += 1; factors_buy.append(f"Risk: Volatility normalized ({vol30:.1f}%)")
 
+        # Multi-Timeframe Alignment Buy Factor
+        feat_mtf_buy = False
+        if mtf_result and mtf_result.get("dominant_direction") == "BUY":
+            feat_mtf_buy = True
+        if feat_mtf_buy:
+            score_buy += 1
+            factors_buy.append(f"MTF Alignment: Multi-timeframe bullish ({mtf_result.get('market_movement', 'aligned')})")
+
         # Symmetrical Sell Factors
         sell_dxy = dxy_chg > -0.2
         sell_yield = tnx_chg > -1.0
@@ -371,6 +445,14 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
         if sell_no_trap: score_sell += 1; factors_sell.append("Microstructure: Clean bear auction; zero Bear Trap")
         if sell_ma50: score_sell += 1; factors_sell.append("Momentum: Below 50 SMA")
         if sell_vol: score_sell += 1; factors_sell.append(f"Risk: Volatility tradeable ({vol30:.1f}%)")
+
+        # Multi-Timeframe Alignment Sell Factor
+        feat_mtf_sell = False
+        if mtf_result and mtf_result.get("dominant_direction") == "SELL":
+            feat_mtf_sell = True
+        if feat_mtf_sell:
+            score_sell += 1
+            factors_sell.append(f"MTF Alignment: Multi-timeframe bearish ({mtf_result.get('market_movement', 'aligned')})")
 
     else:  # GOLD
         # Buy Factors
@@ -395,6 +477,14 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
         if feat_no_trap: score_buy += 1; factors_buy.append("Microstructure: Clean auction; no Bull Trap")
         if feat_near_support: score_buy += 1; factors_buy.append("Structure: Near major swing support floor")
 
+        # Multi-Timeframe Alignment Buy Factor (GOLD)
+        feat_mtf_buy = False
+        if mtf_result and mtf_result.get("dominant_direction") == "BUY":
+            feat_mtf_buy = True
+        if feat_mtf_buy:
+            score_buy += 1
+            factors_buy.append(f"MTF Alignment: Multi-timeframe bullish ({mtf_result.get('market_movement', 'aligned')})")
+
         # Symmetrical Sell Factors
         sell_dxy = dxy_chg >= -0.05
         sell_yield = tnx_chg >= -0.2
@@ -416,6 +506,14 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
         if sell_vol: score_sell += 1; factors_sell.append(f"Risk: Volatility tradeable ({vol30:.1f}%)")
         if sell_no_trap: score_sell += 1; factors_sell.append("Microstructure: Clean auction; no Bear Trap")
         if (sw_high - curr) / curr <= 0.08: score_sell += 1; factors_sell.append("Structure: Distribution near resistance")
+
+        # Multi-Timeframe Alignment Sell Factor (GOLD)
+        feat_mtf_sell = False
+        if mtf_result and mtf_result.get("dominant_direction") == "SELL":
+            feat_mtf_sell = True
+        if feat_mtf_sell:
+            score_sell += 1
+            factors_sell.append(f"MTF Alignment: Multi-timeframe bearish ({mtf_result.get('market_movement', 'aligned')})")
 
     # Select Dominant Direction
     is_short = score_sell > score_buy
