@@ -25,6 +25,7 @@ import time
 import signal
 import argparse
 import threading
+import asyncio
 
 # Ensure project root on path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
