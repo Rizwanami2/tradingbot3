@@ -160,6 +160,207 @@ STRATEGY_AUTO_SWITCH = False
 LAST_CLOSED_TRADE_TIME = {"GOLD": 0.0, "BTC": 0.0}
 POST_TRADE_COOLDOWN_SECONDS = 600  # 10 minutes post-TP/SL rest to prevent exhaustion traps
 
+# ── PREDICTIVE ENTRY ZONE DETECTION (SEPARATE / TELEGRAM-ONLY COMMAND) ──
+# Detects where price is LIKELY to return based on historical reaction points.
+# These are PROBABILISTIC zones derived from swing points, order blocks, and FVGs.
+# Used ONLY by /predict_gold and /predict_btc commands - ZERO effect on auto trading.
+
+_PREDICTIVE_ZONE_CACHE: Dict[str, Tuple[float, Any]] = {}
+_PREDICTIVE_ZONE_TTL_SECONDS = int(os.environ.get("PREDICTIVE_ZONE_TTL_SECONDS", "300"))
+
+
+def _detect_swing_points(hist: Any, lookback: int = 10) -> Tuple[list, list]:
+    """Detect swing highs and lows from historical data."""
+    if hist is None or len(hist) < lookback * 2 + 5:
+        return [], []
+
+    highs = hist["High"].astype(float).values
+    lows = hist["Low"].astype(float).values
+
+    swing_highs = []
+    swing_lows = []
+
+    for i in range(lookback, len(highs) - lookback):
+        if all(highs[i] >= highs[i - j] for j in range(1, lookback + 1)) and \
+           all(highs[i] >= highs[i + j] for j in range(1, lookback + 1)):
+            swing_highs.append(float(highs[i]))
+        if all(lows[i] <= lows[i - j] for j in range(1, lookback + 1)) and \
+           all(lows[i] <= lows[i + j] for j in range(1, lookback + 1)):
+            swing_lows.append(float(lows[i]))
+
+    return swing_highs, swing_lows
+
+
+def _cluster_levels(levels: list, tolerance_pct: float = 0.003) -> list:
+    """Cluster nearby price levels into zones."""
+    if not levels:
+        return []
+    sorted_levels = sorted(levels)
+    clusters = []
+    current_cluster = [sorted_levels[0]]
+    for level in sorted_levels[1:]:
+        if abs(level - current_cluster[-1]) / current_cluster[-1] <= tolerance_pct:
+            current_cluster.append(level)
+        else:
+            clusters.append(current_cluster)
+            current_cluster = [level]
+    clusters.append(current_cluster)
+
+    zone_results = []
+    for cluster in clusters:
+        zone_center = float(np.mean(cluster))
+        touch_count = len(cluster)
+        strength = min(touch_count / 5.0, 1.0)
+        zone_results.append((zone_center, touch_count, strength))
+    zone_results.sort(key=lambda x: x[2], reverse=True)
+    return zone_results
+
+
+def _detect_order_blocks_fvg(hist: Any, lookback: int = 20) -> list:
+    """Detect Order Blocks and Fair Value Gaps."""
+    if hist is None or len(hist) < lookback + 5:
+        return []
+
+    highs = hist["High"].astype(float).values
+    lows = hist["Low"].astype(float).values
+    opens = hist["Open"].astype(float).values
+    closes = hist["Close"].astype(float).values
+
+    zones = []
+
+    for i in range(2, len(highs) - 1):
+        if closes[i - 2] < closes[i]:  # Bullish FVG
+            fvg_low = highs[i - 2]
+            fvg_high = lows[i]
+            if fvg_low < fvg_high:
+                zones.append((fvg_low, fvg_high, "FVG_BULLISH", 0.7))
+        elif closes[i - 2] > closes[i]:  # Bearish FVG
+            fvg_low = lows[i]
+            fvg_high = highs[i - 2]
+            if fvg_low < fvg_high:
+                zones.append((fvg_low, fvg_high, "FVG_BEARISH", 0.7))
+
+        avg_body = np.mean(np.abs(closes[max(0, i - 10):i] - opens[max(0, i - 10):i]))
+        curr_body = abs(closes[i] - opens[i])
+
+        if curr_body > avg_body * 1.5:
+            if closes[i] > opens[i]:  # Bullish move - OB is last bearish candle
+                ob_idx = i - 1
+                if ob_idx >= 0 and closes[ob_idx] < opens[ob_idx]:
+                    ob_low = min(opens[ob_idx], closes[ob_idx])
+                    ob_high = max(opens[ob_idx], closes[ob_idx])
+                    zones.append((ob_low, ob_high, "OB_BEARISH", 0.8))
+            else:  # Bearish move - OB is last bullish candle
+                ob_idx = i - 1
+                if ob_idx >= 0 and closes[ob_idx] > opens[ob_idx]:
+                    ob_low = min(opens[ob_idx], closes[ob_idx])
+                    ob_high = max(opens[ob_idx], closes[ob_idx])
+                    zones.append((ob_low, ob_high, "OB_BULLISH", 0.8))
+
+    return zones
+
+
+def _calculate_predictive_entry_zones(hist: Any, asset_type: str, curr_price: float) -> Dict:
+    """Calculate predictive entry zones based on historical reaction points."""
+    if hist is None or len(hist) < 50:
+        return {"buy_zones": [], "sell_zones": [], "total_zones": 0}
+
+    swing_highs, swing_lows = _detect_swing_points(hist, lookback=10)
+    resistance_zones = _cluster_levels(swing_highs, tolerance_pct=0.003)
+    support_zones = _cluster_levels(swing_lows, tolerance_pct=0.003)
+    ob_fvg_zones = _detect_order_blocks_fvg(hist, lookback=20)
+
+    buy_zones = []
+    for zone_level, touch_count, strength in support_zones:
+        if zone_level < curr_price * 0.995:
+            distance_pct = (curr_price - zone_level) / curr_price * 100
+            buy_zones.append({
+                "zone_price": round(zone_level, 2),
+                "touch_count": touch_count,
+                "strength": round(strength, 2),
+                "distance_pct": round(distance_pct, 2),
+                "zone_type": "SUPPORT"
+            })
+
+    sell_zones = []
+    for zone_level, touch_count, strength in resistance_zones:
+        if zone_level > curr_price * 1.005:
+            distance_pct = (zone_level - curr_price) / curr_price * 100
+            sell_zones.append({
+                "zone_price": round(zone_level, 2),
+                "touch_count": touch_count,
+                "strength": round(strength, 2),
+                "distance_pct": round(distance_pct, 2),
+                "zone_type": "RESISTANCE"
+            })
+
+    for zone_low, zone_high, zone_type, strength in ob_fvg_zones:
+        zone_center = (zone_low + zone_high) / 2
+        if zone_type in ("OB_BULLISH", "FVG_BULLISH") and zone_center < curr_price * 0.995:
+            buy_zones.append({
+                "zone_price": round(zone_center, 2),
+                "touch_count": 1,
+                "strength": round(strength, 2),
+                "distance_pct": round((curr_price - zone_center) / curr_price * 100, 2),
+                "zone_type": zone_type
+            })
+        elif zone_type in ("OB_BEARISH", "FVG_BEARISH") and zone_center > curr_price * 1.005:
+            sell_zones.append({
+                "zone_price": round(zone_center, 2),
+                "touch_count": 1,
+                "strength": round(strength, 2),
+                "distance_pct": round((zone_center - curr_price) / curr_price * 100, 2),
+                "zone_type": zone_type
+            })
+
+    buy_zones.sort(key=lambda x: (x["distance_pct"], -x["strength"]))
+    sell_zones.sort(key=lambda x: (x["distance_pct"], -x["strength"]))
+
+    return {
+        "buy_zones": buy_zones[:5],
+        "sell_zones": sell_zones[:5],
+        "total_zones": len(buy_zones) + len(sell_zones),
+        "curr_price": round(curr_price, 2)
+    }
+
+
+def _select_best_entry_zone(predictive_zones: Dict, side: str, curr_price: float,
+                            max_distance_pct: float = 3.0) -> Dict:
+    """Select the best entry zone from predictive zones."""
+    zones = predictive_zones.get("buy_zones" if side == "BUY" else "sell_zones", [])
+    if not zones:
+        return None
+
+    valid_zones = [z for z in zones if z["distance_pct"] <= max_distance_pct]
+    if not valid_zones:
+        return None
+
+    best_zone = None
+    best_score = -1
+    for zone in valid_zones:
+        distance_factor = 1.0 / max(zone["distance_pct"], 0.1)
+        score = zone["strength"] * distance_factor
+        if score > best_score:
+            best_score = score
+            best_zone = zone
+
+    if best_zone is None:
+        return None
+
+    confidence = min(best_zone["strength"] * 0.6 + min(best_zone["touch_count"] / 10.0, 0.4), 0.95)
+
+    return {
+        "zone_price": best_zone["zone_price"],
+        "zone_type": best_zone["zone_type"],
+        "confidence": round(confidence, 2),
+        "distance_pct": best_zone["distance_pct"],
+        "touch_count": best_zone["touch_count"],
+        "strength": best_zone["strength"],
+        "reason": f"Predictive {best_zone['zone_type']} zone at {best_zone['zone_price']} "
+                  f"({best_zone['touch_count']} touches, strength={best_zone['strength']:.2f})"
+    }
+
+
 def verify_live_candle_direction(asset: str, action: str) -> tuple[bool, str]:
     """
     Microstructure Live Candle Momentum Gate.
@@ -3124,13 +3325,13 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
         return
 
     # ── 3. MODERN TRADE HUB (/trade [buy|sell|close|auto]) ──
-    if cmd == "/trade" or cmd in ("/buy_gold", "/sell_gold", "/buy_btc", "/sell_btc", "/close_all", "/auto_trade"):
-        if cmd == "/buy_gold": action_mode = "buy gold"
-        elif cmd == "/sell_gold": action_mode = "sell gold"
-        elif cmd == "/buy_btc": action_mode = "buy btc"
-        elif cmd == "/sell_btc": action_mode = "sell btc"
-        elif cmd == "/close_all": action_mode = "close"
-        elif cmd == "/auto_trade": action_mode = f"auto {args}" if args else "auto"
+    if cmd in ("/close_all", "/closeall", "/auto_trade", "/autotrade", "/trade"):
+        if cmd == "/buy_gold" or cmd == "/buygold": action_mode = "buy gold"
+        elif cmd == "/sell_gold" or cmd == "/sellgold": action_mode = "sell gold"
+        elif cmd == "/buy_btc" or cmd == "/buybtc": action_mode = "buy btc"
+        elif cmd == "/sell_btc" or cmd == "/sellbtc": action_mode = "sell btc"
+        elif cmd == "/close_all" or cmd == "/closeall": action_mode = "close"
+        elif cmd == "/auto_trade" or cmd == "/autotrade": action_mode = f"auto {args}" if args else "auto"
         else: action_mode = args_lower
 
         # Sub-branch: Auto-Trade Watchlist Configuration
@@ -3317,8 +3518,8 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
         return
 
     # ── 3B. MANUAL SIGNAL APPROVAL (/approve [gold|btc] | /approve_gold | /approve_btc) ──
-    if cmd in ("/approve", "/approve_gold", "/approve_btc"):
-        target_asset = "GOLD" if (cmd == "/approve_gold" or "gold" in args_lower or "xau" in args_lower) else ("BTC" if (cmd == "/approve_btc" or "btc" in args_lower or "bitcoin" in args_lower) else None)
+    if cmd in ("/approve", "/approve_gold", "/approvegold", "/approve_btc", "/approvebtc"):
+        target_asset = "GOLD" if (cmd in ("/approve_gold", "/approvegold") or "gold" in args_lower or "xau" in args_lower) else ("BTC" if (cmd in ("/approve_btc", "/approvebtc") or "btc" in args_lower or "bitcoin" in args_lower) else None)
         if not target_asset:
             g_s = get_active_setup("GOLD")
             b_s = get_active_setup("BTC")
@@ -3336,8 +3537,8 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
         return
 
     # ── 3C. SIGNAL DISMISSAL (/ignore [gold|btc] | /ignore_gold | /ignore_btc | /dismiss) ──
-    if cmd in ("/ignore", "/ignore_gold", "/ignore_btc", "/dismiss"):
-        target_asset = "GOLD" if (cmd == "/ignore_gold" or "gold" in args_lower or "xau" in args_lower) else ("BTC" if (cmd == "/ignore_btc" or "btc" in args_lower or "bitcoin" in args_lower) else None)
+    if cmd in ("/ignore", "/ignore_gold", "/ignoregold", "/ignore_btc", "/ignorebtc", "/dismiss"):
+        target_asset = "GOLD" if (cmd in ("/ignore_gold", "/ignoregold") or "gold" in args_lower or "xau" in args_lower) else ("BTC" if (cmd in ("/ignore_btc", "/ignorebtc") or "btc" in args_lower or "bitcoin" in args_lower) else None)
         if not target_asset:
             g_s = get_active_setup("GOLD")
             b_s = get_active_setup("BTC")
@@ -3355,10 +3556,10 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
         return
 
     # ── 3D. SCANNER UNLOCK CONTROLLER (/unlock [gold|btc|all] | /unlock_gold | /unlock_btc | /unlock_all) ──
-    if cmd in ("/unlock", "/unlock_gold", "/unlock_btc", "/unlock_all"):
-        if cmd == "/unlock_gold" or "gold" in args_lower or "xau" in args_lower:
+    if cmd in ("/unlock", "/unlock_gold", "/unlockgold", "/unlock_btc", "/unlockbtc", "/unlock_all", "/unlockall"):
+        if cmd in ("/unlock_gold", "/unlockgold") or "gold" in args_lower or "xau" in args_lower:
             unlock_scanners(token, sender_id, "GOLD")
-        elif cmd == "/unlock_btc" or "btc" in args_lower or "bitcoin" in args_lower:
+        elif cmd in ("/unlock_btc", "/unlockbtc") or "btc" in args_lower or "bitcoin" in args_lower:
             unlock_scanners(token, sender_id, "BTC")
         else:
             unlock_scanners(token, sender_id, "ALL")
@@ -4170,6 +4371,91 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             send_message(token, sender_id, dual_card, reply_markup=markup)
             return
 
+    # ── 7F. PREDICTIVE ENTRY ZONES (/predict_gold | /predict_btc | /predictgold | /predictbtc) ──
+    # Separate command - ZERO effect on auto trading. Read-only advisory only.
+    if cmd in ("/predict_gold", "/predictgold", "/predict_btc", "/predictbtc"):
+        if not (MARKET_DATA_AVAILABLE and market_data_feed):
+            send_message(token, sender_id, "⚠️ Market data feed unavailable. Cannot compute predictive zones.")
+            return
+
+        is_gold = cmd in ("/predict_gold", "/predictgold")
+        asset_type = "GOLD" if is_gold else "BTC"
+        symbol = "GC=F" if is_gold else "BTC-USD"
+
+        send_message(token, sender_id, f"🔮 *Computing predictive entry zones for {asset_type}...*\n_Scanning historical swing points, order blocks, and FVGs..._")
+
+        try:
+            hist = _get_cached_hist(symbol, period="350d")
+            if hist is None or hist.empty or len(hist) < 50:
+                send_message(token, sender_id, f"⚠️ Insufficient historical data for {asset_type} predictive analysis.")
+                return
+
+            pz = _calculate_predictive_entry_zones(hist, asset_type, hist["Close"].iloc[-1])
+
+            curr_price = pz["curr_price"]
+            buy_zones = pz.get("buy_zones", [])
+            sell_zones = pz.get("sell_zones", [])
+
+            msg_lines = [
+                f"🔮 *PREDICTIVE ENTRY ZONES - {asset_type}*",
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                f"• Current Price: `${curr_price:,.2f}`",
+                f"• Data Source: Historical swing points, Order Blocks, FVGs",
+                f"• Total Zones Found: `{pz['total_zones']}`",
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                f"",
+                f"📉 *BUY ZONES (Below Current Price)*:",
+            ]
+
+            if buy_zones:
+                for z in buy_zones[:5]:
+                    conf_bar = "🟢" * int(z["confidence"] * 10) + "⚪" * (10 - int(z["confidence"] * 10))
+                    msg_lines.append(
+                        f"• `${z['zone_price']:,.2f}` - {z['zone_type']} ({z['distance_pct']:.1f}% below)\n"
+                        f"  Strength: `{z['strength']:.2f}` | Touches: `{z['touch_count']}` | Confidence: `{z['confidence']:.0%}` {conf_bar}"
+                    )
+            else:
+                msg_lines.append("• No buy zones detected within 3% of current price.")
+
+            msg_lines.append("")
+            msg_lines.append("📈 *SELL ZONES (Above Current Price)*:")
+
+            if sell_zones:
+                for z in sell_zones[:5]:
+                    conf_bar = "🟢" * int(z["confidence"] * 10) + "⚪" * (10 - int(z["confidence"] * 10))
+                    msg_lines.append(
+                        f"• `${z['zone_price']:,.2f}` - {z['zone_type']} ({z['distance_pct']:.1f}% above)\n"
+                        f"  Strength: `{z['strength']:.2f}` | Touches: `{z['touch_count']}` | Confidence: `{z['confidence']:.0%}` {conf_bar}"
+                    )
+            else:
+                sell_zones.append("• No sell zones detected within 3% of current price.")
+
+            msg_lines.extend([
+                "",
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                f"💡 *How to use:* Place limit orders near these zones for better entry prices.",
+                f"⚠️ *Probabilistic zones - price may never reach them.*",
+                f"🔄 *Run again anytime for updated zones.*"
+            ])
+
+            predict_msg = "\n".join(msg_lines)
+            predict_markup = {
+                "inline_keyboard": [
+                    [
+                        {"text": "🔄 Refresh Zones", "callback_data": "predict_gold" if is_gold else "predict_btc"},
+                        {"text": "📊 Live Scan", "callback_data": "scan"}
+                    ],
+                    [
+                        {"text": "🥇 Gold Zones", "callback_data": "predict_gold"},
+                        {"text": "₿ BTC Zones", "callback_data": "predict_btc"}
+                    ]
+                ]
+            }
+            send_message(token, sender_id, predict_msg, reply_markup=predict_markup)
+        except Exception as e:
+            logger.error(f"Predictive zone error: {e}")
+            send_message(token, sender_id, f"❌ Error computing predictive zones: {e}")
+        return
 
     # ── 7E. ADVANCED HIERARCHICAL MEMORY & CONTINUOUS EVOLUTION HUB (/memory, /mem) ──
     if cmd in ("/memory", "/mem"):
