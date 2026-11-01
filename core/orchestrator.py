@@ -491,6 +491,59 @@ class Orchestrator:
         decision["reason"] = "All gates passed"
         decision["regime"] = regime
         decision["applied_risk_pct"] = regime_risk_pct
+
+        # Enhancement: Structure-Based SL + Smart Lot Sizing by Confidence
+        try:
+            entry = float(order_ticket.get("entry", 0))
+            sl = float(order_ticket.get("stop_loss", 0))
+            tp1 = float(order_ticket.get("tp1", 0))
+            confidence = max(score, adaptive_score)
+
+            # Extract swing levels from candidate/order_ticket if available
+            swing_high = float(order_ticket.get("swing_high", 0) or candidate.get("swing_high", 0))
+            swing_low = float(order_ticket.get("swing_low", 0) or candidate.get("swing_low", 0))
+            atr = float(order_ticket.get("atr", 0) or candidate.get("atr", 0) or 0)
+
+            if swing_high > 0 or swing_low > 0:
+                sl_result = calculate_structure_based_sl(
+                    asset=asset, current_price=entry, action=side,
+                    swing_high=swing_high, swing_low=swing_low, atr=atr
+                )
+                if sl_result.get("sl_type") == "structure" and sl_result.get("stop_loss"):
+                    decision["stop_loss"] = sl_result["stop_loss"]
+                    decision["sl_dist"] = sl_result["sl_dist"]
+                    decision["sl_type"] = "structure"
+                    logger.info(f"Structure-based SL applied: ${sl_result['stop_loss']:,.2f} (dist={sl_result['sl_dist']})")
+                else:
+                    decision["sl_type"] = "fallback_atr"
+            else:
+                decision["sl_type"] = "fallback_atr"
+
+            # Smart lot sizing by confidence
+            account_balance = float(bot_state.equity or snapshot.get("equity", 10000.0))
+            max_risk_pct = float(os.environ.get("MAX_RISK_PCT_PER_TRADE", "1.0"))
+            lot_result = calculate_smart_lot_by_confidence(
+                asset=asset, entry_price=entry, stop_loss_price=decision["stop_loss"],
+                confidence_score=confidence, account_balance=account_balance,
+                max_risk_pct=max_risk_pct, regime_risk_pct=regime_risk_pct
+            )
+            if not lot_result.get("skip", False):
+                decision["lot_size"] = lot_result["lots"]
+                decision["risk_pct"] = lot_result["risk_pct"]
+                decision["risk_usd"] = lot_result["risk_usd"]
+                decision["confidence_score"] = confidence
+                order_ticket["lot_size"] = lot_result["lots"]
+                order_ticket["risk_pct"] = lot_result["risk_pct"]
+                logger.info(f"Smart lot sizing: {lot_result['lots']} lots @ {lot_result['risk_pct']:.2f}% risk (confidence={confidence:.1f})")
+            else:
+                decision["action"] = "SKIP"
+                decision["reason"] = lot_result.get("skip_reason", "Confidence too low")
+                logger.info(f"Candidate {asset} {side} skipped: {decision['reason']}")
+                return decision
+        except Exception as e:
+            logger.warning(f"Enhancement (structure SL / smart lot) failed: {e}")
+            decision["sl_type"] = "fallback_atr"
+
         logger.info(f"Candidate {asset} {side} APPROVED (score={score:.1f}, regime={regime}, risk={regime_risk_pct:.2f}%)")
         return decision
 
@@ -558,7 +611,8 @@ class Orchestrator:
         """Stop the orchestrator."""
         self.running = False
         self.state = self.STOPPED
-        logger.info("Orchestrator stopped")
+        single_instance_lock.release()
+        logger.info("Orchestrator stopped and lock released")
 
 
 def _bot_global_excepthook(exctype, value, tb):
