@@ -59,6 +59,12 @@ except ImportError:
     print("❌ yfinance required. Run: py -3.11 -m pip install yfinance")
     sys.exit(1)
 
+# Import MT5 for live broker data (recommended for live trading)
+try:
+    import MetaTrader5 as mt5
+except ImportError:
+    mt5 = None
+
 # Import Self-Learning Engine
 try:
     from self_learning import SelfLearningEngine
@@ -88,6 +94,18 @@ try:
     RISK_ENGINE_AVAILABLE = True
 except Exception:
     RISK_ENGINE_AVAILABLE = False
+
+# Import MT5 Live Broker for direct broker data (eliminates data/execution mismatch)
+try:
+    from mt5_executor import MT5LiveBroker, live_broker
+    MT5_BROKER_AVAILABLE = True
+except Exception:
+    MT5LiveBroker = None
+    live_broker = None
+    MT5_BROKER_AVAILABLE = False
+
+# Env flag: prefer MT5 live data over yfinance (recommended for live trading)
+USE_MT5_LIVE_DATA = os.environ.get("USE_MT5_LIVE_DATA", "true").lower() in ("true", "1", "yes")
 
 
 def send_pipeline_crash_alert(exc: Exception, context: str = "Autotrader Pipeline"):
@@ -133,29 +151,133 @@ def fetch_fear_greed():
         return 50, "Neutral"
 
 
-# ── Indicator Cache (TTL) to avoid redundant yfinance fetches ──
+# ── Indicator Cache (TTL) to avoid redundant data fetches ──
 _indicator_cache: Dict[str, Tuple[float, Any]] = {}
 _CACHE_TTL_SECONDS = int(os.environ.get("INDICATOR_CACHE_TTL_SECONDS", "30"))
 
+# MT5 symbol mapping (yfinance -> MT5)
+_MT5_SYMBOL_MAP = {
+    "GC=F": "XAUUSD",
+    "XAUUSD": "XAUUSD",
+    "GOLD": "XAUUSD",
+    "BTC-USD": "BTCUSD",
+    "BTCUSD": "BTCUSD",
+    "BTC": "BTCUSD",
+}
+
+_MT5_TIMEFRAME_MAP = {
+    "1d": mt5.TIMEFRAME_D1 if (MT5_BROKER_AVAILABLE and mt5) else None,
+    "1h": mt5.TIMEFRAME_H1 if (MT5_BROKER_AVAILABLE and mt5) else None,
+    "15m": mt5.TIMEFRAME_M15 if (MT5_BROKER_AVAILABLE and mt5) else None,
+    "5m": mt5.TIMEFRAME_M5 if (MT5_BROKER_AVAILABLE and mt5) else None,
+    "1m": mt5.TIMEFRAME_M1 if (MT5_BROKER_AVAILABLE and mt5) else None,
+}
+
+
+def _mt5_rates_to_dataframe(rates, symbol: str):
+    """Convert MT5 copy_rates_from_pos result to yfinance-compatible DataFrame."""
+    import pandas as pd
+    if rates is None or len(rates) == 0:
+        return pd.DataFrame()
+    df = pd.DataFrame(rates)
+    if "time" in df.columns:
+        df["time"] = pd.to_datetime(df["time"], unit="s")
+        df.set_index("time", inplace=True)
+    # Rename MT5 columns to yfinance-compatible names
+    col_map = {
+        "open": "Open",
+        "high": "High",
+        "low": "Low",
+        "close": "Close",
+        "tick_volume": "Volume",
+        "real_volume": "Volume",
+    }
+    for src, dst in col_map.items():
+        if src in df.columns and dst not in df.columns:
+            df[dst] = df[src]
+    # Ensure required columns exist
+    for col in ["Open", "High", "Low", "Close", "Volume"]:
+        if col not in df.columns:
+            df[col] = 0.0
+    df = df[["Open", "High", "Low", "Close", "Volume"]]
+    return df
+
+
+def _get_mt5_hist(symbol: str, count: int = 400, timeframe=None) -> Any:
+    """Fetch historical bars directly from live MT5 broker."""
+    if not MT5_BROKER_AVAILABLE or live_broker is None:
+        return None
+    try:
+        if not live_broker.ensure_connected():
+            return None
+        mt5_symbol = _MT5_SYMBOL_MAP.get(symbol, symbol)
+        tf = timeframe or mt5.TIMEFRAME_H1
+        rates = mt5.copy_rates_from_pos(mt5_symbol, tf, 0, count)
+        if rates is None or len(rates) == 0:
+            return None
+        return _mt5_rates_to_dataframe(rates, symbol)
+    except Exception as e:
+        logger.debug(f"MT5 data fetch failed for {symbol}: {e}")
+        return None
+
 
 def _get_cached_hist(symbol: str, period: str = "350d"):
-    """Fetch historical bars with TTL caching to avoid redundant yfinance calls."""
+    """Fetch historical bars with TTL caching. Prefers MT5 live broker data
+    (eliminates data/execution mismatch), falls back to yfinance."""
     now = time.time()
-    if symbol in _indicator_cache:
-        cached_time, cached_hist = _indicator_cache[symbol]
+    cache_key = f"{symbol}:{period}"
+    if cache_key in _indicator_cache:
+        cached_time, cached_hist = _indicator_cache[cache_key]
         if now - cached_time < _CACHE_TTL_SECONDS:
             return cached_hist
-    t = yf.Ticker(symbol)
-    hist = t.history(period=period)
-    _indicator_cache[symbol] = (now, hist)
+
+    hist = None
+
+    # Priority 1: MT5 live broker (real broker data, matches execution prices)
+    if USE_MT5_LIVE_DATA and MT5_BROKER_AVAILABLE and mt5:
+        # Determine count based on period string
+        if period.endswith("d"):
+            days = int(period[:-1]) if period[:-1].isdigit() else 350
+            count = min(days * 24, 400)  # H1 bars, max 400
+            tf = mt5.TIMEFRAME_H1
+        elif period.endswith("h"):
+            hours = int(period[:-1]) if period[:-1].isdigit() else 168
+            count = min(hours, 400)
+            tf = mt5.TIMEFRAME_H1
+        else:
+            count = 400
+            tf = mt5.TIMEFRAME_H1
+
+        hist = _get_mt5_hist(symbol, count=count, timeframe=tf)
+
+    # Priority 2: market_data_feed (yfinance with sanitization)
+    if (hist is None or hist.empty or len(hist) < 30) and MARKET_DATA_AVAILABLE and market_data_feed:
+        try:
+            hist = market_data_feed.get_historical_bars(
+                "GOLD" if "XAU" in symbol.upper() or "GOLD" in symbol.upper() else "BTC",
+                period=period,
+                min_bars=30,
+            )
+        except Exception as e:
+            logger.debug(f"market_data_feed failed for {symbol}: {e}")
+
+    # Priority 3: Direct yfinance (last resort, for backtesting/research)
+    if (hist is None or hist.empty or len(hist) < 30):
+        try:
+            t = yf.Ticker(symbol)
+            hist = t.history(period=period)
+        except Exception as e:
+            logger.debug(f"yfinance direct failed for {symbol}: {e}")
+            hist = None
+
+    if hist is not None and not hist.empty:
+        _indicator_cache[cache_key] = (now, hist)
     return hist
 
 
 def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg: float, gsr: float, fg_val: int):
-    if MARKET_DATA_AVAILABLE and market_data_feed:
-        hist = market_data_feed.get_historical_bars(asset_type, period="350d", min_bars=30)
-    else:
-        hist = _get_cached_hist(symbol, period="350d")
+    # Priority: MT5 live broker first (matches execution prices), then yfinance
+    hist = _get_cached_hist(symbol, period="350d")
     if hist.empty or len(hist) < 30:
         return None
 
