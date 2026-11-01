@@ -141,7 +141,6 @@ class SafetyManager:
         default_state = {
             "trading_mode": DEFAULT_TRADING_MODE,
             "live_mode_confirmed": False,
-            "first_trade_confirmed_date": "",
             "kill_switch_active": False,
             "kill_switch_reason": "",
             "daily_date": today_utc,
@@ -169,7 +168,6 @@ class SafetyManager:
                         data["realized_daily_pnl"] = 0.0
                         data["unrealized_daily_pnl"] = 0.0
                         data["daily_circuit_breaker_tripped"] = False
-                        data["first_trade_confirmed_date"] = ""
                     for k, v in default_state.items():
                         if k not in data:
                             data[k] = v
@@ -249,14 +247,14 @@ class SafetyManager:
             return True, "⚪ *PAPER TRADING MODE ACTIVE*\nAll trades are simulated risk-free in memory with realistic fills & slippage."
 
     def is_first_trade_confirmed_today(self) -> bool:
-        today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        return self.state.get("first_trade_confirmed_date") == today_utc
+        """First trade confirmation removed - auto-trade is always allowed."""
+        return True
 
     def confirm_first_trade_today(self) -> tuple:
         today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         self.state["first_trade_confirmed_date"] = today_utc
         self.save_state()
-        return True, "✅ First live trade of the day confirmed. Live auto-execution authorized for today."
+        return True, "✅ First trade of the day confirmed. Live auto-execution authorized for today."
 
     # ── 2. Emergency Kill-Switch ──────────────────────────────────
     def is_kill_switch_active(self) -> tuple:
@@ -986,7 +984,7 @@ class SafetyManager:
         kill_status = f"🚨 ACTIVE ({kill_reason}) — Reset via `/kill_reset CONFIRM`" if kill_active else "ARMED ✅ (Normal Execution)"
         breaker_status = f"🛑 TRIPPED ({daily_loss_pct:.2f}%) — Locked for today" if breaker_tripped else f"ARMED ✅ (Current: {daily_pnl:+,.2f} / -${starting_eq * (DAILY_LOSS_LIMIT_PCT/100):,.2f} halt)"
 
-        first_trade_st = "NOT REQUIRED (Simulation)" if mode != "LIVE" else ("CONFIRMED ✅ (Authorized Today)" if self.is_first_trade_confirmed_today() else "PENDING ⚠️ (Requires `/confirm_trade YES`)")
+        first_trade_st = "NOT REQUIRED" if mode != "LIVE" else ("CONFIRMED ✅ (Authorized Today)" if self.is_first_trade_confirmed_today() else "PENDING ⚠️ (Requires `/confirm_trade YES`)")
 
         lines = [
             "🛡️ *SAFETY & RISK CONTROLLER DASHBOARD*",

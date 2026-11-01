@@ -458,9 +458,8 @@ class TestHardAssetProject(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(sm.get_trading_mode(), "LIVE")
 
-        # In LIVE mode, first trade of day requires confirmation
-        sm.state["first_trade_confirmed_date"] = ""
-        self.assertFalse(sm.is_first_trade_confirmed_today())
+        # In LIVE mode, first trade confirmation is no longer required - always allowed
+        self.assertTrue(sm.is_first_trade_confirmed_today())
         ok, msg = sm.confirm_first_trade_today()
         self.assertTrue(ok)
         self.assertTrue(sm.is_first_trade_confirmed_today())

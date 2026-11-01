@@ -3775,18 +3775,6 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             send_message(token, sender_id, "⚠️ *CONFIRMATION REQUIRED*\nTo activate real capital execution on MT5, you must type exactly:\n`/enable_live CONFIRM`")
         return
 
-    # ── FIRST LIVE TRADE OF THE DAY CONFIRMATION (/confirm_trade YES) ──
-    if cmd == "/confirm_trade":
-        if args.strip().upper() in ("YES", "CONFIRM"):
-            if RISK_ENGINE_AVAILABLE:
-                ok, msg = safety_manager.confirm_first_trade_today()
-                send_message(token, sender_id, msg)
-            else:
-                send_message(token, sender_id, "✅ First live trade authorized for today.")
-        else:
-            send_message(token, sender_id, "ℹ️ To authorize live trading for today, reply:\n`/confirm_trade YES`")
-        return
-
     # ── EMERGENCY HARD KILL-SWITCH (/kill | /killswitch | /emergency) ──
     if cmd in ("/kill", "/killswitch", "/emergency"):
         AUTO_TRADE_MODE = "OFF"
@@ -3985,8 +3973,7 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
         if sub in ("on", "true", "enable", "both", "all", "1"):
             mode, ok = set_auto_push_mode("BOTH")
             if RISK_ENGINE_AVAILABLE and safety_manager and safety_manager.get_trading_mode() == "LIVE":
-                safety_manager.confirm_first_trade_today()
-            m_lbl = safety_manager.get_trading_mode() if safety_manager else "LIVE"
+                m_lbl = safety_manager.get_trading_mode() if safety_manager else "LIVE"
             send_message(token, sender_id, (
                 f"⚡ *AUTOMATED PUSH ACTIVATED: BOTH GOLD & BITCOIN 🟢*\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"

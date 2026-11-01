@@ -442,16 +442,6 @@ class MT5LiveBroker:
         if not term.trade_allowed:
             return {"success": False, "error": "Algo Trading is DISABLED in MT5. Go to Tools -> Options -> Expert Advisors -> Allow algorithmic trading."}
 
-        # LIVE Mode Double Confirmation
-        if current_mode == "LIVE" and safety_manager:
-            if not safety_manager.is_first_trade_confirmed_today():
-                return {
-                    "success": False,
-                    "error": "First live trade of the day requires confirmation! Run: /confirm_trade YES",
-                    "requires_confirmation": True,
-                    "mode": "LIVE"
-                }
-
         symbol = self.resolve_symbol(asset)
         sym_info = mt5.symbol_info(symbol)
         if not sym_info:
