@@ -779,8 +779,31 @@ class SelfLearningEngine:
                 print(f"⚠️ Forensic post-mortem execution error: {err}")
 
         # Bayesian Beta-Binomial update & Factor Weight Drift
-        weights = self.memory["weights"].get(asset, DEFAULT_WEIGHTS)
+        weights = self.memory["weights"].get(asset, dict(DEFAULT_WEIGHTS))
         stats = self.memory["feature_stats"].get(asset, {})
+
+        # ── Temporal Decay: Pull weights back toward defaults over time ──
+        # Recent trades matter more; old weight drift fades with half-life from hyperparams
+        half_life = float(self.memory.get("hyperparams", {}).get("temporal_decay_half_life_days", 45.0))
+        last_update_str = self.memory.get("last_weight_update", "")
+        if last_update_str:
+            try:
+                last_dt = datetime.strptime(last_update_str, "%Y-%m-%d %H:%M:%S")
+                delta_days = max(0.0, (datetime.now() - last_dt).total_seconds() / 86400.0)
+                decay_factor = self.compute_temporal_weight(delta_t_days=delta_days, half_life_days=half_life)
+            except Exception:
+                decay_factor = 1.0
+        else:
+            decay_factor = 1.0
+
+        if decay_factor < 1.0:
+            for feat in weights:
+                current = weights.get(feat, 1.0)
+                default = DEFAULT_WEIGHTS.get(feat, 1.0)
+                # Pull toward default: weight = default + (current - default) * decay_factor
+                weights[feat] = round(default + (current - default) * decay_factor, 4)
+
+        self.memory["last_weight_update"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         for feat, is_active in active_features.items():
             if feat not in stats:

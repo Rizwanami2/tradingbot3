@@ -197,3 +197,38 @@ def check_confidence_threshold(confidence_score: float, min_score: float = 7.0) 
     if confidence_score < min_score:
         return False, f"Confidence {confidence_score:.1f} below minimum {min_score:.1f} — trade skipped"
     return True, f"Confidence OK ({confidence_score:.1f} >= {min_score:.1f})"
+
+
+def check_strategy_health(strategy: str, min_trades: int = 20, min_win_rate: float = 40.0) -> Tuple[bool, str]:
+    """Gate 17: Auto-disable strategies with poor recent performance.
+
+    Checks strategy_performance from self_learning memory. If a strategy has
+    >= min_trades closed and win_rate_pct < min_win_rate, veto new entries.
+    Prevents bleeding capital on broken strategies.
+    """
+    try:
+        from self_learning import self_learning_engine
+        sle = self_learning_engine
+    except Exception:
+        return True, "Self-learning engine unavailable — strategy health check skipped"
+
+    if not sle:
+        return True, "Self-learning engine unavailable — strategy health check skipped"
+
+    strat_stats = sle.memory.get("strategy_performance", {})
+    st = strat_stats.get(strategy.upper())
+    if not st:
+        return True, f"No performance data for {strategy} — check skipped"
+
+    total = st.get("total_trades", 0)
+    if total < min_trades:
+        return True, f"{strategy} only {total} trades (< {min_trades}) — health check skipped"
+
+    win_rate = st.get("win_rate_pct", 0.0)
+    if win_rate < min_win_rate:
+        return False, (
+            f"{strategy} auto-disabled: win rate {win_rate:.1f}% "
+            f"below {min_win_rate:.1f}% threshold ({total} trades)"
+        )
+
+    return True, f"{strategy} healthy: {win_rate:.1f}% WR ({total} trades)"

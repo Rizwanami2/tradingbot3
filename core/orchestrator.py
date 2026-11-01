@@ -368,6 +368,11 @@ class Orchestrator:
         pass_co, reason_co = gates.check_cooldown(bot_state, asset)
         results.append({"gate": "cooldown", "pass": pass_co, "reason": reason_co})
 
+        # Gate: Strategy Health Auto-Disable
+        strategy = candidate.get("strategy", "SCALP")
+        pass_sh, reason_sh = gates.check_strategy_health(strategy)
+        results.append({"gate": "strategy_health", "pass": pass_sh, "reason": reason_sh})
+
         # Gate: News window
         is_news_blocked = candidate.get("vetoed_by_news", False)
         news_msg = candidate.get("news_block_msg", "")

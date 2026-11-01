@@ -95,7 +95,10 @@ class MT5LiveBroker:
             "total_trades": 0,
             "excessive_slippage_count": 0,
             "max_slippage_pips": 0.0,
-            "recent_slippages": []
+            "recent_slippages": [],
+            "slippage_by_symbol": {},      # symbol -> {"count": n, "total_pips": x, "max_pips": y, "avg_pips": z}
+            "slippage_by_hour": {},        # hour (0-23) -> {"count": n, "total_pips": x, "max_pips": y}
+            "adaptive_max_slippage_pips": 3.0  # Auto-adjusted based on observed conditions
         }
 
     def _notify_telegram_alert(self, text: str):
@@ -621,25 +624,54 @@ class MT5LiveBroker:
         price_diff = abs(actual_fill - fill_price)
         slip_pips = (price_diff / pip_unit) if pip_unit > 0 else price_diff
 
+        # ── Per-Symbol & Per-Hour Execution Quality Tracking ──
+        now_hour = datetime.now().hour
+
+        # Per-symbol tracking
+        sym_stats = self.slippage_stats["slippage_by_symbol"].setdefault(
+            symbol, {"count": 0, "total_pips": 0.0, "max_pips": 0.0, "avg_pips": 0.0}
+        )
+        sym_stats["count"] += 1
+        sym_stats["total_pips"] += slip_pips
+        sym_stats["max_pips"] = max(sym_stats["max_pips"], slip_pips)
+        sym_stats["avg_pips"] = round(sym_stats["total_pips"] / sym_stats["count"], 2)
+
+        # Per-hour tracking
+        hour_stats = self.slippage_stats["slippage_by_hour"].setdefault(
+            str(now_hour), {"count": 0, "total_pips": 0.0, "max_pips": 0.0}
+        )
+        hour_stats["count"] += 1
+        hour_stats["total_pips"] += slip_pips
+        hour_stats["max_pips"] = max(hour_stats["max_pips"], slip_pips)
+
+        # Adaptive max slippage: raise limit if recent slippage consistently exceeds static limit
+        recent = self.slippage_stats["recent_slippages"]
+        if len(recent) >= 10:
+            recent_avg = sum(recent[-10:]) / len(recent[-10:])
+            if recent_avg > max_slippage_pips * 0.8:
+                self.slippage_stats["adaptive_max_slippage_pips"] = round(min(recent_avg * 1.25, max_slippage_pips * 2.0), 2)
+            else:
+                self.slippage_stats["adaptive_max_slippage_pips"] = max_slippage_pips
+
         self.slippage_stats["total_trades"] += 1
         self.slippage_stats["max_slippage_pips"] = max(self.slippage_stats["max_slippage_pips"], slip_pips)
         self.slippage_stats["recent_slippages"].append(round(slip_pips, 2))
         if len(self.slippage_stats["recent_slippages"]) > 50:
             self.slippage_stats["recent_slippages"].pop(0)
 
-        slip_ok = slip_pips <= max_slippage_pips
+        slip_ok = slip_pips <= self.slippage_stats["adaptive_max_slippage_pips"]
         if not slip_ok:
             self.slippage_stats["excessive_slippage_count"] += 1
             slip_warning = (f"⚠️ HIGH SLIPPAGE DETECTED on {symbol}: Requested ${entry_price:,.2f}, "
-                            f"Filled ${actual_fill:,.2f}, Slippage {slip_pips:.1f} pips > Limit {max_slippage_pips:.1f} pips.")
+                            f"Filled ${actual_fill:,.2f}, Slippage {slip_pips:.1f} pips > Limit {self.slippage_stats['adaptive_max_slippage_pips']:.1f} pips.")
             logger.warning(slip_warning)
             self._notify_telegram_alert(
                 f"⚠️ *HIGH SLIPPAGE ALERT*\n"
                 f"• Symbol: `{symbol}`\n"
                 f"• Requested: `${entry_price:,.2f}`\n"
                 f"• Actual Fill: `${actual_fill:,.2f}`\n"
-                f"• Slippage: `{slip_pips:.1f} pips` (Limit: `{max_slippage_pips:.1f}`)\n"
-                f"• Mode: `{current_mode}`"
+                f"• Slippage: `{slip_pips:.1f} pips` (Limit: `{self.slippage_stats['adaptive_max_slippage_pips']:.1f}`)\n"
+                f"• Hour: `{now_hour}:00` | Mode: `{current_mode}`"
             )
 
         if safety_manager:
