@@ -137,8 +137,16 @@ def run_historical_backtest(asset: str = "GOLD",
 
     # Fetch Price Data with interval support
     ticker = yf.Ticker(symbol)
-    period_str = f"{lookback_days + 150}d"
-    interval_str = "1h" if interval == "1h" else "1d"
+    # Intraday data has max 60-day limit on yfinance
+    if interval == "5m":
+        period_str = f"{min(lookback_days, 60)}d"
+        interval_str = "5m"
+    elif interval == "1h":
+        period_str = f"{min(lookback_days + 150, 730)}d"
+        interval_str = "1h"
+    else:
+        period_str = f"{lookback_days + 150}d"
+        interval_str = "1d"
     hist = ticker.history(period=period_str, interval=interval_str)
     if hist.empty or len(hist) < 80:
         return {"error": f"Insufficient historical data fetched for {symbol}"}
@@ -206,7 +214,7 @@ def run_historical_backtest(asset: str = "GOLD",
             continue
 
         # Structural levels from rolling lookback (scaled by interval)
-        lookback_window = 60 if interval == "1d" else 240  # 60 days or 240 hours (~10 days)
+        lookback_window = 60 if interval == "1d" else (240 if interval == "1h" else 1000)
         sub_high = df["High"].iloc[max(0, i-lookback_window):i+1]
         sub_low = df["Low"].iloc[max(0, i-lookback_window):i+1]
         sw_high = sub_high.max()
@@ -477,8 +485,8 @@ def run_historical_backtest(asset: str = "GOLD",
         is_win = net_pnl_usd > 0
         trades.append({
             "trade_num": len(trades) + 1,
-            "entry_date": df.index[i].strftime("%Y-%m-%d %H:%M" if interval == "1h" else "%Y-%m-%d"),
-            "exit_date": df.index[min(len(df)-1, exit_bar)].strftime("%Y-%m-%d %H:%M" if interval == "1h" else "%Y-%m-%d"),
+            "entry_date": df.index[i].strftime("%Y-%m-%d %H:%M" if interval in ("1h", "5m") else "%Y-%m-%d"),
+            "exit_date": df.index[min(len(df)-1, exit_bar)].strftime("%Y-%m-%d %H:%M" if interval in ("1h", "5m") else "%Y-%m-%d"),
             "holding_bars": exit_bar - i,
             "asset": asset_key,
             "strategy": strat_code,
@@ -791,7 +799,7 @@ if __name__ == "__main__":
     parser.add_argument("--strategy", choices=["SCALP", "SWING", "BALANCE", "SWAP", "ALL"], default="ALL", help="Strategy Profile")
     parser.add_argument("--days", type=int, default=365, help="Lookback Days")
     parser.add_argument("--capital", type=float, default=10000.0, help="Initial Capital USD")
-    parser.add_argument("--interval", choices=["1d", "1h"], default="1d", help="Data Interval (1d=daily, 1h=hourly for scalping)")
+    parser.add_argument("--interval", choices=["1d", "1h", "5m"], default="1d", help="Data Interval (1d=daily, 1h=hourly, 5m=5-minute for scalping)")
     parser.add_argument("--optimize", action="store_true", help="Run parameter optimization sweep for SCALP")
     args = parser.parse_args()
 
