@@ -165,29 +165,78 @@ class MT5LiveBroker:
         self.last_server = server
         self.last_path = path
 
-        # Step 1: Initialize terminal
+        # Step 1: Initialize terminal with Smart Auto-Discovery
         init_ok = False
-        if path and os.path.exists(path):
-            init_ok = mt5.initialize(path=path)
+        target_path = path or os.environ.get("MT5_PATH", "").strip()
+
+        if target_path and os.path.exists(target_path):
+            init_ok = mt5.initialize(path=target_path)
         else:
+            # 1. Try attaching directly to currently running MT5 terminal
             init_ok = mt5.initialize()
+
+            # 2. If default attach fails, scan common broker installation directories
+            if not init_ok:
+                common_paths = [
+                    "C:\\Program Files\\MetaTrader 5\\terminal64.exe",
+                    "C:\\Program Files (x86)\\MetaTrader 5\\terminal64.exe",
+                    "C:\\Program Files\\FTMO MetaTrader 5\\terminal64.exe",
+                    "C:\\Program Files\\ICMarkets MetaTrader 5\\terminal64.exe",
+                    "C:\\Program Files\\Exness MetaTrader 5\\terminal64.exe",
+                    "C:\\Program Files\\XM Global MT5\\terminal64.exe",
+                    "C:\\Program Files\\FBS MetaTrader 5\\terminal64.exe",
+                    "C:\\Program Files\\Vantage Markets MT5\\terminal64.exe"
+                ]
+                if os.path.exists("C:\\Program Files"):
+                    try:
+                        for entry in os.listdir("C:\\Program Files"):
+                            sub = os.path.join("C:\\Program Files", entry, "terminal64.exe")
+                            if os.path.exists(sub) and sub not in common_paths:
+                                common_paths.append(sub)
+                    except Exception:
+                        pass
+
+                for candidate in common_paths:
+                    if os.path.exists(candidate):
+                        logger.info(f"Auto-discovered MT5 terminal at: {candidate}")
+                        init_ok = mt5.initialize(path=candidate)
+                        if init_ok:
+                            target_path = candidate
+                            break
 
         if not init_ok:
             err = mt5.last_error()
             self.is_connected = False
-            msg = f"MT5 terminal initialization failed: {err}. Ensure MetaTrader 5 is running on your VPS."
+            msg = (
+                f"MT5 terminal initialization failed: {err}.\n"
+                f"SOLUTIONS:\n"
+                f"1. Open the MetaTrader 5 desktop application on your VPS/PC.\n"
+                f"2. Log into your broker account in MT5 (File -> Login to Trade Account).\n"
+                f"3. Enable Algo Trading (Tools -> Options -> Expert Advisors -> check 'Allow algorithmic trading').\n"
+                f"4. If MT5 is installed in a custom broker folder, set MT5_PATH in .env (e.g. MT5_PATH=C:\\Program Files\\Exness MT5\\terminal64.exe)."
+            )
             logger.warning(msg)
             return False, msg
 
         # Step 2: Login if explicit credentials provided
         if login and password and server:
-            login_ok = mt5.login(login=int(login), password=str(password), server=str(server))
+            try:
+                login_ok = mt5.login(login=int(login), password=str(password), server=str(server))
+            except Exception as le:
+                login_ok = False
+                logger.warning(f"Error executing mt5.login: {le}")
+
             if not login_ok:
                 err = mt5.last_error()
-                self.is_connected = False
-                msg = f"MT5 live login failed for account #{login} on {server}: {err}"
-                logger.warning(msg)
-                return False, msg
+                # Check if terminal is already authenticated to an active account
+                acc = mt5.account_info()
+                if acc and acc.login > 0:
+                    logger.warning(f"Explicit login failed ({err}), but terminal is already logged into active account #{acc.login}. Using existing session.")
+                else:
+                    self.is_connected = False
+                    msg = f"MT5 live login failed for account #{login} on {server}: {err}. Please verify MT5_LOGIN, MT5_PASSWORD, and MT5_SERVER."
+                    logger.warning(msg)
+                    return False, msg
 
         # Step 3: Verify terminal and account status
         term = mt5.terminal_info()
