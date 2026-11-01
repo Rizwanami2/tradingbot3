@@ -180,6 +180,43 @@ class BotState:
                 "last_update_age_seconds": self.last_update_age_seconds,
             }
 
+    def reconcile_positions(self, mt5_positions: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Reconcile MT5 live positions with internal state.
+        Detects drift (missing/extra positions) and returns a report.
+        Does NOT modify state — returns reconciliation report for orchestrator to act on.
+        """
+        internal = {str(p.get("ticket")): p for p in self.open_positions}
+        external = {str(p.get("ticket")): p for p in mt5_positions}
+
+        internal_tickets = set(internal.keys())
+        external_tickets = set(external.keys())
+
+        missing_in_internal = external_tickets - internal_tickets  # MT5 has, we don't
+        missing_in_mt5 = internal_tickets - external_tickets       # we have, MT5 doesn't
+        matched = internal_tickets & external_tickets
+
+        drift_detected = len(missing_in_internal) > 0 or len(missing_in_mt5) > 0
+
+        report = {
+            "reconciled": not drift_detected,
+            "drift_detected": drift_detected,
+            "matched_count": len(matched),
+            "missing_in_internal": [external[t] for t in missing_in_internal],
+            "missing_in_mt5": [internal[t] for t in missing_in_mt5],
+            "matched_positions": [internal[t] for t in matched],
+            "total_mt5": len(external),
+            "total_internal": len(internal),
+        }
+
+        if drift_detected:
+            logger.warning(
+                f"Position drift detected: MT5={len(external)} vs Internal={len(internal)}, "
+                f"missing_in_internal={len(missing_in_internal)}, missing_in_mt5={len(missing_in_mt5)}"
+            )
+
+        return report
+
 
 # Singleton instance
 bot_state = BotState()

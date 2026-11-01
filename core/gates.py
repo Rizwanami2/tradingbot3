@@ -156,3 +156,41 @@ def check_symbol_tradable(symbol: str, trade_mode: int = None, is_buy: bool = Tr
     if not is_buy and trade_mode == mt5.SYMBOL_TRADE_MODE_LONGONLY:
         return False, f"Symbol {symbol} in LONG-ONLY mode"
     return True, f"Symbol {symbol} tradable"
+
+
+def check_toxic_blacklist(asset: str, action: str, market_vector: dict,
+                          threshold: float = 0.85) -> Tuple[bool, str]:
+    """Gate 15: Check proposed trade against Negative Memory Bank (toxic setups).
+
+    Returns (pass: bool, reason: str). If a toxic signature matches with
+    similarity >= threshold, the trade is vetoed.
+    """
+    try:
+        from self_learning import self_learning_engine
+        sle = self_learning_engine
+    except Exception:
+        return True, "Self-learning engine unavailable — toxic check skipped"
+
+    if not sle or not market_vector:
+        return True, "No market data for toxic check"
+
+    # Require minimum keys
+    required_keys = ("rsi", "adx", "upper_wick_pct", "lower_wick_pct",
+                     "tnx_chg", "dxy_chg", "regime")
+    if not any(k in market_vector for k in required_keys):
+        return True, "Incomplete market vector — toxic check skipped"
+
+    veto, reason = sle.check_negative_memory_veto(
+        asset=asset, action=action,
+        market_vector=market_vector, threshold=threshold
+    )
+    if veto:
+        return False, reason
+    return True, "No toxic memory match"
+
+
+def check_confidence_threshold(confidence_score: float, min_score: float = 7.0) -> Tuple[bool, str]:
+    """Gate 16: Confidence score must meet minimum threshold for trade."""
+    if confidence_score < min_score:
+        return False, f"Confidence {confidence_score:.1f} below minimum {min_score:.1f} — trade skipped"
+    return True, f"Confidence OK ({confidence_score:.1f} >= {min_score:.1f})"

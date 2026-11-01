@@ -1659,6 +1659,139 @@ def calculate_strategy_levels(asset: str, current_price: float, atr: float = 0.0
     }
 
 
+def calculate_structure_based_sl(asset: str, current_price: float, action: str = "BUY",
+                                 swing_high: float = 0.0, swing_low: float = 0.0,
+                                 atr: float = 0.0, buffer_pct: float = 0.005) -> dict:
+    """
+    Structure-Based Stop-Loss: Places SL just beyond swing high/low invalidation
+    level instead of fixed ATR distance. Prevents premature stop-outs from noise
+    whipsaws while respecting key structural levels.
+
+    Args:
+        asset: GOLD or BTC
+        current_price: Current market price
+        action: BUY or SELL
+        swing_high: Recent swing high (for SELL SL placement above)
+        swing_low: Recent swing low (for BUY SL placement below)
+        atr: ATR for fallback buffer calculation
+        buffer_pct: Small percentage buffer beyond swing level (default 0.5%)
+
+    Returns:
+        dict with stop_loss price, sl_distance, sl_type ('structure' or 'fallback_atr')
+    """
+    asset_key = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
+    is_buy = action.upper() in ("BUY", "LONG")
+    digits = 2 if asset_key == "GOLD" else 0
+
+    # Fallback ATR-based SL if no swing data available
+    base_atr = atr if atr > 0 else (28.0 if asset_key == "GOLD" else 2200.0)
+    fallback_sl_dist = base_atr * 1.0  # 1x ATR fallback
+
+    sl_type = "structure"
+    stop_loss = None
+
+    if is_buy:
+        # BUY: SL below swing_low with buffer
+        if swing_low > 0:
+            buffer_dist = max(swing_low * buffer_pct, fallback_sl_dist * 0.25)
+            stop_loss = round(swing_low - buffer_dist, digits)
+            sl_dist = round(current_price - stop_loss, 2)
+        else:
+            sl_type = "fallback_atr"
+            stop_loss = round(current_price - fallback_sl_dist, digits)
+            sl_dist = round(fallback_sl_dist, 2)
+    else:
+        # SELL: SL above swing_high with buffer
+        if swing_high > 0:
+            buffer_dist = max(swing_high * buffer_pct, fallback_sl_dist * 0.25)
+            stop_loss = round(swing_high + buffer_dist, digits)
+            sl_dist = round(stop_loss - current_price, 2)
+        else:
+            sl_type = "fallback_atr"
+            stop_loss = round(current_price + fallback_sl_dist, digits)
+            sl_dist = round(fallback_sl_dist, 2)
+
+    sl_dist = max(sl_dist, fallback_sl_dist * 0.5)  # never tighter than 0.5x ATR
+    sl_dist = round(sl_dist, 2)
+
+    return {
+        "asset": asset_key,
+        "action": "BUY" if is_buy else "SELL",
+        "entry": round(current_price, 2),
+        "stop_loss": stop_loss,
+        "sl_dist": sl_dist,
+        "sl_type": sl_type,
+        "swing_high": swing_high,
+        "swing_low": swing_low,
+        "buffer_pct": buffer_pct,
+        "atr": round(base_atr, 2),
+    }
+
+
+def calculate_smart_lot_by_confidence(asset: str, entry_price: float, stop_loss_price: float,
+                                       confidence_score: float, account_balance: float = DEFAULT_ACCOUNT_BALANCE,
+                                       max_risk_pct: float = DEFAULT_MAX_RISK_PCT,
+                                       regime_risk_pct: float = None) -> dict:
+    """
+    Smart Lot Sizing by Confidence Score.
+    Scales risk % based on confluence confidence:
+      - Score >= 9.0: Up to max_risk_pct (1.0% default)
+      - Score 8.0-8.99: 0.75% risk
+      - Score 7.0-7.99: 0.50% risk
+      - Score < 7.0: Skip trade (risk_pct = 0)
+    Also respects regime-based risk cap if provided.
+    """
+    asset_key = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
+    is_buy = entry_price > 0 and stop_loss_price > 0
+    risk_dist = abs(entry_price - stop_loss_price)
+
+    # Determine base risk % by confidence tier
+    if confidence_score >= 9.0:
+        base_risk_pct = max_risk_pct
+    elif confidence_score >= 8.0:
+        base_risk_pct = max_risk_pct * 0.75
+    elif confidence_score >= 7.0:
+        base_risk_pct = max_risk_pct * 0.50
+    else:
+        # Below threshold - skip trade
+        return {
+            "asset": asset_key,
+            "entry": round(entry_price, 2),
+            "stop_loss": round(stop_loss_price, 2),
+            "sl_dist": round(risk_dist, 2),
+            "confidence_score": confidence_score,
+            "risk_pct": 0.0,
+            "risk_usd": 0.0,
+            "lots": 0.0,
+            "skip": True,
+            "skip_reason": f"Confidence {confidence_score:.1f} below 7.0 minimum"
+        }
+
+    # Apply regime-based cap if provided (never exceed regime cap)
+    if regime_risk_pct is not None and regime_risk_pct > 0:
+        base_risk_pct = min(base_risk_pct, regime_risk_pct)
+
+    # Cap at MAX_TOTAL_OPEN_RISK_PCT safety ceiling
+    base_risk_pct = min(base_risk_pct, MAX_TOTAL_OPEN_RISK_PCT)
+
+    # Calculate lot size using existing engine
+    lot_result = calculate_lot_size(asset_key, entry_price, stop_loss_price,
+                                     account_balance, base_risk_pct)
+
+    return {
+        "asset": asset_key,
+        "entry": round(entry_price, 2),
+        "stop_loss": round(stop_loss_price, 2),
+        "sl_dist": round(risk_dist, 2),
+        "confidence_score": confidence_score,
+        "risk_pct": round(base_risk_pct, 2),
+        "risk_usd": round(lot_result.get("actual_risk_usd", 0.0), 2),
+        "lots": round(lot_result.get("lots", 0.01), 2),
+        "skip": False,
+        "skip_reason": "",
+    }
+
+
 def calculate_sniper_levels(asset: str, current_price: float, atr: float = 0.0,
                             action: str = "BUY", account_balance: float = DEFAULT_ACCOUNT_BALANCE,
                             risk_pct: float = DEFAULT_MAX_RISK_PCT) -> dict:
