@@ -390,7 +390,8 @@ class SelfLearningEngine:
                 "negative_memory_bank": [],
                 "trade_journal": [],
                 "post_mortem_journal": [],
-                "dynamic_sl_buffers": {"GOLD": 0.0, "BTC": 0.0}
+                "dynamic_sl_buffers": {"GOLD": 0.0, "BTC": 0.0},
+                "consecutive_losses": {"count": 0, "cooldown_until": 0.0, "total_loss_streaks": 0}
             }
             self.memory_mgr.atomic_save(mem)
         else:
@@ -851,9 +852,68 @@ class SelfLearningEngine:
                     regime_weights[feat] = max(regime_weights.get(feat, 1.0) - regime_delta, 0.35)
 
         self.memory["training_cycles"] += 1
+        # Track consecutive losses for capital protection
+        self._update_consecutive_losses(outcome)
         self.recalculate_all_metrics()
         self.save_memory()
         return True
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # CONSECUTIVE LOSS PROTECTION ── Capital Preservation ──
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _update_consecutive_losses(self, outcome: str) -> None:
+        """Update consecutive loss counter on trade close."""
+        cl = self.memory.get("consecutive_losses", {"count": 0, "cooldown_until": 0.0, "total_loss_streaks": 0})
+        if outcome == "LOSS":
+            cl["count"] = cl.get("count", 0) + 1
+            cl["total_loss_streaks"] = cl.get("total_loss_streaks", 0) + 1
+            # Set cooldown: 30 min after 2 losses, 60 min after 3+, 120 min after 5+
+            if cl["count"] >= 5:
+                cl["cooldown_until"] = time.time() + 7200  # 2 hours
+            elif cl["count"] >= 3:
+                cl["cooldown_until"] = time.time() + 3600  # 1 hour
+            elif cl["count"] >= 2:
+                cl["cooldown_until"] = time.time() + 1800  # 30 min
+        elif outcome == "WIN":
+            cl["count"] = 0
+            cl["cooldown_until"] = 0.0
+        self.memory["consecutive_losses"] = cl
+
+    def get_consecutive_losses(self) -> int:
+        """Return current consecutive loss count."""
+        return self.memory.get("consecutive_losses", {}).get("count", 0)
+
+    def is_in_loss_cooldown(self) -> tuple:
+        """Return (is_in_cooldown, reason, remaining_minutes)."""
+        cl = self.memory.get("consecutive_losses", {"count": 0, "cooldown_until": 0.0, "total_loss_streaks": 0})
+        count = cl.get("count", 0)
+        cooldown_until = cl.get("cooldown_until", 0.0)
+        if count >= 2 and cooldown_until > time.time():
+            remaining = (cooldown_until - time.time()) / 60.0
+            return True, f"{count} consecutive losses — cooldown {remaining:.0f}min remaining", remaining
+        return False, "", 0.0
+
+    def get_risk_reduction_multiplier(self) -> float:
+        """Return risk multiplier based on consecutive losses.
+        
+        0 losses: 1.0x (full risk)
+        1 loss:  0.75x (reduce 25%)
+        2 losses: 0.50x (reduce 50%)
+        3+ losses: 0.25x (reduce 75%) + cooldown
+        """
+        count = self.get_consecutive_losses()
+        if count >= 3:
+            return 0.25
+        elif count >= 2:
+            return 0.50
+        elif count >= 1:
+            return 0.75
+        return 1.0
+
+    def _record_consecutive_loss_outcome(self, outcome: str) -> None:
+        """Call this from update_from_outcome to track consecutive losses."""
+        self._update_consecutive_losses(outcome)
 
     # ──────────────────────────────────────────────────────────────────────────
     # SYNCHRONIZATION WITH BROKER DEALS & OFFLINE RECOVERY

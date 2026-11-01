@@ -199,6 +199,40 @@ def check_confidence_threshold(confidence_score: float, min_score: float = 7.0) 
     return True, f"Confidence OK ({confidence_score:.1f} >= {min_score:.1f})"
 
 
+def check_consecutive_losses(sle=None) -> Tuple[bool, str, float]:
+    """Gate 17: Consecutive loss protection — reduce risk or block trading.
+
+    Returns (pass: bool, reason: str, risk_multiplier: float).
+    - 0 losses: pass, 1.0x risk
+    - 1 loss: pass, 0.75x risk
+    - 2 losses: pass, 0.50x risk  
+    - 3+ losses: FAIL, cooldown active
+    """
+    if sle is None:
+        try:
+            from self_learning import self_learning_engine
+            sle = self_learning_engine
+        except Exception:
+            return True, "Self-learning unavailable — loss tracking skipped", 1.0
+
+    if not sle:
+        return True, "Self-learning unavailable — loss tracking skipped", 1.0
+
+    is_cd, reason, remaining = sle.is_in_loss_cooldown()
+    if is_cd:
+        return False, reason, 0.0
+
+    count = sle.get_consecutive_losses()
+    multiplier = sle.get_risk_reduction_multiplier()
+
+    if count >= 2:
+        return False, f"{count} consecutive losses — risk reduced to {multiplier:.0%}, cooldown active", multiplier
+    elif count >= 1:
+        return True, f"{count} consecutive loss — risk reduced to {multiplier:.0%}", multiplier
+
+    return True, "No consecutive losses — full risk", multiplier
+
+
 def check_strategy_health(strategy: str, min_trades: int = 20, min_win_rate: float = 40.0) -> Tuple[bool, str]:
     """Gate 17: Auto-disable strategies with poor recent performance.
 

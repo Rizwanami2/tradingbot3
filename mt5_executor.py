@@ -85,6 +85,8 @@ class MT5LiveBroker:
         self.position_peak_prices = {}
         self.tracked_live_tickets = {}
         self.position_partial_tp_closed = {}
+        self.position_profit_locked = {}   # ticket -> {"locked_r": float, "locked_at": float}
+        self.position_open_time = {}       # ticket -> entry epoch for time-based exit
         self.pending_orders = {}
         # Exponential backoff parameters (2s up to 60s)
         self.reconnect_delay = 2.0
@@ -100,6 +102,12 @@ class MT5LiveBroker:
             "slippage_by_hour": {},        # hour (0-23) -> {"count": n, "total_pips": x, "max_pips": y}
             "adaptive_max_slippage_pips": 3.0  # Auto-adjusted based on observed conditions
         }
+        # Profit protection configuration
+        self.profit_lock_levels = [0.5, 1.0, 1.5]   # close 25% at each level
+        self.profit_lock_close_pct = 0.25            # close 25% per level
+        self.tighten_trail_after_r = 1.0             # start tightening trail after +1R
+        self.tight_trail_step_r = 0.25               # tight trail step (closer SL)
+        self.max_hold_minutes = 240                  # time-based exit: close after 4 hours if no profit
 
     def _notify_telegram_alert(self, text: str):
         """Sends an urgent alert through Telegram if available."""
@@ -876,6 +884,11 @@ class MT5LiveBroker:
             if not tick:
                 continue
 
+            # Track position open time for time-based exit
+            ticket = p.ticket
+            if ticket not in self.position_open_time:
+                self.position_open_time[ticket] = time.time()
+
             digits = sym_info.digits
             point = sym_info.point or (10 ** -digits)
             spread_buffer = max(sym_info.spread * point, 2 * point)
@@ -999,6 +1012,81 @@ class MT5LiveBroker:
                             "profit_r": current_r,
                             "msg": f"📈 *[{strat_name}] TRAILING ADVANCED:* #{ticket} `{symbol}` SL trailed to `${trailing_sl:,.2f}` (+{current_r:.2f}R — Profit Secured!)"
                         })
+
+            # ── 4. PROFIT LOCK LEVELS ── Close 25% at each R level ──
+            lock_state = self.position_profit_locked.get(ticket, {"locked_r": 0.0, "closed_pct": 0.0})
+            for lock_r in self.profit_lock_levels:
+                if current_r >= lock_r and lock_state["locked_r"] < lock_r:
+                    # Close a portion of the position at this profit level
+                    close_lots = round(lot_size * self.profit_lock_close_pct, 2)
+                    if close_lots > 0:
+                        close_res = self.close_position_partial(ticket, close_lots, curr_price, reason=f"PROFIT_LOCK_{lock_r}R")
+                        if close_res.get("success"):
+                            lock_state["locked_r"] = lock_r
+                            lock_state["closed_pct"] += self.profit_lock_close_pct
+                            self.position_profit_locked[ticket] = lock_state
+                            events.append({
+                                "ticket": ticket,
+                                "symbol": symbol,
+                                "asset": "GOLD" if is_gold else "BTC",
+                                "type": "BUY" if is_buy else "SELL",
+                                "strategy": strat_name,
+                                "action": "PROFIT_LOCK",
+                                "closed_lots": close_lots,
+                                "lock_r": lock_r,
+                                "current_price": curr_price,
+                                "profit_r": current_r,
+                                "msg": f"💰 *[{strat_name}] PROFIT LOCK {lock_r}R:* #{ticket} `{symbol}` closed {close_lots} lots (+{current_r:.2f}R secured)"
+                            })
+
+            # ── 5. TIGHTER TRAILING AFTER +1R ── Trail closer as profit grows ──
+            if current_r >= self.tighten_trail_after_r and current_r < self.profit_lock_levels[-1]:
+                if is_buy:
+                    tight_sl = round(peak_price - (risk_dist * self.tight_trail_step_r), digits)
+                    tight_sl = max(tight_sl, breakeven_sl, curr_sl)
+                    should_tight = tight_sl > curr_sl and (tight_sl - curr_sl) >= (5 * point)
+                else:
+                    tight_sl = round(peak_price + (risk_dist * self.tight_trail_step_r), digits)
+                    tight_sl = min(tight_sl, breakeven_sl, curr_sl if curr_sl > 0 else tight_sl)
+                    should_tight = (curr_sl == 0 or tight_sl < curr_sl) and abs(tight_sl - curr_sl) >= (5 * point)
+
+                if should_tight:
+                    res = self.modify_position_sltp(ticket, tight_sl, curr_tp)
+                    if res.get("success"):
+                        asset_norm = "GOLD" if ("XAU" in symbol or "GOLD" in symbol) else "BTC"
+                        events.append({
+                            "ticket": ticket,
+                            "symbol": symbol,
+                            "asset": asset_norm,
+                            "type": "BUY" if is_buy else "SELL",
+                            "strategy": strat_name,
+                            "action": "TIGHT_TRAIL",
+                            "old_sl": curr_sl,
+                            "new_sl": tight_sl,
+                            "current_price": curr_price,
+                            "peak_price": peak_price,
+                            "profit_r": current_r,
+                            "msg": f"🔒 *[{strat_name}] TIGHT TRAIL:* #{ticket} `{symbol}` SL tightened to `${tight_sl:,.2f}` (+{current_r:.2f}R — Profit Protected!)"
+                        })
+
+            # ── 6. TIME-BASED EXIT ── Close stuck trades after max_hold_minutes ──
+            open_time = self.position_open_time.get(ticket, time.time())
+            hold_minutes = (time.time() - open_time) / 60.0
+            if hold_minutes >= self.max_hold_minutes and current_r <= 0.0:
+                close_res = self.close_position(ticket, curr_price, reason="TIME_BASED_EXIT")
+                if close_res.get("success"):
+                    events.append({
+                        "ticket": ticket,
+                        "symbol": symbol,
+                        "asset": "GOLD" if is_gold else "BTC",
+                        "type": "BUY" if is_buy else "SELL",
+                        "strategy": strat_name,
+                        "action": "TIME_EXIT",
+                        "closed_price": curr_price,
+                        "hold_minutes": round(hold_minutes, 1),
+                        "profit_r": current_r,
+                        "msg": f"⏱️ *[{strat_name}] TIME EXIT:* #{ticket} `{symbol}` closed after {hold_minutes:.0f}min ({current_r:.2f}R — no profit)"
+                    })
 
         return events
 

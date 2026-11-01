@@ -463,6 +463,15 @@ class Orchestrator:
         pass_sh, reason_sh = gates.check_strategy_health(strategy)
         results.append({"gate": "strategy_health", "pass": pass_sh, "reason": reason_sh})
 
+        # Gate: Consecutive Loss Protection
+        pass_cl, reason_cl, risk_mult = gates.check_consecutive_losses()
+        results.append({"gate": "consecutive_losses", "pass": pass_cl, "reason": reason_cl})
+        # Apply risk reduction multiplier to candidate's risk_pct
+        if risk_mult < 1.0 and risk_mult > 0:
+            current_risk = candidate.get("order_ticket", {}).get("risk_pct", 0.5)
+            candidate["order_ticket"]["risk_pct"] = round(current_risk * risk_mult, 2)
+            candidate["risk_reduction_applied"] = risk_mult
+
         # Gate: News window
         is_news_blocked = candidate.get("vetoed_by_news", False)
         news_msg = candidate.get("news_block_msg", "")
