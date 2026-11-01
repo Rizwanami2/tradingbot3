@@ -13,6 +13,14 @@ Evaluates:
   6. Comprehensive Institutional Risk & Return Metrics:
      Win Rate, Profit Factor, Sharpe Ratio, Sortino Ratio, Calmar Ratio,
      Max Drawdown, Expectancy, and Trade Resolution Breakdown.
+  7. Parameter Optimization Sweep for SCALP (SL distance, TP ratios, risk %).
+  8. Intraday (1H) data support for higher trade frequency.
+
+Enhancements:
+  - Multi-timeframe support (Daily or 1H) for higher trade frequency on SCALP
+  - Parameter grid search to find optimal SL/TP/Risk settings per asset
+  - SCALP-focused optimization for both GOLD and BTC
+  - Comparative reporting across parameter sets
 """
 
 import warnings
@@ -28,6 +36,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 import math
 import argparse
+import itertools
 from datetime import datetime
 import numpy as np
 import pandas as pd
@@ -98,9 +107,27 @@ def run_historical_backtest(asset: str = "GOLD",
                             lookback_days: int = 365,
                             initial_capital: float = 10000.0,
                             min_score_filter: int = 8,
-                            allow_b_setups: bool = False) -> dict:
+                            allow_b_setups: bool = False,
+                            interval: str = "1d",
+                            sl_dist_override: float = None,
+                            rr_tp1_override: float = None,
+                            rr_tp2_override: float = None,
+                            risk_pct_override: float = None) -> dict:
     """
     Rigorously simulates strategy performance on historical data without look-ahead bias.
+
+    Parameters:
+        asset: Asset symbol (GOLD or BTC)
+        strategy_code: Trading strategy (SCALP, SWING, BALANCE, SWAP)
+        lookback_days: Historical lookback period in days
+        initial_capital: Starting capital in USD
+        min_score_filter: Minimum confluence score (8-10)
+        allow_b_setups: Allow B-setup trades (score 7)
+        interval: Data interval ("1d" daily or "1h" hourly)
+        sl_dist_override: Override SL distance in price units (for optimization)
+        rr_tp1_override: Override TP1 risk-reward ratio
+        rr_tp2_override: Override TP2 risk-reward ratio
+        risk_pct_override: Override risk per trade %
     """
     asset_key = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
     symbol = "GC=F" if asset_key == "GOLD" else "BTC-USD"
@@ -108,13 +135,15 @@ def run_historical_backtest(asset: str = "GOLD",
     strat = STRATEGIES.get(strat_code, STRATEGIES["SCALP"])
     cost_model = COST_MODELS[asset_key]
 
-    # Fetch Price Data
+    # Fetch Price Data with interval support
     ticker = yf.Ticker(symbol)
-    hist = ticker.history(period=f"{lookback_days + 150}d")
+    period_str = f"{lookback_days + 150}d"
+    interval_str = "1h" if interval == "1h" else "1d"
+    hist = ticker.history(period=period_str, interval=interval_str)
     if hist.empty or len(hist) < 80:
         return {"error": f"Insufficient historical data fetched for {symbol}"}
 
-    # Fetch Macro Context
+    # Fetch Macro Context (daily data for macro context)
     dxy_hist = yf.Ticker("DX-Y.NYB").history(period=f"{lookback_days + 150}d")
     tnx_hist = yf.Ticker("^TNX").history(period=f"{lookback_days + 150}d")
     vix_hist = yf.Ticker("^VIX").history(period=f"{lookback_days + 150}d")
@@ -137,17 +166,23 @@ def run_historical_backtest(asset: str = "GOLD",
     if not vix_s.empty:
         vix_s.index = vix_s.index.tz_localize(None) if vix_s.index.tz is not None else vix_s.index
 
-    dxy_aligned = dxy_pct.reindex(df.index, method="ffill").fillna(0.0)
-    tnx_aligned = tnx_pct.reindex(df.index, method="ffill").fillna(0.0)
-    vix_aligned = vix_s.reindex(df.index, method="ffill").fillna(18.0)
+    # Align macro data to df index (handles both daily and intraday data)
+    try:
+        dxy_aligned = dxy_pct.reindex(df.index, method="ffill").fillna(0.0)
+        tnx_aligned = tnx_pct.reindex(df.index, method="ffill").fillna(0.0)
+        vix_aligned = vix_s.reindex(df.index, method="ffill").fillna(18.0)
+    except Exception:
+        # Fallback for intraday data with mismatched index types
+        dxy_aligned = dxy_pct.reindex(df.index, method="nearest").fillna(0.0)
+        tnx_aligned = tnx_pct.reindex(df.index, method="nearest").fillna(0.0)
+        vix_aligned = vix_s.reindex(df.index, method="nearest").fillna(18.0)
 
     capital = initial_capital
     peak_capital = initial_capital
     trades = []
     equity_curve = [initial_capital]
 
-    # Simulation loop (from bar 60 to len(df) - 10)
-    # Using bar t close for evaluation, entering on next bar open/close
+    # Simulation loop
     start_idx = 60
     end_idx = len(df) - 5
     in_trade_until = 0  # Prevents overlapping trade distortion for the same asset
@@ -170,9 +205,10 @@ def run_historical_backtest(asset: str = "GOLD",
         if pd.isna(atr) or atr <= 0:
             continue
 
-        # Structural levels from rolling 60 bars (institutional multi-month swing structure)
-        sub_high = df["High"].iloc[max(0, i-60):i+1]
-        sub_low = df["Low"].iloc[max(0, i-60):i+1]
+        # Structural levels from rolling lookback (scaled by interval)
+        lookback_window = 60 if interval == "1d" else 240  # 60 days or 240 hours (~10 days)
+        sub_high = df["High"].iloc[max(0, i-lookback_window):i+1]
+        sub_low = df["Low"].iloc[max(0, i-lookback_window):i+1]
         sw_high = sub_high.max()
         sw_low = sub_low.min()
         sw_range = sw_high - sw_low
@@ -314,6 +350,10 @@ def run_historical_backtest(asset: str = "GOLD",
 
         # Calculate Entry, SL, TP & Position Sizing
         risk_pct = strat["risk_pct"] if score >= 8 else (strat["risk_pct"] * 0.5)
+        # Apply risk override if provided (for optimization sweep)
+        if risk_pct_override is not None:
+            risk_pct = risk_pct_override
+
         strat_calc = calculate_strategy_levels(
             asset=asset_key,
             current_price=curr_price,
@@ -326,10 +366,21 @@ def run_historical_backtest(asset: str = "GOLD",
         )
 
         entry_price = curr_price
-        initial_sl = strat_calc["stop_loss"]
-        tp1 = strat_calc["tp1"]
-        tp2 = strat_calc["tp2"]
-        sl_dist = strat_calc["sl_dist"]
+        
+        # Apply SL distance override if provided (for optimization)
+        if sl_dist_override is not None:
+            initial_sl = curr_price - sl_dist_override
+            sl_dist_actual = sl_dist_override
+        else:
+            initial_sl = strat_calc["stop_loss"]
+            sl_dist_actual = strat_calc["sl_dist"]
+        
+        # Apply RR overrides if provided (for optimization)
+        tp1_dist = sl_dist_actual * (rr_tp1_override if rr_tp1_override is not None else strat["rr_tp1"])
+        tp2_dist = sl_dist_actual * (rr_tp2_override if rr_tp2_override is not None else strat["rr_tp2"])
+        
+        tp1 = curr_price + tp1_dist
+        tp2 = curr_price + tp2_dist
         lot_size = strat_calc["lot_size"]
         breakeven_r = strat["breakeven_r"]
         trail_start_r = strat["trail_start_r"]
@@ -359,7 +410,7 @@ def run_historical_backtest(asset: str = "GOLD",
             if f_high > highest_price:
                 highest_price = f_high
 
-            floating_r = (highest_price - entry_price) / sl_dist if sl_dist > 0 else 0
+            floating_r = (highest_price - entry_price) / sl_dist_actual if sl_dist_actual > 0 else 0
 
             # 1. Breakeven Lock (locks entry + spread to eliminate loss risk)
             if floating_r >= breakeven_r and not is_breakeven_locked:
@@ -368,7 +419,7 @@ def run_historical_backtest(asset: str = "GOLD",
 
             # 2. Dynamic Trailing Stop
             if floating_r >= trail_start_r:
-                desired_sl = highest_price - (trail_step_r * sl_dist)
+                desired_sl = highest_price - (trail_step_r * sl_dist_actual)
                 if desired_sl > active_sl:
                     active_sl = desired_sl
 
@@ -378,7 +429,7 @@ def run_historical_backtest(asset: str = "GOLD",
                 trade_resolved = True
                 if is_breakeven_locked and active_sl >= entry_price:
                     exit_reason = "BREAKEVEN" if abs(active_sl - entry_price) <= (cost_pts * 1.5) else "TRAILED_STOP"
-                    r_mult = max(0.0, (exit_price - entry_price) / sl_dist)
+                    r_mult = max(0.0, (exit_price - entry_price) / sl_dist_actual)
                 else:
                     exit_reason = "STOP_LOSS"
                     r_mult = -1.0
@@ -404,7 +455,7 @@ def run_historical_backtest(asset: str = "GOLD",
         if not trade_resolved and not forward_slice.empty:
             last_bar = forward_slice.iloc[-1]
             exit_price = last_bar["Close"]
-            r_mult = (exit_price - entry_price) / sl_dist if sl_dist > 0 else 0
+            r_mult = (exit_price - entry_price) / sl_dist_actual if sl_dist_actual > 0 else 0
             exit_reason = "HORIZON_EXPIRY"
 
         # Apply Realistic Costs & Slippage
@@ -426,8 +477,8 @@ def run_historical_backtest(asset: str = "GOLD",
         is_win = net_pnl_usd > 0
         trades.append({
             "trade_num": len(trades) + 1,
-            "entry_date": df.index[i].strftime("%Y-%m-%d"),
-            "exit_date": df.index[min(len(df)-1, exit_bar)].strftime("%Y-%m-%d"),
+            "entry_date": df.index[i].strftime("%Y-%m-%d %H:%M" if interval == "1h" else "%Y-%m-%d"),
+            "exit_date": df.index[min(len(df)-1, exit_bar)].strftime("%Y-%m-%d %H:%M" if interval == "1h" else "%Y-%m-%d"),
             "holding_bars": exit_bar - i,
             "asset": asset_key,
             "strategy": strat_code,
@@ -612,7 +663,7 @@ def format_backtest_telegram_card(res: dict) -> str:
     card = (
         f"📊 *HISTORICAL BACKTEST: {res['asset']} ({res['strategy']})*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"• Test Period       : `{res['lookback_days']} Days` (Daily Bars)\n"
+        f"• Test Period       : `{res['lookback_days']} Days` ({'1H' if '1h' in str(res.get('lookback_days', '1d')) else '1D'} bars)\n"
         f"• Starting Balance  : `${res['initial_capital']:,.2f}`\n"
         f"• Final Equity      : `${res['final_capital']:,.2f}`\n"
         f"• Net Profit        : `${res['net_profit_usd']:+,.2f}` (`{res['net_return_pct']:+.2f}%`)\n"
@@ -634,6 +685,94 @@ def format_backtest_telegram_card(res: dict) -> str:
     return card
 
 
+def run_parameter_sweep(asset: str = "GOLD",
+                        lookback_days: int = 365,
+                        initial_capital: float = 10000.0) -> dict:
+    """
+    Run parameter optimization sweep for SCALP strategy.
+    Tests multiple combinations of SL distance, TP ratios, and risk % to find optimal settings.
+    """
+    asset_key = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
+    
+    # Parameter grid
+    sl_dist_pcts = [0.005, 0.008, 0.010, 0.012, 0.015]  # 0.5% to 1.5% SL distance
+    rr_tp1_ratios = [1.25, 1.5, 1.75, 2.0]  # TP1 RR multiples
+    rr_tp2_ratios = [2.0, 2.5, 3.0, 3.5]  # TP2 RR multiples
+    risk_pcts = [0.5, 1.0, 1.5, 2.0]  # Risk per trade %
+    
+    results = []
+    total_combos = len(sl_dist_pcts) * len(rr_tp1_ratios) * len(rr_tp2_ratios) * len(risk_pcts)
+    combo_count = 0
+    
+    print(f"\n[*] Running Parameter Sweep: {asset} SCALP ({lookback_days} days)")
+    print(f"    Parameter combinations: {total_combos}")
+    print(f"    SL distances: {sl_dist_pcts}")
+    print(f"    TP1 RR ratios: {rr_tp1_ratios}")
+    print(f"    TP2 RR ratios: {rr_tp2_ratios}")
+    print(f"    Risk percentages: {risk_pcts}")
+    print(f"━" * 86)
+    
+    for sl_pct in sl_dist_pcts:
+        for rr_tp1 in rr_tp1_ratios:
+            for rr_tp2 in rr_tp2_ratios:
+                for risk_pct in risk_pcts:
+                    combo_count += 1
+                    res = run_historical_backtest(
+                        asset=asset,
+                        strategy_code="SCALP",
+                        lookback_days=lookback_days,
+                        initial_capital=initial_capital,
+                        min_score_filter=8,
+                        allow_b_setups=False,
+                        interval="1h",  # Use 1H data for more trades
+                        sl_dist_override=sl_pct * curr_price_estimate(asset_key),
+                        rr_tp1_override=rr_tp1,
+                        rr_tp2_override=rr_tp2,
+                        risk_pct_override=risk_pct
+                    )
+                    
+                    if "error" not in res:
+                        results.append({
+                            **res,
+                            "sl_dist_pct": sl_pct,
+                            "rr_tp1": rr_tp1,
+                            "rr_tp2": rr_tp2,
+                            "risk_pct": risk_pct
+                        })
+    
+    # Sort by net profit descending
+    results.sort(key=lambda x: x.get("net_profit_usd", 0), reverse=True)
+    
+    return results
+
+
+def curr_price_estimate(asset_key: str) -> float:
+    """Estimate current price for SL distance calculation."""
+    return 2700.0 if asset_key == "GOLD" else 85000.0
+
+
+def format_optimization_results(results: list, top_n: int = 10) -> str:
+    """Format optimization sweep results."""
+    if not results:
+        return "No valid results."
+    
+    lines = [
+        "═" * 90,
+        "  🏛️ PARAMETER OPTIMIZATION SWEEP - SCALP STRATEGY",
+        "═" * 90,
+        f"{'Rank':<5} | {'Asset':<6} | {'SL %':<6} | {'TP1 RR':<6} | {'TP2 RR':<6} | {'Risk %':<6} | {'Trades':<6} | {'WR %':<7} | {'PF':<5} | {'Net P&L':<12} | {'Max DD':<6}",
+        "─" * 90
+    ]
+    
+    for i, r in enumerate(results[:top_n]):
+        lines.append(
+            f"{i+1:<5} | {r['asset']:<6} | {r['sl_dist_pct']:<6} | {r['rr_tp1']:<6} | {r['rr_tp2']:<6} | {r['risk_pct']:<6} | {r['total_trades']:<6} | {r['win_rate_pct']:<7.1f} | {r['profit_factor']:<5} | ${r['net_profit_usd']:+<11,.0f} | {r['max_drawdown_pct']:<6.1f}"
+        )
+    
+    lines.append("═" * 90)
+    return "\n".join(lines)
+
+
 def run_full_suite(lookback_days: int = 365, initial_capital: float = 10000.0) -> list:
     """Runs a full matrix backtest across all assets and strategies."""
     results = []
@@ -652,16 +791,35 @@ if __name__ == "__main__":
     parser.add_argument("--strategy", choices=["SCALP", "SWING", "BALANCE", "SWAP", "ALL"], default="ALL", help="Strategy Profile")
     parser.add_argument("--days", type=int, default=365, help="Lookback Days")
     parser.add_argument("--capital", type=float, default=10000.0, help="Initial Capital USD")
+    parser.add_argument("--interval", choices=["1d", "1h"], default="1d", help="Data Interval (1d=daily, 1h=hourly for scalping)")
+    parser.add_argument("--optimize", action="store_true", help="Run parameter optimization sweep for SCALP")
     args = parser.parse_args()
 
     assets = ["GOLD", "BTC"] if args.asset == "BOTH" else [args.asset]
     strategies = ["SCALP", "SWING", "BALANCE", "SWAP"] if args.strategy == "ALL" else [args.strategy]
 
-    matrix_results = []
-    for a in assets:
-        for s in strategies:
-            print(f"[*] Running Backtest: {a} [{s}] ({args.days} days)...")
-            r = run_historical_backtest(asset=a, strategy_code=s, lookback_days=args.days, initial_capital=args.capital)
-            matrix_results.append(r)
+    if args.optimize:
+        for asset in assets:
+            results = run_parameter_sweep(asset=asset, lookback_days=args.days, initial_capital=args.capital)
+            print("\n" + format_optimization_results(results, top_n=10))
+            if results:
+                best = results[0]
+                print(f"\n🏆 BEST CONFIG FOR {asset.upper()} SCALP:")
+                print(f"   SL Distance: {best['sl_dist_pct']*100:.1f}%")
+                print(f"   TP1 RR: {best['rr_tp1']}")
+                print(f"   TP2 RR: {best['rr_tp2']}")
+                print(f"   Risk per Trade: {best['risk_pct']}%")
+                print(f"   Trades: {best['total_trades']}")
+                print(f"   Win Rate: {best['win_rate_pct']}%")
+                print(f"   Profit Factor: {best['profit_factor']}x")
+                print(f"   Net P&L: ${best['net_profit_usd']:+,.2f} ({best['net_return_pct']:+.2f}%)")
+                print(f"   Max DD: {best['max_drawdown_pct']}%")
+    else:
+        matrix_results = []
+        for a in assets:
+            for s in strategies:
+                print(f"[*] Running Backtest: {a} [{s}] ({args.days} days, {args.interval} interval)...")
+                r = run_historical_backtest(asset=a, strategy_code=s, lookback_days=args.days, initial_capital=args.capital, interval=args.interval)
+                matrix_results.append(r)
 
-    print("\n" + format_backtest_cli_table(matrix_results))
+        print("\n" + format_backtest_cli_table(matrix_results))
