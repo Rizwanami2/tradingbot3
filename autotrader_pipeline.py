@@ -41,7 +41,7 @@ import json
 import time
 import urllib.request
 import ssl
-from typing import Dict, Tuple, Any
+from typing import Dict, Tuple, Any, List
 
 # Fix for Windows VPS missing root CA certificates or hosting provider SSL inspection
 try:

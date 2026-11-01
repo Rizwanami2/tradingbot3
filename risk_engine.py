@@ -1572,15 +1572,14 @@ def calculate_strategy_levels(asset: str, current_price: float, atr: float = 0.0
     sl_mult = strat["sl_mult"] + dynamic_buffer
 
     # 1. Strategy-Specific Stop-Loss Distance (Tight, Low Practical Scalping Bounds)
+    raw_sl_dist = base_atr * sl_mult
     if asset_key == "GOLD":
-        raw_sl_dist = base_atr * sl_mult
         min_bound = 2.40 if strat_key == "SCALP" else 6.00 if strat_key == "SWING" else 3.50
         max_bound = 3.50 if strat_key == "SCALP" else 35.00 if strat_key == "SWING" else 15.00
         if dynamic_buffer > 0:
             max_bound += round(base_atr * dynamic_buffer, 2)
         sl_dist = max(min_bound, min(raw_sl_dist, max_bound))
     else:
-        raw_sl_dist = base_atr * sl_mult
         min_bound = 190.0 if strat_key == "SCALP" else 800.0 if strat_key == "SWING" else 400.0
         max_bound = 300.0 if strat_key == "SCALP" else 3500.0 if strat_key == "SWING" else 1800.0
         if dynamic_buffer > 0:

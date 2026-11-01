@@ -18,10 +18,8 @@ import logging
 logging.captureWarnings(True)
 import os
 os.environ["PYTHONWARNINGS"] = "ignore"
-import io
-import contextlib
-import urllib.request
-import json
+import logging
+logging.captureWarnings(True)
 import numpy as np
 
 try:
@@ -41,28 +39,29 @@ try:
 except Exception:
     def validate_config(*args, **kwargs): return True, []
 
+try:
+    from autotrader_pipeline import compute_rsi, fetch_fear_greed
+except Exception:
+    def compute_rsi(series, period: int = 14) -> float:
+        if len(series) < period + 1:
+            return float("nan")
+        delta = series.diff()
+        gain = delta.where(delta > 0, 0.0)
+        loss = -delta.where(delta < 0, 0.0)
+        avg_gain = gain.rolling(window=period, min_periods=period).mean()
+        avg_loss = loss.rolling(window=period, min_periods=period).mean()
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+        return float(rsi.iloc[-1])
 
-def compute_rsi(series, period: int = 14) -> float:
-    if len(series) < period + 1:
-        return float("nan")
-    delta = series.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.rolling(window=period, min_periods=period).mean()
-    avg_loss = loss.rolling(window=period, min_periods=period).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return float(rsi.iloc[-1])
-
-
-def fetch_fear_greed():
-    try:
-        req = urllib.request.Request("https://api.alternative.me/fng/?limit=1", headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=5) as r:
-            data = json.loads(r.read())
-            return int(data["data"][0]["value"]), data["data"][0]["value_classification"]
-    except Exception:
-        return 50, "Neutral (Default)"
+    def fetch_fear_greed():
+        try:
+            req = urllib.request.Request("https://api.alternative.me/fng/?limit=1", headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=5) as r:
+                data = json.loads(r.read())
+                return int(data["data"][0]["value"]), data["data"][0]["value_classification"]
+        except Exception:
+            return 50, "Neutral (Default)"
 
 
 def get_asset_stats(ticker_symbol: str, period: str = "350d"):
