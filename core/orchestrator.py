@@ -224,6 +224,7 @@ class Orchestrator:
                 # Step 0: Manage existing positions (partial TP, breakeven, trailing)
                 try:
                     mgmt_events = self.manage_positions()
+                    mgmt_events = mgmt_events or []
                     cycle_record["position_management"] = mgmt_events
                     for ev in mgmt_events:
                         logger.info(f"MGMT: {ev.get('action')} #{ev.get('ticket')} {ev.get('symbol')} {ev.get('msg', '')[:80]}")
@@ -405,15 +406,18 @@ class Orchestrator:
                 dxy = yf.Ticker("DX-Y.NYB").history(period="5d")
                 if not dxy.empty and len(dxy) >= 2:
                     dv = float(dxy["Close"].iloc[-1])
-                    dxy_chg = ((dv / float(dxy["Close"].iloc[-2])) - 1) * 100
+                    prev_dxy_close = float(dxy["Close"].iloc[-2])
+                    dxy_chg = ((dv / prev_dxy_close) - 1) * 100 if prev_dxy_close != 0 else 0.0
                 tnx = yf.Ticker("^TNX").history(period="5d")
                 if not tnx.empty and len(tnx) >= 2:
                     tv = float(tnx["Close"].iloc[-1])
-                    tnx_chg = ((tv / float(tnx["Close"].iloc[-2])) - 1) * 100
+                    prev_tnx_close = float(tnx["Close"].iloc[-2])
+                    tnx_chg = ((tv / prev_tnx_close) - 1) * 100 if prev_tnx_close != 0 else 0.0
                 silver = yf.Ticker("SI=F").history(period="5d")
                 gold_5d = yf.Ticker("GC=F").history(period="5d")
                 if not gold_5d.empty and not silver.empty:
-                    gsr = float(gold_5d["Close"].iloc[-1] / silver["Close"].iloc[-1])
+                    prev_silver_close = float(silver["Close"].iloc[-1])
+                    gsr = float(gold_5d["Close"].iloc[-1] / prev_silver_close) if prev_silver_close != 0 else 75.0
             except Exception as e:
                 logger.warning(f"Fallback macro fetch error: {e}")
 
@@ -459,6 +463,7 @@ class Orchestrator:
             "regime": regime,
             "regime_risk_pct": regime_risk_pct,
             "order_type": order_ticket.get("order_type", "MARKET"),
+            "order_ticket": order_ticket,
             "factors": candidate.get("factors", []),
             "action": "SKIP",
             "reason": "",

@@ -81,8 +81,6 @@ try:
 except Exception:
     institutional_engine = None
     INSTITUTIONAL_AVAILABLE = False
-    learning_engine = None
-
 # Import Multi-Strategy Risk Engine for Practical TP/SL
 try:
     import risk_engine
@@ -309,7 +307,7 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
         "rsi_sweet_spot": bool(sell_rsi if is_short else feat_rsi),
         "mayer_sweet_spot": bool(mayer >= 0.85 and mayer <= 1.50) if asset_type == "BTC" else False,
         "gsr_undervalued": bool(gsr >= 75) if asset_type == "GOLD" else False,
-        "volatility_orderly": True,
+        "volatility_orderly": bool(vol30 < 22 if asset_type == "GOLD" else vol30 < 75),
         "near_swing_support": bool(sell_near_res if is_short else feat_near_support)
     }
 
@@ -357,6 +355,7 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
                 vix_val = float(vix["Close"].iloc[-1])
         except Exception:
             vix_val = 18.0
+    market_regime = "TREND_EXPANSION"
     if LEARNING_AVAILABLE and learning_engine:
         market_regime = learning_engine.detect_market_regime(adx=adx_val, vix=vix_val)
     regime_risk_pct = risk_engine.get_regime_risk_pct(market_regime) if RISK_ENGINE_AVAILABLE else 0.80
@@ -521,12 +520,14 @@ def _execute_pipeline(*args, **kwargs):
         gold_5d = yf.Ticker("GC=F").history(period="5d")
 
         dxy_val = dxy["Close"].iloc[-1] if not dxy.empty else 100.0
-        dxy_chg = (((dxy_val / dxy["Close"].iloc[-2]) - 1) * 100) if len(dxy) >= 2 else 0.0
+        prev_dxy_close = dxy["Close"].iloc[-2] if len(dxy) >= 2 else 0.0
+        dxy_chg = (((dxy_val / prev_dxy_close) - 1) * 100) if (len(dxy) >= 2 and prev_dxy_close != 0) else 0.0
 
         tnx_val = tnx["Close"].iloc[-1] if not tnx.empty else 4.0
-        tnx_chg = (((tnx_val / tnx["Close"].iloc[-2]) - 1) * 100) if len(tnx) >= 2 else 0.0
+        prev_tnx_close = tnx["Close"].iloc[-2] if len(tnx) >= 2 else 0.0
+        tnx_chg = (((tnx_val / prev_tnx_close) - 1) * 100) if (len(tnx) >= 2 and prev_tnx_close != 0) else 0.0
 
-        gsr = (gold_5d["Close"].iloc[-1] / silver["Close"].iloc[-1]) if (not gold_5d.empty and not silver.empty) else 80.0
+        gsr = (gold_5d["Close"].iloc[-1] / silver["Close"].iloc[-1]) if (not gold_5d.empty and not silver.empty and float(silver["Close"].iloc[-1]) != 0) else 80.0
         fg_val, fg_label = fetch_fear_greed()
 
     print(f"  MACRO RADAR: DXY: {dxy_val:.2f} ({dxy_chg:+.2f}%) | 10Y Yield: {tnx_val:.2f}% ({tnx_chg:+.2f}%) | GSR: {gsr:.1f}x | F&G: {fg_val} ({fg_label})")

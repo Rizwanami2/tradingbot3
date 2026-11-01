@@ -392,7 +392,7 @@ class SelfLearningEngine:
                 "post_mortem_journal": [],
                 "dynamic_sl_buffers": {"GOLD": 0.0, "BTC": 0.0}
             }
-            self.memory_mgr.save_safe(mem)
+            self.memory_mgr.atomic_save(mem)
         else:
             # Upgrade keys if loading older memory file
             if "regime_brains" not in mem:

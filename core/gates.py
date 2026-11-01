@@ -57,7 +57,7 @@ def check_risk_cap(state, proposed_risk_pct: float) -> Tuple[bool, str]:
     """Gate 4: Combined open risk + proposed must not exceed cap."""
     current_open_risk = 0.0
     for p in state.open_positions:
-        current_open_risk += float(p.get("risk_pct", 1.0))
+        current_open_risk += float(p.get("risk_pct") or 1.0)
     if (current_open_risk + proposed_risk_pct) > state.max_total_open_risk_pct:
         return False, (
             f"Portfolio risk cap exceeded: {current_open_risk:.2f}% + {proposed_risk_pct:.2f}% "
@@ -146,7 +146,10 @@ def check_confidence_score(score: float, min_score: float = 8.0) -> Tuple[bool, 
 
 def check_symbol_tradable(symbol: str, trade_mode: int = None, is_buy: bool = True) -> Tuple[bool, str]:
     """Gate 14: Symbol must be tradable (not disabled, not short-only/long-only mismatch)."""
-    import mt5
+    try:
+        import MetaTrader5 as mt5
+    except Exception:
+        return True, "MetaTrader5 not available — symbol tradability assumed"
     if trade_mode is None:
         return True, "Symbol tradability assumed (no MT5 info)"
     if trade_mode == mt5.SYMBOL_TRADE_MODE_DISABLED:

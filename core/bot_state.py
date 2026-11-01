@@ -101,8 +101,8 @@ class BotState:
                 self.free_margin = float(data.get("margin_free", self.free_margin))
                 self.balance = float(data.get("balance", self.balance))
                 self.margin_level = float(data.get("margin_level", self.margin_level))
-                self.open_positions = data.get("positions", [])
-                self.open_positions_count = int(data.get("open_positions_count", len(self.open_positions)))
+                self.open_positions = data.get("positions") or []
+                self.open_positions_count = int(data.get("open_positions_count") or len(self.open_positions))
                 self.last_update_ts = time.time()
                 self.trading_mode = safety_manager.get_trading_mode() if safety_manager else "PAPER"
 
@@ -114,7 +114,7 @@ class BotState:
                     self.max_total_open_risk_pct = float(os.environ.get("MAX_TOTAL_OPEN_RISK_PCT", "2.5"))
                     sm_state = safety_manager.state
                     self.daily_pnl = float(sm_state.get("realized_daily_pnl", 0.0))
-                    self.starting_daily_equity = float(sm_state.get("starting_daily_equity", DEFAULT_ACCOUNT_BALANCE))
+                    self.starting_daily_equity = float(sm_state.get("starting_daily_equity") or DEFAULT_ACCOUNT_BALANCE)
                     self.consecutive_losses = int(sm_state.get("consecutive_losses", 0))
                     self.daily_circuit_breaker_tripped = bool(sm_state.get("daily_circuit_breaker_tripped", False))
                     sm_kill, sm_reason = safety_manager.is_kill_switch_active()
@@ -147,7 +147,8 @@ class BotState:
 
     def is_cooldown_active(self, asset: str) -> bool:
         """Check if asset is in cooldown period."""
-        until = self.cooldowns.get(asset, 0.0)
+        with self._lock:
+            until = self.cooldowns.get(asset, 0.0)
         return until > time.time()
 
     def set_cooldown(self, asset: str, seconds: float) -> None:

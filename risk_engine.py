@@ -1742,7 +1742,6 @@ def calculate_smart_lot_by_confidence(asset: str, entry_price: float, stop_loss_
     Also respects regime-based risk cap if provided.
     """
     asset_key = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
-    is_buy = entry_price > 0 and stop_loss_price > 0
     risk_dist = abs(entry_price - stop_loss_price)
 
     # Determine base risk % by confidence tier

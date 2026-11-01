@@ -618,7 +618,7 @@ class MT5LiveBroker:
 
         # Post-Order Slippage Guard Gate
         max_slippage_pips = float(os.getenv("MAX_SLIPPAGE_PIPS", "3.0"))
-        price_diff = abs(actual_fill - entry_price)
+        price_diff = abs(actual_fill - fill_price)
         slip_pips = (price_diff / pip_unit) if pip_unit > 0 else price_diff
 
         self.slippage_stats["total_trades"] += 1
@@ -781,7 +781,7 @@ class MT5LiveBroker:
             return []
 
         # Rollover Spread-Spike Insulation (21:50 - 22:15 UTC)
-        now_utc = datetime.utcnow()
+        now_utc = datetime.now(timezone.utc)
         if (now_utc.hour == 21 and now_utc.minute >= 50) or (now_utc.hour == 22 and now_utc.minute <= 15):
             return []
 
