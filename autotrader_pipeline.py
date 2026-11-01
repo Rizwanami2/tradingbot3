@@ -331,9 +331,20 @@ def _get_cached_hist(symbol: str, period: str = "350d"):
     return hist
 
 
-def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg: float, gsr: float, fg_val: int):
+def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg: float, gsr: float, fg_val: int, strategy: str = "SCALP"):
+    # ── Profile → Timeframe Mapping (beast timeframes from backtests) ──
+    STRATEGY_TIMEFRAMES = {
+        "SCALP":   ("M5",   mt5.TIMEFRAME_M5 if MT5_BROKER_AVAILABLE and mt5 else None, 400, "60d"),
+        "SWING":   ("H4",   mt5.TIMEFRAME_H4 if MT5_BROKER_AVAILABLE and mt5 else None, 300, "180d"),
+        "BALANCE": ("D1",   mt5.TIMEFRAME_D1 if MT5_BROKER_AVAILABLE and mt5 else None, 300, "365d"),
+        "SWAP":    ("H1",   mt5.TIMEFRAME_H1 if MT5_BROKER_AVAILABLE and mt5 else None, 400, "350d"),
+    }
+    tf_name, tf_mt5, tf_count, tf_yf_period = STRATEGY_TIMEFRAMES.get(strategy.upper(), ("M5", mt5.TIMEFRAME_M5 if MT5_BROKER_AVAILABLE and mt5 else None, 400, "60d"))
+
     # Priority: MT5 live broker first (matches execution prices), then yfinance
-    hist = _get_cached_hist(symbol, period="350d")
+    hist = _get_mt5_hist(symbol, count=tf_count, timeframe=tf_mt5) if (USE_MT5_LIVE_DATA and MT5_BROKER_AVAILABLE and mt5) else None
+    if hist is None or hist.empty or len(hist) < 30:
+        hist = _get_cached_hist(symbol, period=tf_yf_period)
     if hist.empty or len(hist) < 30:
         return None
 
@@ -351,14 +362,49 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
             logger.debug(f"MTF analysis failed for {asset_type}: {e}")
             mtf_result = None
 
+    # ── Profile-specific indicator lookbacks & thresholds ──
+    # Lookback window scales with timeframe
+    if strategy.upper() == "SCALP":
+        swing_lookback = 60      # ~5 hours on M5
+        ma_fast, ma_slow = 50, 200
+        rsi_period = 14
+        rsi_buy_min, rsi_buy_max = 40, 65
+        rsi_sell_min, rsi_sell_max = 25, 48   # avoids oversold trap on M5
+        rsi_sell_overbought = 70
+        vol_lookback = 30
+    elif strategy.upper() == "SWING":
+        swing_lookback = 48      # ~2 days on H4
+        ma_fast, ma_slow = 50, 200
+        rsi_period = 14
+        rsi_buy_min, rsi_buy_max = 35, 60
+        rsi_sell_min, rsi_sell_max = 30, 48
+        rsi_sell_overbought = 70
+        vol_lookback = 30
+    elif strategy.upper() == "BALANCE":
+        swing_lookback = 30      # ~1 month on D1
+        ma_fast, ma_slow = 50, 200
+        rsi_period = 14
+        rsi_buy_min, rsi_buy_max = 40, 60
+        rsi_sell_min, rsi_sell_max = 35, 48
+        rsi_sell_overbought = 65
+        vol_lookback = 20
+    else:  # SWAP (H1)
+        swing_lookback = 120     # ~5 days on H1
+        ma_fast, ma_slow = 50, 200
+        rsi_period = 14
+        rsi_buy_min, rsi_buy_max = 40, 65
+        rsi_sell_min, rsi_sell_max = 25, 48
+        rsi_sell_overbought = 70
+        vol_lookback = 30
+
     # STAGE 1: LOCATION & STRUCTURE
     curr = hist["Close"].iloc[-1]
-    ma50 = hist["Close"].rolling(50).mean().iloc[-1] if len(hist) >= 50 else np.nan
-    ma200 = hist["Close"].rolling(200).mean().iloc[-1] if len(hist) >= 200 else np.nan
+    ma50 = hist["Close"].rolling(ma_fast).mean().iloc[-1] if len(hist) >= ma_fast else np.nan
+    ma200 = hist["Close"].rolling(ma_slow).mean().iloc[-1] if len(hist) >= ma_slow else np.nan
 
-    recent_60 = hist.tail(60)
-    sw_high = recent_60["High"].max()
-    sw_low = recent_60["Low"].min()
+    recent_n = hist.tail(swing_lookback)
+    sw_high = recent_n["High"].max()
+    sw_low = recent_n["Low"].min()
     fib_500 = sw_high - 0.500 * (sw_high - sw_low)
     fib_618 = sw_high - 0.618 * (sw_high - sw_low)
     fib_650 = sw_high - 0.650 * (sw_high - sw_low)
@@ -380,10 +426,10 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
             trap_state = "BEAR_TRAP"
 
     # STAGE 3: ASSET SPECIFIC METRICS
-    rsi = compute_rsi(hist["Close"], 14)
+    rsi = compute_rsi(hist["Close"], rsi_period)
     mayer = (curr / ma200) if not np.isnan(ma200) and ma200 > 0 else 1.0
     daily_rets = hist["Close"].pct_change().dropna()
-    vol30 = float(daily_rets.tail(30).std() * np.sqrt(365) * 100) if len(daily_rets) >= 30 else 30.0
+    vol30 = float(daily_rets.tail(vol_lookback).std() * np.sqrt(365) * 100) if len(daily_rets) >= vol_lookback else 30.0
 
     # STAGE 4: DUAL-SIDED CONFLUENCE SCORING & ACTIVE FEATURES (BUY & SELL)
     score_buy = 0
@@ -397,7 +443,7 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
         feat_yield = tnx_chg < 1.0
         feat_ma200 = curr > ma200
         feat_mayer = 0.85 <= mayer <= 1.50
-        feat_rsi = 40 <= rsi <= 65
+        feat_rsi = rsi_buy_min <= rsi <= rsi_buy_max
         feat_fg = 25 <= fg_val <= 70
         feat_no_trap = trap_state != "BULL_TRAP"
         feat_ma50 = curr > ma50
@@ -428,7 +474,7 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
         sell_yield = tnx_chg > -1.0
         sell_ma200 = curr < ma200
         sell_mayer = (mayer > 1.80 or mayer < 0.85)
-        sell_rsi = (rsi <= 48 or rsi >= 70)
+        sell_rsi = (rsi_sell_min <= rsi <= rsi_sell_max) or (rsi >= rsi_sell_overbought)
         sell_fg = (fg_val >= 75 or fg_val <= 20)
         sell_no_trap = trap_state != "BEAR_TRAP"
         sell_ma50 = curr < ma50
@@ -460,7 +506,7 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
         feat_yield = tnx_chg <= 0.2
         feat_ma200 = curr > ma200
         feat_ma50 = curr > ma50
-        feat_rsi = 40 <= rsi <= 60
+        feat_rsi = rsi_buy_min <= rsi <= rsi_buy_max
         feat_gsr = gsr >= 75
         feat_vol = vol30 < 22
         feat_no_trap = trap_state != "BULL_TRAP"
@@ -490,7 +536,7 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
         sell_yield = tnx_chg >= -0.2
         sell_ma200 = curr < ma200
         sell_ma50 = curr < ma50
-        sell_rsi = (25.0 <= rsi <= 48.0) or (rsi >= 65.0)  # bearish momentum breakdown or overbought rejection (avoids <25 oversold trap)
+        sell_rsi = (rsi_sell_min <= rsi <= rsi_sell_max) or (rsi >= rsi_sell_overbought)
         sell_gsr = gsr < 75
         sell_vol = vol30 < 25
         sell_no_trap = trap_state != "BEAR_TRAP"
@@ -679,6 +725,7 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
     return {
         "asset": asset_type,
         "symbol": symbol,
+        "strategy": strategy.upper(),
         "htf_bias": htf_bias,
         "price": curr,
         "ma200": ma200,

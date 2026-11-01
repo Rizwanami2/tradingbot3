@@ -523,14 +523,16 @@ class Orchestrator:
         except Exception:
             pass
 
-        # Analyze both assets
+        # Analyze both assets across all strategies (SCALP, SWING, BALANCE, SWAP)
+        STRATEGIES = ["SCALP", "SWING", "BALANCE", "SWAP"]
         for symbol, asset_type in [("BTC-USD", "BTC"), ("GC=F", "GOLD")]:
-            try:
-                res = analyze_asset_pipeline(symbol, asset_type, dxy_chg, tnx_chg, gsr, fg_val)
-                if res and res.get("action") not in ("STAND_ASIDE", None):
-                    candidates.append(res)
-            except Exception as e:
-                logger.warning(f"Pipeline analysis failed for {asset_type}: {e}")
+            for strategy in STRATEGIES:
+                try:
+                    res = analyze_asset_pipeline(symbol, asset_type, dxy_chg, tnx_chg, gsr, fg_val, strategy=strategy)
+                    if res and res.get("action") not in ("STAND_ASIDE", None):
+                        candidates.append(res)
+                except Exception as e:
+                    logger.warning(f"Pipeline analysis failed for {asset_type} {strategy}: {e}")
 
         return candidates
 
