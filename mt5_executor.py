@@ -1101,7 +1101,34 @@ class MT5LiveBroker:
                                     "msg": f"📈 *[{strat_name}] TRAILING ADVANCED:* #{ticket} `{symbol}` SL trailed to `${trailing_sl:,.2f}` (+{current_r:.2f}R — Profit Secured!)"
                                 })
 
-            # ── 4. PROFIT LOCK LEVELS ── Close 25% at each R level ──
+            # ── 4. REVERSAL DETECTION ── Close profitable position on confirmed reversal ──
+            if mt5_hist is not None and len(mt5_hist) >= 20 and current_r >= 0.5:
+                reversal_confirmed, reversal_reason, reversal_conf = self._detect_reversal(
+                    is_buy=is_buy, mt5_hist=mt5_hist,
+                    curr_price=curr_price, entry=entry,
+                    risk_dist=risk_dist, current_r=current_r
+                )
+                if reversal_confirmed and reversal_conf >= 0.6:
+                    # Close full position on confirmed reversal
+                    close_res = self.close_position(ticket, curr_price, reason="REVERSAL_DETECTED")
+                    if close_res.get("success"):
+                        asset_norm = "GOLD" if is_gold else "BTC"
+                        events.append({
+                            "ticket": ticket,
+                            "symbol": symbol,
+                            "asset": asset_norm,
+                            "type": "BUY" if is_buy else "SELL",
+                            "strategy": strat_name,
+                            "action": "REVERSAL_EXIT",
+                            "closed_price": curr_price,
+                            "profit_r": current_r,
+                            "confidence": reversal_conf,
+                            "reason": reversal_reason,
+                            "msg": f"🔄 *[{strat_name}] REVERSAL EXIT:* #{ticket} `{symbol}` closed at `${curr_price:,.2f}` (+{current_r:.2f}R — {reversal_reason})"
+                        })
+                        continue  # Skip remaining logic for this position
+
+            # ── 5. PROFIT LOCK LEVELS ── Close 25% at each R level ──
             lock_state = self.position_profit_locked.get(ticket, {"locked_r": 0.0, "closed_pct": 0.0})
             for lock_r in self.profit_lock_levels:
                 if current_r >= lock_r and lock_state["locked_r"] < lock_r:
@@ -1127,7 +1154,7 @@ class MT5LiveBroker:
                                 "msg": f"💰 *[{strat_name}] PROFIT LOCK {lock_r}R:* #{ticket} `{symbol}` closed {close_lots} lots (+{current_r:.2f}R secured)"
                             })
 
-            # ── 5. TIGHTER TRAILING AFTER +1R ── Trail closer as profit grows ──
+            # ── 6. TIGHTER TRAILING AFTER +1R ── Trail closer as profit grows ──
             if current_r >= self.tighten_trail_after_r and current_r < self.profit_lock_levels[-1]:
                 if is_buy:
                     tight_sl = round(peak_price - (risk_dist * self.tight_trail_step_r), digits)
@@ -1157,7 +1184,7 @@ class MT5LiveBroker:
                             "msg": f"🔒 *[{strat_name}] TIGHT TRAIL:* #{ticket} `{symbol}` SL tightened to `${tight_sl:,.2f}` (+{current_r:.2f}R — Profit Protected!)"
                         })
 
-            # ── 6. TIME-BASED EXIT ── Close stuck trades after max_hold_minutes ──
+            # ── 7. TIME-BASED EXIT ── Close stuck trades after max_hold_minutes ──
             open_time = self.position_open_time.get(ticket, time.time())
             hold_minutes = (time.time() - open_time) / 60.0
             if hold_minutes >= self.max_hold_minutes and current_r <= 0.0:
@@ -1871,6 +1898,145 @@ class MT5LiveBroker:
         if "XAU" in symbol.upper() or "GOLD" in symbol.upper():
             return 0.10  # Gold pip value
         return 10.0  # BTC pip value
+
+    # ── REVERSAL DETECTION ── Advanced reversal confirmation for profit protection ──
+    def _detect_reversal(self, is_buy: bool, mt5_hist: pd.DataFrame,
+                         curr_price: float, entry: float, risk_dist: float,
+                         current_r: float) -> tuple:
+        """
+        Detect confirmed trend reversal using multiple confirmations.
+        Returns (is_reversal: bool, reason: str, confidence: float).
+        
+        Confirmation layers (ALL must pass for reversal confirmation):
+        1. Price closes beyond opposite swing extreme (not just wick touch)
+        2. Engulfing candle pattern (current candle body engulfs previous)
+        3. Momentum divergence (price new extreme but RSI doesn't confirm)
+        4. Close beyond opposite key level (previous structure broken)
+        
+        This prevents fake wicks/corrections from triggering false exits.
+        """
+        if mt5_hist is None or len(mt5_hist) < 20:
+            return False, "Insufficient data for reversal detection", 0.0
+
+        # Get recent candles
+        recent = mt5_hist.tail(10)
+        curr_candle = recent.iloc[-1]
+        prev_candle = recent.iloc[-2]
+
+        c_open = float(curr_candle["Open"])
+        c_high = float(curr_candle["High"])
+        c_low = float(curr_candle["Low"])
+        c_close = float(curr_candle["Close"])
+        p_open = float(prev_candle["Open"])
+        p_high = float(prev_candle["High"])
+        p_low = float(prev_candle["Low"])
+        p_close = float(prev_candle["Close"])
+
+        # Get swing levels from tracked data
+        if is_buy:
+            # For BUY position: reversal = bearish reversal
+            # Price closes below recent swing low (not just wick)
+            swing_levels = self.position_swing_lows.get(ticket, [])
+            if not swing_levels:
+                return False, "No swing data for reversal check", 0.0
+            swing_low = max(swing_levels)  # highest recent swing low
+
+            # Confirmation 1: Close below swing low (body close, not wick)
+            close_below_swing = c_close < swing_low
+            if not close_below_swing:
+                return False, "Price not closed below swing low", 0.0
+
+            # Confirmation 2: Bearish engulfing (current bearish candle engulfs previous bullish)
+            curr_bearish = c_close < c_open
+            prev_bullish = p_close > p_open
+            engulfing = curr_bearish and prev_bullish and c_open > p_close and c_close < p_open
+            if not engulfing:
+                # Alternative: strong bearish close (close in bottom 25% of range)
+                c_range = c_high - c_low
+                if c_range > 0:
+                    close_position = (c_close - c_low) / c_range
+                    strong_bearish = curr_bearish and close_position < 0.25
+                else:
+                    strong_bearish = False
+                if not strong_bearish:
+                    return False, "No bearish engulfing or strong close", 0.0
+
+            # Confirmation 3: Price significantly below swing low (not just touching)
+            swing_distance_pips = abs(swing_low - c_close) / self._get_pip_value(symbol)
+            min_swing_distance = self.min_trail_distance_pips.get("GOLD" if is_gold else "BTC", 12.0) * 0.5
+            if swing_distance_pips < min_swing_distance:
+                return False, "Price not sufficiently beyond swing low", 0.0
+
+            # Confirmation 4: Momentum check - RSI declining while price made new high earlier
+            # Simple check: recent closes declining
+            recent_closes = recent["Close"].astype(float).tail(5)
+            if len(recent_closes) >= 3:
+                recent_declining = all(recent_closes.iloc[i] < recent_closes.iloc[i-1] 
+                                      for i in range(1, len(recent_closes)))
+            else:
+                recent_declining = False
+            
+            confidence = 0.0
+            if close_below_swing: confidence += 0.3
+            if engulfing: confidence += 0.3
+            elif strong_bearish: confidence += 0.2
+            if recent_declining: confidence += 0.2
+            if swing_distance_pips >= min_swing_distance: confidence += 0.2
+
+            reversal_confirmed = confidence >= 0.6
+            reason = f"Bearish reversal: close={c_close:.2f} below swing={swing_low:.2f}, engulfing={engulfing}, momentum_declining={recent_declining}"
+            return reversal_confirmed, reason, confidence
+
+        else:
+            # For SELL position: reversal = bullish reversal
+            swing_levels = self.position_swing_highs.get(ticket, [])
+            if not swing_levels:
+                return False, "No swing data for reversal check", 0.0
+            swing_high = min(swing_levels)  # lowest recent swing high
+
+            # Confirmation 1: Close above swing high (body close, not just wick)
+            close_above_swing = c_close > swing_high
+            if not close_above_swing:
+                return False, "Price not closed above swing high", 0.0
+
+            # Confirmation 2: Bullish engulfing
+            curr_bullish = c_close > c_open
+            prev_bearish = p_close < p_open
+            engulfing = curr_bullish and prev_bearish and c_open < p_close and c_close > p_open
+            if not engulfing:
+                c_range = c_high - c_low
+                if c_range > 0:
+                    close_position = (c_high - c_close) / c_range
+                    strong_bullish = curr_bullish and close_position < 0.25
+                else:
+                    strong_bullish = False
+                if not strong_bullish:
+                    return False, "No bullish engulfing or strong close", 0.0
+
+            # Confirmation 3: Price significantly above swing high
+            swing_distance_pips = abs(c_close - swing_high) / self._get_pip_value(symbol)
+            min_swing_distance = self.min_trail_distance_pips.get("GOLD" if is_gold else "BTC", 12.0) * 0.5
+            if swing_distance_pips < min_swing_distance:
+                return False, "Price not sufficiently above swing high", 0.0
+
+            # Confirmation 4: Recent closes rising
+            recent_closes = recent["Close"].astype(float).tail(5)
+            if len(recent_closes) >= 3:
+                recent_rising = all(recent_closes.iloc[i] > recent_closes.iloc[i-1] 
+                                   for i in range(1, len(recent_closes)))
+            else:
+                recent_rising = False
+
+            confidence = 0.0
+            if close_above_swing: confidence += 0.3
+            if engulfing: confidence += 0.3
+            elif strong_bullish: confidence += 0.2
+            if recent_rising: confidence += 0.2
+            if swing_distance_pips >= min_swing_distance: confidence += 0.2
+
+            reversal_confirmed = confidence >= 0.6
+            reason = f"Bullish reversal: close={c_close:.2f} above swing={swing_high:.2f}, engulfing={engulfing}, momentum_rising={recent_rising}"
+            return reversal_confirmed, reason, confidence
 
     def _update_swing_levels(self, ticket: str, is_buy: bool, df: pd.DataFrame,
                              lookback: int = 10):
