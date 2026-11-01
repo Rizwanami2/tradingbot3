@@ -39,3 +39,4 @@ echo "  ✅ Update complete! To run:"
 echo "     Native / Paper Mode : ./venv/bin/python3 telegram_bot.py"
 echo "     Wine / MT5 Live Mode: wine python telegram_bot.py"
 echo "=================================================================="
+

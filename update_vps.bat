@@ -28,3 +28,4 @@ echo   Update completed successfully!
 echo   You can now run: run_bot.bat
 echo ==================================================================
 pause
+
