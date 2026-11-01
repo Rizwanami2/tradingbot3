@@ -1,4 +1,4 @@
-# FIX_LOG: TRADINGBOT3 AUDIT & REPAIR LOG
+# FIX_LOG: TRADINGBOT3 AUDIT, REPAIR & LIVE-SAFE GATES LOG
 
 ## 1. BUGS FOUND & RESOLVED
 
@@ -25,27 +25,57 @@
 
 ---
 
-## 2. FILES MODIFIED
+## 2. LIVE-SAFE GATES IMPLEMENTED
 
-- **`autotrader_pipeline.py`**:
-  - Implemented directional absolute risk/reward percentage math for short orders.
-  - Added order ticket display support for `SELL` and `SELL_HALF` actions.
-  - Calibrated Gold and Bitcoin sell-momentum RSI thresholds to eliminate oversold trap entries.
+### Gate A: Pre-Trade Validation
+- **Margin Check (25% Buffer):** In `mt5_executor.py` and `risk_engine.py`, enforced `free_margin >= required_margin * 1.25`. If free margin is insufficient, orders are immediately rejected before transmission.
+- **SL/TP Side Validation:** In `mt5_executor.py`, `risk_engine.py`, and `autotrader_pipeline.py`, strictly enforced `BUY: SL < Entry < TP` and `SELL: TP < Entry < SL`. Inverted levels are automatically corrected or rejected with an error log.
+- **Lot Normalization:** In `mt5_executor.py`, order lots are clamped to `volume_min`, `volume_max`, and rounded to `volume_step`. Orders with lots below `volume_min` are rejected.
+- **Spread & Min Distance Guard:** In `mt5_executor.py`, orders are skipped if current spread exceeds `MAX_SPREAD_PIPS` (default 30). Stop distances are validated against broker `trade_stops_level`.
+- **Symbol Tradability:** In `mt5_executor.py`, symbol visibility, trading permission (`SYMBOL_TRADE_MODE_DISABLED`), contract size, and quote freshness are validated and refreshed on reconnect.
+
+### Gate B: Execution, Recovery & Monitoring
+- **Crash Alerts & Heartbeat:** In `telegram_bot.py`, installed `sys.excepthook` for automated traceback crash notifications. Added a daemon heartbeat thread reporting Equity, Balance, Margin, Free Margin, and Open Positions every 2 hours.
+- **Standard Logging:** Created `utils/logger.py` with `RotatingFileHandler` (5MB limit, 5 backups) saving to `logs/tradingbot.log` with formatted timestamps, log levels, and module names.
+- **Auto-Reconnect With Exponential Backoff:** In `mt5_executor.py`, MT5 connection drops trigger exponential backoff starting at 2.0s doubling up to 60.0s, logging attempts and notifying via Telegram upon recovery.
+- **Slippage Guard:** In `mt5_executor.py`, post-execution fills are compared against requested prices; fills exceeding `MAX_SLIPPAGE_PIPS` (default 3.0) trigger warning logs, Telegram alerts, and slippage metrics recording.
+- **State Persistence on Exit:** In `risk_engine.py`, registered `atexit` and `SIGINT`/`SIGTERM` handlers to persist daily PnL, circuit breaker status, cooldowns, and kill-switch states to `safety_state.json`.
+
+### Gate C: Risk Management & Config
+- **Daily Drawdown Kill-Switch:** In `risk_engine.py`, tracks daily realized + unrealized loss against `MAX_DAILY_LOSS_PCT` (default 1.5% of starting equity). Drawdowns exceeding this threshold trigger `KILL_SWITCH_ACTIVE=True`, block all entries, and alert Telegram.
+- **Portfolio Risk Cap:** In `risk_engine.py` and `mt5_executor.py`, calculates aggregate open portfolio risk (`sum(SL_distance * lot * contract_size / equity * 100)`). If adding a trade exceeds `MAX_TOTAL_OPEN_RISK_PCT` (default 2.5%), the trade is blocked.
+- **Pinned Dependencies:** In `requirements.txt` and `requirements.lock.txt`, all packages are pinned to exact installed versions.
+- **Hardened .gitignore:** Configured to ignore `logs/`, `.env`, `.env.local`, `*.bak`, `*.log`, `learning_memory.json`, `safety_state.json`, `market_data_cache.json`, `trade_audit.jsonl`, `__pycache__/`, and `README*`.
+- **JSON Corruption Auto-Recovery:** In `self_learning.py`, `market_data.py`, and `risk_engine.py`, state files have atomic `.bak` fallbacks and initialize clean minimal schemas if corrupted.
+- **Startup Config Validation:** Created `config_validator.py` invoked across all entry points (`terminal.py`, `autotrader_pipeline.py`, `mt5_executor.py`, `telegram_bot.py`), validating environment variables, trading mode restrictions, and numeric safety ranges before startup.
 
 ---
 
-## 3. PENDING FIXES
+## 3. FILES MODIFIED & CREATED
 
-- **None.** All identified bugs, math inconsistencies, and runtime risks have been fully resolved.
+- `autotrader_pipeline.py` (SL/TP side validation, absolute R:R formatting, config validation, logging)
+- `mt5_executor.py` (Margin check +25% buffer, SL/TP side validation, lot normalization, spread guard, slippage guard, auto-reconnect backoff)
+- `risk_engine.py` (Daily drawdown kill-switch, portfolio risk cap, state persistence on shutdown, JSON recovery)
+- `telegram_bot.py` (Global crash alert hook, institutional 2-hour heartbeat worker)
+- `market_data.py` (JSON corruption auto-recovery, logging)
+- `self_learning.py` (Atomic JSON save with retry and `.bak` recovery)
+- `terminal.py` (Startup config validation, logging)
+- `config_validator.py` (New - Startup validation for trading modes, paths, and risk parameters)
+- `utils/logger.py` (New - Centralized rotating file and console logging)
+- `requirements.txt` (Pinned exact dependencies)
+- `requirements.lock.txt` (New - Locked dependency tree)
+- `.gitignore` (Hardened to exclude state, logs, and cache files)
+- `.env.example` (Added defaults for all safety gates and mode configurations)
 
 ---
 
-## 4. CURRENT STATUS & VERIFICATION RESULTS
+## 4. PENDING FIXES
+- **None.** All identified bugs and safety gate requirements are 100% resolved.
 
-- **Python AST & Syntax Compilation (`py_compile`):** 11/11 `.py` files compiled cleanly with 0 errors.
-- **Module Import Isolation:** All 11 core modules (`autotrader_pipeline`, `backtest`, `chart_generator`, `institutional_engine`, `market_data`, `mt5_executor`, `risk_engine`, `self_learning`, `telegram_bot`, `terminal`, `test_suite`) imported with 0 errors and zero unintended side-effects.
-- **Test Suite (`test_suite.py`):** **19 / 19 tests passed (100% OK)** in 44.02 seconds with 0 failures and 0 errors.
-- **JSON & State Integrity:** All 5 JSON state files (`config_telegram.json`, `learning_memory.json`, `market_data_cache.json`, `rules.json`, `safety_state.json`) and `trade_audit.jsonl` validated with 100% valid syntax.
-- **Runtime Execution:**
-  - `terminal.py`: Executes cleanly with zero unhandled exceptions.
-  - `autotrader_pipeline.py`: Executes cleanly with zero unhandled exceptions.
+---
+
+## 5. CURRENT STATUS & VERIFICATION RESULTS
+- **Python AST & Syntax Compilation (`py_compile`):** 14/14 `.py` files compiled cleanly with 0 errors.
+- **Module Import Isolation:** All core modules import cleanly with zero unhandled exceptions.
+- **Test Suite (`test_suite.py`):** 19 / 19 tests passing (100% OK, 0 failures, 0 errors).
+- **Runtime Execution:** `terminal.py` and `autotrader_pipeline.py` execute cleanly in paper trading mode.

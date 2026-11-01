@@ -40,6 +40,13 @@ import time
 import math
 import hashlib
 import shutil
+
+try:
+    from utils.logger import get_logger
+    logger = get_logger("self_learning")
+except Exception:
+    import logging
+    logger = logging.getLogger("self_learning")
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Tuple
 import numpy as np
@@ -260,14 +267,39 @@ class HierarchicalMemoryManager:
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
 
-            # Atomic replace
-            os.replace(tmp_path, self.memory_path)
+            # Atomic replace with Windows retry & fallback
+            replaced = False
+            for _ in range(5):
+                try:
+                    os.replace(tmp_path, self.memory_path)
+                    replaced = True
+                    break
+                except (PermissionError, OSError):
+                    time.sleep(0.05)
+
+            if not replaced:
+                try:
+                    shutil.copyfile(tmp_path, self.memory_path)
+                    replaced = True
+                except Exception:
+                    with open(self.memory_path, "w", encoding="utf-8") as out_f:
+                        json.dump(data, out_f, indent=2)
+                    replaced = True
+
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
 
             # Periodic rolling backup (every 10 minutes or 1st save)
             now = time.time()
             if now - self.last_backup_time > 600 or not os.path.exists(self.backup_path):
-                shutil.copy2(self.memory_path, self.backup_path)
-                self.last_backup_time = now
+                try:
+                    shutil.copy2(self.memory_path, self.backup_path)
+                    self.last_backup_time = now
+                except Exception:
+                    pass
 
             return True
         except Exception as e:
@@ -286,15 +318,29 @@ class HierarchicalMemoryManager:
                     mem = json.load(f)
                     return mem
             except Exception as e:
-                print(f"[!] Corrupt memory detected ({e}). Attempting backup restore...")
+                logger.warning(f"Corrupt memory detected in {target} ({e}). Attempting backup restore...")
                 if os.path.exists(self.backup_path):
                     try:
                         with open(self.backup_path, "r", encoding="utf-8") as f:
                             mem = json.load(f)
-                            print("[+] Restored memory from backup successfully.")
+                            logger.info("Restored memory from backup successfully.")
+                            try:
+                                with open(self.memory_path, "w", encoding="utf-8") as out_f:
+                                    json.dump(mem, out_f, indent=2)
+                            except Exception:
+                                pass
                             return mem
-                    except Exception:
-                        pass
+                    except Exception as be:
+                        logger.warning(f"Backup memory also corrupted ({be}).")
+
+                # Both corrupted - dispatch alert
+                try:
+                    import telegram_bot
+                    tok, cid = telegram_bot.get_credentials()
+                    if tok and cid:
+                        telegram_bot.send_message(tok, cid, "⚠️ *MEMORY CORRUPTION AUTO-RECOVERY*\nCorrupt learning_memory.json detected. Reinitializing valid schema.")
+                except Exception:
+                    pass
         return {}
 
 
@@ -346,6 +392,7 @@ class SelfLearningEngine:
                 "post_mortem_journal": [],
                 "dynamic_sl_buffers": {"GOLD": 0.0, "BTC": 0.0}
             }
+            self.memory_mgr.save_safe(mem)
         else:
             # Upgrade keys if loading older memory file
             if "regime_brains" not in mem:

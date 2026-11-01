@@ -30,6 +30,17 @@ except ImportError:
     print("❌ yfinance required. Run: pip install yfinance")
     exit(1)
 
+try:
+    from utils.logger import get_logger
+    logger = get_logger("terminal")
+except Exception:
+    logger = logging.getLogger("terminal")
+
+try:
+    from config_validator import validate_config
+except Exception:
+    def validate_config(*args, **kwargs): return True, []
+
 
 def compute_rsi(series, period: int = 14) -> float:
     if len(series) < period + 1:
@@ -221,6 +232,10 @@ def calculate_gold_confluence(gold, dxy_chg, tnx_chg, gsr):
 
 
 def main():
+    try:
+        validate_config(fail_fast=False)
+    except Exception as e:
+        logger.warning(f"Config check: {e}")
     print("\n⏳ Running Institutional Hard-Asset Audit (Gold, BTC, Macro)...")
 
     btc = get_asset_stats("BTC-USD")

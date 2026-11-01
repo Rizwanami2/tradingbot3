@@ -1,6 +1,7 @@
 # Python bytecode & cache
 __pycache__/
 *.py[cod]
+*.pyc
 *$py.class
 *.so
 .Python
@@ -11,22 +12,27 @@ venv/
 env/
 ENV/
 
-# Configuration overrides (protect personal tokens)
+# Configuration overrides & secrets
 config_telegram.local.json
 .env
+.env.local
 
 # Logs & temp files
+logs/
 *.log
 *.tmp
 *.exe
 .DS_Store
 Thumbs.db
+
+# State and cache files (persistent live states)
 learning_memory.json
 safety_state.json
 market_data_cache.json
+trade_audit.jsonl
 *.jsonl
+*.bak
 
-# Never create or track README files
+# Permanent Project Constraint: Never create or track README files
 README*
 readme*
-*.bak

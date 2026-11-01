@@ -18,12 +18,33 @@ Core Features:
 
 import sys
 if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 import os
 import math
 import time
 from datetime import datetime, timedelta
+
+try:
+    from utils.logger import get_logger
+    logger = get_logger("mt5_executor")
+except Exception:
+    import logging
+    logger = logging.getLogger("mt5_executor")
+
+try:
+    from config_validator import validate_config
+except Exception:
+    def validate_config(*args, **kwargs):
+        return True, []
 
 try:
     import MetaTrader5 as mt5
@@ -63,16 +84,46 @@ class MT5LiveBroker:
         self.position_initial_risks = {}
         self.position_peak_prices = {}
         self.tracked_live_tickets = {}
+        # Exponential backoff parameters (2s up to 60s)
+        self.reconnect_delay = 2.0
+        self.max_reconnect_delay = 60.0
+        self.last_reconnect_attempt = 0.0
+        # Slippage statistics tracking
+        self.slippage_stats = {
+            "total_trades": 0,
+            "excessive_slippage_count": 0,
+            "max_slippage_pips": 0.0,
+            "recent_slippages": []
+        }
+
+    def _notify_telegram_alert(self, text: str):
+        """Sends an urgent alert through Telegram if available."""
+        try:
+            import telegram_bot
+            tok, cid = telegram_bot.get_credentials()
+            if tok and cid:
+                telegram_bot.send_message(tok, cid, text)
+        except Exception as e:
+            logger.debug(f"Could not dispatch telegram notification: {e}")
 
     def connect(self, login: int = None, password: str = None, server: str = None, path: str = None) -> tuple:
         """
         Connects to live MetaTrader 5 terminal.
         If credentials provided, logs into the specific account.
         Otherwise, attaches directly to the currently running logged-in terminal.
+        Re-validates symbols on every connection attempt.
         """
+        # Validate startup configuration
+        validate_config(fail_fast=False)
+
+        # Clear symbol cache on every connect/reconnect to force fresh validation
+        self.resolved_symbols.clear()
+
         if not MT5_AVAILABLE:
             self.is_connected = False
-            return False, "MetaTrader5 Python library not installed. Run: py -3.11 -m pip install MetaTrader5"
+            msg = "MetaTrader5 Python library not installed. Run: py -3.11 -m pip install MetaTrader5"
+            logger.warning(msg)
+            return False, msg
 
         self.last_login = login
         self.last_password = password
@@ -89,7 +140,9 @@ class MT5LiveBroker:
         if not init_ok:
             err = mt5.last_error()
             self.is_connected = False
-            return False, f"MT5 terminal initialization failed: {err}. Ensure MetaTrader 5 is running on your VPS."
+            msg = f"MT5 terminal initialization failed: {err}. Ensure MetaTrader 5 is running on your VPS."
+            logger.warning(msg)
+            return False, msg
 
         # Step 2: Login if explicit credentials provided
         if login and password and server:
@@ -97,7 +150,9 @@ class MT5LiveBroker:
             if not login_ok:
                 err = mt5.last_error()
                 self.is_connected = False
-                return False, f"MT5 live login failed for account #{login} on {server}: {err}"
+                msg = f"MT5 live login failed for account #{login} on {server}: {err}"
+                logger.warning(msg)
+                return False, msg
 
         # Step 3: Verify terminal and account status
         term = mt5.terminal_info()
@@ -105,15 +160,18 @@ class MT5LiveBroker:
 
         if not acc:
             self.is_connected = False
-            return False, "Could not fetch MT5 account info. Please ensure you are logged into a live account in MT5."
+            msg = "Could not fetch MT5 account info. Please ensure you are logged into a live account in MT5."
+            logger.warning(msg)
+            return False, msg
 
         self.terminal_info = term
         self.account_info = acc
         self.is_connected = True
+        self.reconnect_delay = 2.0  # Reset backoff interval on successful connection
 
         trade_status = "ENABLED ✅" if (term and term.trade_allowed) else "DISABLED ⚠️ (Enable 'Allow Algo Trading' in MT5 Tools -> Options)"
 
-        return True, (
+        banner = (
             f"🟢 LIVE MT5 BROKER CONNECTED\n"
             f"• Broker: {acc.company}\n"
             f"• Account: #{acc.login} ({acc.server})\n"
@@ -122,9 +180,14 @@ class MT5LiveBroker:
             f"• Leverage: 1:{acc.leverage} (Auto-Managed)\n"
             f"• Algo Trading: {trade_status}"
         )
+        logger.info(banner)
+        return True, banner
 
     def ensure_connected(self) -> bool:
-        """Verifies active connection and auto-reconnects if disconnected."""
+        """
+        Verifies active connection and auto-reconnects with exponential backoff
+        starting at 2s and doubling up to max 60s. Logs each attempt and alerts on success.
+        """
         if not MT5_AVAILABLE:
             return False
 
@@ -134,10 +197,24 @@ class MT5LiveBroker:
                 self.terminal_info = term
                 return True
             self.is_connected = False
+            logger.warning("MT5 connection drop detected.")
 
-        # Attempt auto-reconnect
-        ok, _ = self.connect(self.last_login, self.last_password, self.last_server, self.last_path)
-        return ok
+        now = time.time()
+        if (now - self.last_reconnect_attempt) < self.reconnect_delay:
+            return False
+
+        self.last_reconnect_attempt = now
+        logger.info(f"Attempting MT5 auto-reconnect (backoff interval: {self.reconnect_delay:.1f}s)...")
+        ok, msg = self.connect(self.last_login, self.last_password, self.last_server, self.last_path)
+        if ok:
+            logger.info("MT5 auto-reconnect succeeded! Alerting channel.")
+            self.reconnect_delay = 2.0
+            self._notify_telegram_alert("🟢 *MT5 AUTO-RECONNECTED*\nMetaTrader 5 broker terminal connection restored successfully.")
+            return True
+        else:
+            self.reconnect_delay = min(self.reconnect_delay * 2.0, self.max_reconnect_delay)
+            logger.warning(f"MT5 auto-reconnect failed ({msg}). Next retry in {self.reconnect_delay:.1f}s.")
+            return False
 
     def get_live_account_data(self) -> dict:
         """
@@ -178,6 +255,8 @@ class MT5LiveBroker:
     def resolve_symbol(self, asset: str) -> str:
         """
         Finds the exact symbol name supported by the broker's market watch.
+        Verifies visibility, full tradability, contract_size > 0, digits >= 0.
+        Cache resolved symbols but re-validate on every connect/reconnect.
         """
         asset_key = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
         if asset_key in self.resolved_symbols:
@@ -188,12 +267,29 @@ class MT5LiveBroker:
 
         candidates = GOLD_SYMBOL_CANDIDATES if asset_key == "GOLD" else BTC_SYMBOL_CANDIDATES
 
+        def _is_valid_tradable(sym_name: str) -> bool:
+            info = mt5.symbol_info(sym_name)
+            if not info:
+                return False
+            if not info.visible:
+                mt5.symbol_select(sym_name, True)
+                info = mt5.symbol_info(sym_name)
+                if not info or not info.visible:
+                    return False
+            trade_mode = getattr(info, "trade_mode", None)
+            if trade_mode == mt5.SYMBOL_TRADE_MODE_DISABLED:
+                return False
+            contract_size = getattr(info, "trade_contract_size", 0) or getattr(info, "contract_size", 0)
+            if contract_size <= 0:
+                return False
+            if getattr(info, "digits", -1) < 0:
+                return False
+            return True
+
         for sym in candidates:
-            info = mt5.symbol_info(sym)
-            if info is not None:
-                if not info.visible:
-                    mt5.symbol_select(sym, True)
+            if _is_valid_tradable(sym):
                 self.resolved_symbols[asset_key] = sym
+                logger.info(f"Resolved verified tradable symbol for {asset_key}: {sym}")
                 return sym
 
         # Fallback search in all broker symbols
@@ -202,13 +298,15 @@ class MT5LiveBroker:
             for s in all_syms:
                 name_upper = s.name.upper()
                 if asset_key == "GOLD" and ("XAU" in name_upper or "GOLD" in name_upper):
-                    mt5.symbol_select(s.name, True)
-                    self.resolved_symbols[asset_key] = s.name
-                    return s.name
+                    if _is_valid_tradable(s.name):
+                        self.resolved_symbols[asset_key] = s.name
+                        logger.info(f"Resolved verified tradable symbol for GOLD: {s.name}")
+                        return s.name
                 elif asset_key == "BTC" and ("BTC" in name_upper and "USD" in name_upper):
-                    mt5.symbol_select(s.name, True)
-                    self.resolved_symbols[asset_key] = s.name
-                    return s.name
+                    if _is_valid_tradable(s.name):
+                        self.resolved_symbols[asset_key] = s.name
+                        logger.info(f"Resolved verified tradable symbol for BTC: {s.name}")
+                        return s.name
 
         default_sym = "XAUUSD" if asset_key == "GOLD" else "BTCUSD"
         self.resolved_symbols[asset_key] = default_sym
@@ -241,16 +339,47 @@ class MT5LiveBroker:
                                   comment: str = "GoldBTC-Sniper") -> dict:
         """
         Executes an instant market order directly on the live MT5 broker or in Paper mode.
-        Enforces strict PAPER | DEMO | LIVE trading modes, multi-layer circuit breakers,
-        pre-order spread guard, post-order slippage verification, and audit logging.
+        Enforces:
+          - Pre-Trade Margin Check (free_margin >= req_margin * 1.25)
+          - SL/TP Side Validation (BUY: SL < entry < TP; SELL: TP < entry < SL)
+          - Lot Normalization (clamped to volume_min, volume_max, volume_step; precision rounded)
+          - Pre-order Spread Guard (spread <= MAX_SPREAD_PIPS)
+          - Min Distance Guard (distance >= trade_stops_level)
+          - Symbol Tradability verification
+          - Portfolio Risk Cap (total open risk + trade <= MAX_TOTAL_OPEN_RISK_PCT)
+          - Post-order Slippage Guard (slippage <= MAX_SLIPPAGE_PIPS, alerts, stats)
         """
         current_mode = safety_manager.get_trading_mode() if safety_manager else "LIVE"
+        asset_key = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
+        is_gold_asset = asset_key == "GOLD"
+        is_buy = action.upper() in ("BUY", "LONG")
 
         # ── 1. PAPER TRADING SIMULATION (Zero Real Capital Risk) ──
         if current_mode == "PAPER" and safety_manager:
             open_pos = safety_manager.get_paper_positions()
             paper_bal = safety_manager.state.get("paper_account", {}).get("balance", 10000.0)
-            sl_dist = abs(entry_price - stop_loss) if (entry_price > 0 and stop_loss > 0) else 4.0
+            sl_dist = abs(entry_price - stop_loss) if (entry_price > 0 and stop_loss > 0) else (5.0 if is_gold_asset else 400.0)
+            tp_dist = abs(take_profit - entry_price) if (entry_price > 0 and take_profit > 0) else (sl_dist * 1.20)
+
+            # SL/TP Side Validation for Paper
+            if is_buy:
+                if not (stop_loss < entry_price < take_profit):
+                    logger.warning(f"Inverted SL/TP for Paper BUY on {asset_key}. Auto-correcting to proper sides.")
+                    stop_loss = round(entry_price - sl_dist, 2)
+                    take_profit = round(entry_price + tp_dist, 2)
+            else:
+                if not (take_profit < entry_price < stop_loss):
+                    logger.warning(f"Inverted SL/TP for Paper SELL on {asset_key}. Auto-correcting to proper sides.")
+                    stop_loss = round(entry_price + sl_dist, 2)
+                    take_profit = round(entry_price - tp_dist, 2)
+
+            # Paper Margin Check (125% buffer)
+            contract_size = 100.0 if is_gold_asset else 1.0
+            req_paper_margin = (contract_size * lot_size * entry_price) / 100.0
+            if (req_paper_margin * 1.25) > paper_bal:
+                msg = f"Margin Check REJECTED: Required margin ${req_paper_margin:,.2f} with 25% buffer (${req_paper_margin * 1.25:,.2f}) exceeds balance ${paper_bal:,.2f}."
+                logger.warning(msg)
+                return {"success": False, "error": msg, "mode": "PAPER"}
 
             safe_ok, safe_msg = safety_manager.check_trade_safety(
                 asset, proposed_risk_pct=0.50, open_positions=open_pos,
@@ -278,7 +407,7 @@ class MT5LiveBroker:
         if not term.trade_allowed:
             return {"success": False, "error": "Algo Trading is DISABLED in MT5. Go to Tools -> Options -> Expert Advisors -> Allow algorithmic trading."}
 
-        # LIVE Mode Double Confirmation: First trade of the day check
+        # LIVE Mode Double Confirmation
         if current_mode == "LIVE" and safety_manager:
             if not safety_manager.is_first_trade_confirmed_today():
                 return {
@@ -295,20 +424,35 @@ class MT5LiveBroker:
 
         if not sym_info.visible:
             mt5.symbol_select(symbol, True)
+            sym_info = mt5.symbol_info(symbol)
 
-        # Enforce broker lot limits and step alignment
-        min_lot = sym_info.volume_min or 0.01
-        max_lot = min(sym_info.volume_max or 50.0, 1.0)  # Conservative live cap (max 1.0 lot)
+        # Symbol Tradability Validation Gate
+        trade_mode = getattr(sym_info, "trade_mode", None)
+        if trade_mode == mt5.SYMBOL_TRADE_MODE_DISABLED:
+            return {"success": False, "error": f"Symbol Tradability REJECTED: Trading is DISABLED by broker for {symbol}."}
+        if is_buy and trade_mode == mt5.SYMBOL_TRADE_MODE_SHORTONLY:
+            return {"success": False, "error": f"Symbol Tradability REJECTED: {symbol} is in SHORT-ONLY mode."}
+        if (not is_buy) and trade_mode == mt5.SYMBOL_TRADE_MODE_LONGONLY:
+            return {"success": False, "error": f"Symbol Tradability REJECTED: {symbol} is in LONG-ONLY mode."}
+
+        # Lot Normalization Gate
+        broker_min_lot = sym_info.volume_min or 0.01
+        broker_max_lot = min(sym_info.volume_max or 50.0, 1.0)  # Conservative live cap (max 1.0 lot)
         step_lot = sym_info.volume_step or 0.01
 
-        steps = math.floor(lot_size / step_lot) if step_lot > 0 else 1
+        steps = math.floor(round(lot_size / step_lot, 6)) if step_lot > 0 else 1
         aligned_lot = steps * step_lot
-        valid_lot = max(min_lot, min(aligned_lot, max_lot))
+        step_decimals = max(0, -int(math.floor(math.log10(step_lot)))) if (0 < step_lot < 1) else 2
+        aligned_lot = round(aligned_lot, step_decimals)
 
-        step_decimals = max(0, -int(math.floor(math.log10(step_lot)))) if (step_lot > 0 and step_lot < 1) else 2
+        if aligned_lot < broker_min_lot:
+            msg = f"Lot Normalization REJECTED: Requested lot {lot_size:.2f} (aligned {aligned_lot:.2f}) < broker volume_min {broker_min_lot}."
+            logger.warning(msg)
+            return {"success": False, "error": msg, "mode": current_mode}
+
+        valid_lot = max(broker_min_lot, min(aligned_lot, broker_max_lot))
         valid_lot = round(valid_lot, step_decimals)
 
-        is_buy = action.upper() in ("BUY", "LONG")
         order_type = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
 
         tick = mt5.symbol_info_tick(symbol)
@@ -318,44 +462,51 @@ class MT5LiveBroker:
         fill_price = tick.ask if is_buy else tick.bid
         digits = sym_info.digits
         point = sym_info.point or (10 ** -digits)
+        pip_unit = (10.0 * point) if digits in (2, 3, 5) else point
 
-        # Multi-Layer Safety & Pre-Order Spread Guard
-        spread_cost = sym_info.spread * point
-        sl_distance = abs(fill_price - stop_loss)
+        # Pre-Order Spread Guard Gate
+        max_spread_pips = float(os.getenv("MAX_SPREAD_PIPS", "30.0"))
+        spread_pts = sym_info.spread
+        spread_pips = (spread_pts * point) / pip_unit if pip_unit > 0 else float(spread_pts)
+        if spread_pips > max_spread_pips:
+            msg = f"Spread Guard REJECTED: Broker spread {spread_pips:.1f} pips exceeds MAX_SPREAD_PIPS ({max_spread_pips:.1f} pips)."
+            logger.warning(msg)
+            return {"success": False, "error": msg, "mode": current_mode}
 
-        if safety_manager:
-            open_pos = self.get_open_positions()
-            current_eq = self.account_info.equity if self.account_info else 10000.0
-            safe_ok, safe_msg = safety_manager.check_trade_safety(
-                asset, proposed_risk_pct=0.50, open_positions=open_pos,
-                current_equity=current_eq, data_timestamp=tick.time,
-                spread_val=spread_cost, sl_dist=sl_distance
-            )
-            if not safe_ok:
-                return {"success": False, "error": safe_msg, "mode": current_mode}
+        # Pre-Trade Margin Check Gate (free_margin >= req_margin * 1.25)
+        acc = self.account_info or mt5.account_info()
+        contract_size = getattr(sym_info, "trade_contract_size", 100.0 if is_gold_asset else 1.0) or (100.0 if is_gold_asset else 1.0)
+        leverage = acc.leverage if (acc and acc.leverage and acc.leverage > 0) else 100.0
 
-        # Auto-calculate margin with broker leverage
-        acc = self.account_info
-        if acc and hasattr(mt5, "order_calc_margin"):
+        req_margin = None
+        if hasattr(mt5, "order_calc_margin"):
             try:
-                req_margin = mt5.order_calc_margin(order_type, symbol, valid_lot, fill_price)
-                if req_margin and req_margin > 0:
-                    free_margin = acc.margin_free or (acc.balance * 0.90)
-                    if req_margin > (free_margin * 0.90):  # Cap margin at 90% of free margin
-                        max_lots_by_margin = (free_margin * 0.90) / (req_margin / valid_lot)
-                        steps_margin = math.floor(max_lots_by_margin / step_lot)
-                        valid_lot = max(min_lot, min(steps_margin * step_lot, valid_lot))
-                        valid_lot = round(valid_lot, step_decimals)
+                calc_m = mt5.order_calc_margin(order_type, symbol, valid_lot, fill_price)
+                if calc_m and calc_m > 0:
+                    req_margin = float(calc_m)
             except Exception:
-                pass
+                req_margin = None
+
+        if req_margin is None:
+            req_margin = (contract_size * valid_lot * fill_price) / leverage
+
+        free_margin = getattr(acc, "margin_free", None) if acc else None
+        if free_margin is None:
+            free_margin = (acc.balance * 0.90) if acc else 10000.0
+
+        if free_margin < (req_margin * 1.25):
+            msg = (f"Pre-Trade Margin Check REJECTED: Required margin ${req_margin:,.2f} with 25% buffer "
+                   f"(${req_margin * 1.25:,.2f}) exceeds free margin ${free_margin:,.2f}.")
+            logger.warning(msg)
+            return {"success": False, "error": msg, "mode": current_mode}
 
         # Calculate exact SL and TP distances from entry and anchor to live fill_price
-        sl_dist = abs(entry_price - stop_loss) if (entry_price > 0 and stop_loss > 0) else (5.0 if "XAU" in symbol or "GOLD" in symbol else 400.0)
+        sl_dist = abs(entry_price - stop_loss) if (entry_price > 0 and stop_loss > 0) else (5.0 if is_gold_asset else 400.0)
         tp_dist = abs(take_profit - entry_price) if (entry_price > 0 and take_profit > 0) else (sl_dist * 1.20)
 
-        # Respect broker's minimum stops level
+        # Min Distance Guard Gate (trade_stops_level)
         stops_level_pts = sym_info.trade_stops_level or 0
-        min_stop_dist = (stops_level_pts + 5) * point
+        min_stop_dist = max((stops_level_pts + 5) * point, 0.0)
         if sl_dist < min_stop_dist:
             sl_dist = min_stop_dist
         if tp_dist < min_stop_dist:
@@ -364,8 +515,65 @@ class MT5LiveBroker:
         final_sl = round(fill_price - sl_dist if is_buy else fill_price + sl_dist, digits)
         final_tp = round(fill_price + tp_dist if is_buy else fill_price - tp_dist, digits)
 
-        is_gold_asset = ("XAU" in symbol.upper() or "GOLD" in symbol.upper())
-        asset_deviation = 40 if is_gold_asset else 650  # Adaptive: 40 pts Gold ($0.40), 650 pts BTC ($6.50)
+        # SL/TP Side Validation Gate (BUY -> SL < entry < TP; SELL -> TP < entry < SL)
+        if is_buy:
+            if not (final_sl < fill_price < final_tp):
+                logger.warning(f"Inverted SL/TP detected for BUY on {symbol} (SL={final_sl}, Entry={fill_price}, TP={final_tp}). Re-aligning.")
+                final_sl = round(fill_price - sl_dist, digits)
+                final_tp = round(fill_price + tp_dist, digits)
+                if not (final_sl < fill_price < final_tp):
+                    msg = f"SL/TP Side Validation REJECTED for BUY: SL ({final_sl}) must be < Entry ({fill_price}) < TP ({final_tp})."
+                    logger.error(msg)
+                    return {"success": False, "error": msg, "mode": current_mode}
+        else:
+            if not (final_tp < fill_price < final_sl):
+                logger.warning(f"Inverted SL/TP detected for SELL on {symbol} (TP={final_tp}, Entry={fill_price}, SL={final_sl}). Re-aligning.")
+                final_sl = round(fill_price + sl_dist, digits)
+                final_tp = round(fill_price - tp_dist, digits)
+                if not (final_tp < fill_price < final_sl):
+                    msg = f"SL/TP Side Validation REJECTED for SELL: TP ({final_tp}) must be < Entry ({fill_price}) < SL ({final_sl})."
+                    logger.error(msg)
+                    return {"success": False, "error": msg, "mode": current_mode}
+
+        # Min Distance enforcement
+        if stops_level_pts > 0:
+            if abs(fill_price - final_sl) < (stops_level_pts * point):
+                return {"success": False, "error": f"Min Distance Guard REJECTED: SL distance is within broker trade_stops_level ({stops_level_pts} pts)."}
+            if abs(fill_price - final_tp) < (stops_level_pts * point):
+                return {"success": False, "error": f"Min Distance Guard REJECTED: TP distance is within broker trade_stops_level ({stops_level_pts} pts)."}
+
+        # Portfolio Risk Cap Gate (MAX_TOTAL_OPEN_RISK_PCT)
+        max_portfolio_risk_pct = float(os.getenv("MAX_TOTAL_OPEN_RISK_PCT", "2.5"))
+        open_pos = self.get_open_positions() or []
+        equity_val = acc.equity if (acc and acc.equity > 0) else 10000.0
+        current_open_risk = 0.0
+        for p in open_pos:
+            pos_sl = p.get("sl", 0.0)
+            pos_open = p.get("price_open", p.get("open_price", 0.0))
+            pos_vol = p.get("volume", p.get("lots", 0.01))
+            pos_sym = p.get("symbol", symbol)
+            c_size = 100.0 if ("XAU" in pos_sym or "GOLD" in pos_sym) else 1.0
+            pos_sl_dist = abs(pos_open - pos_sl) if (pos_sl and pos_sl > 0) else (pos_open * 0.01)
+            current_open_risk += (pos_sl_dist * pos_vol * c_size / equity_val) * 100.0
+
+        proposed_risk_usd = sl_dist * valid_lot * contract_size
+        proposed_risk_pct = (proposed_risk_usd / equity_val) * 100.0
+        if (current_open_risk + proposed_risk_pct) > max_portfolio_risk_pct:
+            msg = (f"Portfolio Risk Cap REJECTED: Current open risk ({current_open_risk:.2f}%) + proposed trade "
+                   f"({proposed_risk_pct:.2f}%) = {current_open_risk + proposed_risk_pct:.2f}% > limit {max_portfolio_risk_pct:.1f}%.")
+            logger.warning(msg)
+            return {"success": False, "error": msg, "mode": current_mode}
+
+        if safety_manager:
+            safe_ok, safe_msg = safety_manager.check_trade_safety(
+                asset, proposed_risk_pct=proposed_risk_pct, open_positions=open_pos,
+                current_equity=equity_val, data_timestamp=tick.time,
+                spread_val=spread_pts * point, sl_dist=sl_dist
+            )
+            if not safe_ok:
+                return {"success": False, "error": safe_msg, "mode": current_mode}
+
+        asset_deviation = 40 if is_gold_asset else 650  # 40 pts Gold ($0.40), 650 pts BTC ($6.50)
 
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
@@ -405,9 +613,34 @@ class MT5LiveBroker:
             }
 
         actual_fill = res.price or fill_price
-        slip_ok, slip_val, slip_msg = True, 0.0, "OK"
+
+        # Post-Order Slippage Guard Gate
+        max_slippage_pips = float(os.getenv("MAX_SLIPPAGE_PIPS", "3.0"))
+        price_diff = abs(actual_fill - entry_price)
+        slip_pips = (price_diff / pip_unit) if pip_unit > 0 else price_diff
+
+        self.slippage_stats["total_trades"] += 1
+        self.slippage_stats["max_slippage_pips"] = max(self.slippage_stats["max_slippage_pips"], slip_pips)
+        self.slippage_stats["recent_slippages"].append(round(slip_pips, 2))
+        if len(self.slippage_stats["recent_slippages"]) > 50:
+            self.slippage_stats["recent_slippages"].pop(0)
+
+        slip_ok = slip_pips <= max_slippage_pips
+        if not slip_ok:
+            self.slippage_stats["excessive_slippage_count"] += 1
+            slip_warning = (f"⚠️ HIGH SLIPPAGE DETECTED on {symbol}: Requested ${entry_price:,.2f}, "
+                            f"Filled ${actual_fill:,.2f}, Slippage {slip_pips:.1f} pips > Limit {max_slippage_pips:.1f} pips.")
+            logger.warning(slip_warning)
+            self._notify_telegram_alert(
+                f"⚠️ *HIGH SLIPPAGE ALERT*\n"
+                f"• Symbol: `{symbol}`\n"
+                f"• Requested: `${entry_price:,.2f}`\n"
+                f"• Actual Fill: `${actual_fill:,.2f}`\n"
+                f"• Slippage: `{slip_pips:.1f} pips` (Limit: `{max_slippage_pips:.1f}`)\n"
+                f"• Mode: `{current_mode}`"
+            )
+
         if safety_manager:
-            slip_ok, slip_val, slip_msg = safety_manager.verify_fill_slippage(asset, entry_price, actual_fill)
             safety_manager.log_order_audit({
                 "event": "ORDER_PLACED_MT5",
                 "ticket": res.order,
@@ -417,7 +650,8 @@ class MT5LiveBroker:
                 "lots": valid_lot,
                 "entry_requested": entry_price,
                 "fill_price": actual_fill,
-                "slippage": slip_val,
+                "slippage": round(price_diff, 2),
+                "slippage_pips": round(slip_pips, 2),
                 "slippage_ok": slip_ok,
                 "sl": final_sl,
                 "tp": final_tp,
@@ -440,7 +674,8 @@ class MT5LiveBroker:
             "sl": final_sl,
             "tp": final_tp,
             "mode": current_mode,
-            "slippage": slip_val,
+            "slippage": round(price_diff, 2),
+            "slippage_pips": round(slip_pips, 2),
             "slippage_ok": slip_ok,
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }

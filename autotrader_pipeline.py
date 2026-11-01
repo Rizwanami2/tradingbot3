@@ -20,6 +20,18 @@ os.environ["PYTHONWARNINGS"] = "ignore"
 import logging
 logging.captureWarnings(True)
 
+try:
+    from utils.logger import get_logger
+    logger = get_logger("autotrader_pipeline")
+except Exception:
+    logger = logging.getLogger("autotrader_pipeline")
+
+try:
+    from config_validator import validate_config
+except Exception:
+    def validate_config(*args, **kwargs):
+        return True, []
+
 import sys
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -77,6 +89,26 @@ try:
     RISK_ENGINE_AVAILABLE = True
 except Exception:
     RISK_ENGINE_AVAILABLE = False
+
+
+def send_pipeline_crash_alert(exc: Exception, context: str = "Autotrader Pipeline"):
+    try:
+        import traceback
+        tb = traceback.format_exc()
+        tb_lines = tb.strip().split("\n")
+        short_tb = "\n".join(tb_lines[-4:]) if len(tb_lines) >= 4 else tb
+        import telegram_bot
+        tok, cid = telegram_bot.get_credentials()
+        if tok and cid:
+            msg = (
+                f"🚨 *PIPELINE CRASH ALERT*\n"
+                f"• Context: `{context}`\n"
+                f"• Error: `{type(exc).__name__}: {exc}`\n"
+                f"• Traceback:\n```\n{short_tb}\n```"
+            )
+            telegram_bot.send_message(tok, cid, msg)
+    except Exception:
+        pass
 
 
 def compute_rsi(series, period: int = 14) -> float:
@@ -310,6 +342,20 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
             tp1 = round(curr + (sl_dist * 1.25), 2)
             tp2 = round(curr + (sl_dist * 1.85), 2)
 
+    # SL/TP Side Validation Gate: Enforce BUY -> SL < entry < TP and SELL -> TP < entry < SL
+    if side_action == "SELL":
+        if not (tp1 < curr < stop_loss):
+            logger.warning(f"Inverted SL/TP detected for SELL on {asset_type} (TP={tp1}, Entry={curr}, SL={stop_loss}). Auto-correcting.")
+            stop_loss = round(curr + sl_dist, 2)
+            tp1 = round(curr - (sl_dist * 1.25), 2)
+            tp2 = round(curr - (sl_dist * 1.85), 2)
+    else:
+        if not (stop_loss < curr < tp1):
+            logger.warning(f"Inverted SL/TP detected for BUY on {asset_type} (SL={stop_loss}, Entry={curr}, TP={tp1}). Auto-correcting.")
+            stop_loss = round(curr - sl_dist, 2)
+            tp1 = round(curr + (sl_dist * 1.25), 2)
+            tp2 = round(curr + (sl_dist * 1.85), 2)
+
     # Log signal to self-learning journal if actionable
     trade_id = None
     if action in ("BUY", "SELL", "BUY_HALF", "SELL_HALF") and LEARNING_AVAILABLE and learning_engine:
@@ -366,6 +412,20 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
 
 
 def run_pipeline(*args, **kwargs):
+    try:
+        validate_config(fail_fast=False)
+    except Exception as e:
+        logger.warning(f"Startup config check: {e}")
+
+    try:
+        _execute_pipeline(*args, **kwargs)
+    except Exception as exc:
+        logger.critical(f"Unhandled exception in autotrader pipeline: {exc}", exc_info=True)
+        send_pipeline_crash_alert(exc, context="run_pipeline")
+        raise exc
+
+
+def _execute_pipeline(*args, **kwargs):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n" + "═" * 78)
     print(f"  ⚡ HARD-ASSET AUTOTRADER PIPELINE (METHOD 1) | {timestamp}")

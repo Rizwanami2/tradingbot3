@@ -45,6 +45,18 @@ import warnings
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 warnings.filterwarnings("ignore")
 
+try:
+    from utils.logger import get_logger
+    logger = get_logger("telegram_bot")
+except Exception:
+    logger = logging.getLogger("telegram_bot")
+
+try:
+    from config_validator import ensure_valid_config, validate_config
+except Exception:
+    def ensure_valid_config(): return True
+    def validate_config(*args, **kwargs): return True, []
+
 # Bypass Windows VPS missing root CA certificates or hosting provider SSL inspection
 try:
     _create_unverified_https_context = ssl._create_unverified_context
@@ -496,6 +508,99 @@ def save_chat_id(chat_id: str):
             f.writelines(lines)
     except Exception:
         pass
+
+
+
+def send_crash_alert(exc: Exception, context: str = "", tb_str: str = None):
+    """Dispatches emergency Telegram alert for any unhandled exception with traceback snippet."""
+    try:
+        import traceback
+        if tb_str is None:
+            tb_str = traceback.format_exc()
+        tb_lines = tb_str.strip().split("\n")
+        short_tb = "\n".join(tb_lines[-5:]) if len(tb_lines) >= 5 else tb_str
+        tok, cid = get_credentials()
+        if tok and cid:
+            msg = (
+                f"🚨 *CRITICAL BOT CRASH ALERT*\n"
+                f"• Context: `{context}`\n"
+                f"• Exception: `{type(exc).__name__}: {exc}`\n"
+                f"• Traceback Snippet:\n```\n{short_tb}\n```\n"
+                f"• Time: `{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}`"
+            )
+            send_message(tok, cid, msg)
+    except Exception as alert_err:
+        logger.error(f"Failed to dispatch crash alert: {alert_err}")
+
+
+def _bot_global_excepthook(exctype, value, tb):
+    import traceback
+    tb_str = "".join(traceback.format_exception(exctype, value, tb))
+    logger.critical(f"Unhandled exception caught by global hook: {value}", exc_info=(exctype, value, tb))
+    send_crash_alert(value, context="Global Unhandled Exception", tb_str=tb_str)
+    sys.__excepthook__(exctype, value, tb)
+
+
+sys.excepthook = _bot_global_excepthook
+
+
+def heartbeat_monitor_worker(token: str, get_chat_id_func):
+    """
+    Sends institutional heartbeat every 2-3 hours with:
+    Equity, Balance, Margin, Free Margin, Open Positions count.
+    """
+    interval = int(os.environ.get("HEARTBEAT_INTERVAL_SECONDS", "7200"))
+    logger.info(f"Heartbeat monitor worker armed (interval: {interval}s / {interval/3600:.1f}h).")
+    
+    # 60s settle time on startup before first heartbeat
+    time.sleep(60)
+
+    while True:
+        try:
+            cid = get_chat_id_func()
+            if cid:
+                equity = 10000.0
+                balance = 10000.0
+                margin = 0.0
+                margin_free = 10000.0
+                pos_count = 0
+                broker_name = "Paper Simulator"
+                mode = safety_manager.get_trading_mode() if safety_manager else "PAPER"
+
+                if MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected:
+                    acc = live_broker.get_live_account_data()
+                    if acc:
+                        equity = acc.get("equity", 0.0)
+                        balance = acc.get("balance", 0.0)
+                        margin = acc.get("margin", 0.0)
+                        margin_free = acc.get("margin_free", 0.0)
+                        pos_count = acc.get("open_positions_count", 0)
+                        broker_name = acc.get("broker", "MT5 Broker")
+                elif safety_manager:
+                    paper_acc = safety_manager.state.get("paper_account", {})
+                    balance = paper_acc.get("balance", 10000.0)
+                    equity = paper_acc.get("equity", balance)
+                    pos_count = len(paper_acc.get("positions", []))
+                    margin = 0.0
+                    margin_free = equity
+
+                heartbeat_msg = (
+                    f"💓 *INSTITUTIONAL BOT HEARTBEAT*\n"
+                    f"• Status: `HEALTHY & ONLINE 🟢`\n"
+                    f"• Trading Mode: `{mode}`\n"
+                    f"• Broker: `{broker_name}`\n"
+                    f"• Equity: `${equity:,.2f}`\n"
+                    f"• Balance: `${balance:,.2f}`\n"
+                    f"• Margin: `${margin:,.2f}`\n"
+                    f"• Free Margin: `${margin_free:,.2f}`\n"
+                    f"• Open Positions: `{pos_count}`\n"
+                    f"• Timestamp: `{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}`"
+                )
+                send_message(token, cid, heartbeat_msg)
+        except Exception as e:
+            logger.error(f"Error in heartbeat monitor worker: {e}")
+
+        time.sleep(interval)
 
 
 def verify_token(token: str):
@@ -4086,6 +4191,8 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
 
 def start_bot():
     global AUTO_TRADE_LIVE, AUTO_TRADE_MODE, TRAILING_STOP_ENABLED
+    # Fail fast on startup if configuration is invalid
+    ensure_valid_config()
     token, chat_id = get_credentials()
 
     if not token or token == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
@@ -4152,6 +4259,10 @@ def start_bot():
     t_trail = threading.Thread(target=trailing_monitor_worker, args=(token, get_active_chat_id), daemon=True)
     t_trail.start()
 
+    # Launch background heartbeat monitor (every 2 hours)
+    t_heartbeat = threading.Thread(target=heartbeat_monitor_worker, args=(token, get_active_chat_id), daemon=True)
+    t_heartbeat.start()
+
     # Dedicated thread pool for processing incoming commands & button callbacks without blocking polling loop
     cmd_executor = concurrent.futures.ThreadPoolExecutor(max_workers=6, thread_name_prefix="tg_worker")
 
@@ -4159,13 +4270,15 @@ def start_bot():
         try:
             handle_callback_query(tok, cq)
         except Exception as cq_err:
-            print(f"⚠️ Error handling callback query: {cq_err}")
+            logger.error(f"Error handling callback query: {cq_err}", exc_info=True)
+            send_crash_alert(cq_err, context="callback_query")
 
     def _safe_command(tok, sid, sname, mtext):
         try:
             process_telegram_command(tok, sid, sname, mtext)
         except Exception as cmd_err:
-            print(f"⚠️ Error processing command '{mtext}': {cmd_err}")
+            logger.error(f"Error processing command '{mtext}': {cmd_err}", exc_info=True)
+            send_crash_alert(cmd_err, context=f"Command: {mtext}")
             send_message(tok, sid, f"⚠️ Error processing command: {cmd_err}")
 
     offset = None

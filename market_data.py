@@ -38,12 +38,16 @@ import yfinance as yf
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 # Configure logger
-logger = logging.getLogger("Bottreding.MarketData")
-if not logger.handlers:
-    handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter("[%(asctime)s] [%(levelname)s] [MarketData] %(message)s"))
-    logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
+try:
+    from utils.logger import get_logger
+    logger = get_logger("MarketData")
+except Exception:
+    logger = logging.getLogger("MarketData")
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("[%(asctime)s] [%(levelname)s] [MarketData] %(message)s"))
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
 
 # ── PLAUSIBILITY THRESHOLDS & GUARDRAILS ──
 PLAUSIBLE_RANGES = {
@@ -697,12 +701,43 @@ class MarketDataFeed:
 
     def _load_disk_cache(self):
         self._disk_cache = {}
+        bak_file = CACHE_FILE + ".bak"
         if os.path.exists(CACHE_FILE):
             try:
-                with open(CACHE_FILE, "r") as f:
+                with open(CACHE_FILE, "r", encoding="utf-8") as f:
                     self._disk_cache = json.load(f)
+                    return
+            except Exception as e:
+                logger.warning(f"Corrupt market data cache detected in {CACHE_FILE} ({e}). Attempting .bak recovery...")
+                if os.path.exists(bak_file):
+                    try:
+                        with open(bak_file, "r", encoding="utf-8") as bf:
+                            self._disk_cache = json.load(bf)
+                            logger.info("Restored market data cache from backup successfully.")
+                            with open(CACHE_FILE, "w", encoding="utf-8") as out:
+                                json.dump(self._disk_cache, out, indent=2)
+                            return
+                    except Exception as be:
+                        logger.warning(f"Backup market data cache also corrupted ({be}).")
+
+                # Minimal schema initialization
+                logger.warning("Initializing minimal valid market data cache.")
+                self._disk_cache = {"GOLD": {}, "BTC": {}, "macro": {}}
+                try:
+                    with open(CACHE_FILE, "w", encoding="utf-8") as out:
+                        json.dump(self._disk_cache, out, indent=2)
+                    with open(bak_file, "w", encoding="utf-8") as out_b:
+                        json.dump(self._disk_cache, out_b, indent=2)
+                except Exception:
+                    pass
+        elif os.path.exists(bak_file):
+            try:
+                with open(bak_file, "r", encoding="utf-8") as bf:
+                    self._disk_cache = json.load(bf)
             except Exception:
-                self._disk_cache = {}
+                self._disk_cache = {"GOLD": {}, "BTC": {}, "macro": {}}
+        else:
+            self._disk_cache = {"GOLD": {}, "BTC": {}, "macro": {}}
 
     def _save_disk_cache(self, asset: str, data: Dict[str, Any]):
         try:
@@ -712,7 +747,10 @@ class MarketDataFeed:
                 "timestamp": data["timestamp"],
                 "updated_at": datetime.now().isoformat()
             }
-            with open(CACHE_FILE, "w") as f:
+            bak_file = CACHE_FILE + ".bak"
+            with open(bak_file, "w", encoding="utf-8") as bf:
+                json.dump(self._disk_cache, bf, indent=2)
+            with open(CACHE_FILE, "w", encoding="utf-8") as f:
                 json.dump(self._disk_cache, f, indent=2)
         except Exception:
             pass
@@ -720,7 +758,10 @@ class MarketDataFeed:
     def _update_disk_macro(self, macro_data: Dict[str, Any]):
         try:
             self._disk_cache["macro"] = dict(macro_data)
-            with open(CACHE_FILE, "w") as f:
+            bak_file = CACHE_FILE + ".bak"
+            with open(bak_file, "w", encoding="utf-8") as bf:
+                json.dump(self._disk_cache, bf, indent=2)
+            with open(CACHE_FILE, "w", encoding="utf-8") as f:
                 json.dump(self._disk_cache, f, indent=2)
         except Exception:
             pass

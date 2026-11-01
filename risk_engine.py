@@ -16,13 +16,30 @@ Enforces:
 
 import sys
 if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 import os
 import math
 import json
 import time
+import atexit
+import signal
 from datetime import datetime, timezone
+
+try:
+    from utils.logger import get_logger
+    logger = get_logger("risk_engine")
+except Exception:
+    import logging
+    logger = logging.getLogger("risk_engine")
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -93,8 +110,31 @@ class SafetyManager:
     """
     def __init__(self, state_file: str = SAFETY_STATE_FILE, audit_file: str = AUDIT_LOG_FILE):
         self.state_file = state_file
+        self.bak_file = state_file + ".bak"
         self.audit_file = audit_file
         self.state = self._load_state()
+
+        # Register state persistence on clean shutdown
+        atexit.register(self.save_state)
+        try:
+            signal.signal(signal.SIGINT, self._handle_exit_signal)
+            signal.signal(signal.SIGTERM, self._handle_exit_signal)
+        except Exception:
+            pass
+
+    def _handle_exit_signal(self, signum, frame):
+        logger.info(f"Signal {signum} received. Persisting state to {self.state_file} on exit...")
+        self.save_state()
+        sys.exit(0)
+
+    def _notify_telegram_alert(self, text: str):
+        try:
+            import telegram_bot
+            tok, cid = telegram_bot.get_credentials()
+            if tok and cid:
+                telegram_bot.send_message(tok, cid, text)
+        except Exception:
+            pass
 
     def _load_state(self) -> dict:
         today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -107,6 +147,9 @@ class SafetyManager:
             "daily_date": today_utc,
             "starting_daily_equity": DEFAULT_ACCOUNT_BALANCE,
             "realized_daily_pnl": 0.0,
+            "unrealized_daily_pnl": 0.0,
+            "consecutive_losses": 0,
+            "cooldown_until": 0.0,
             "daily_circuit_breaker_tripped": False,
             "paper_account": {
                 "balance": DEFAULT_ACCOUNT_BALANCE,
@@ -115,6 +158,8 @@ class SafetyManager:
                 "closed_history": []
             }
         }
+
+        # 1. Attempt loading original state file
         if os.path.exists(self.state_file):
             try:
                 with open(self.state_file, "r", encoding="utf-8") as f:
@@ -122,22 +167,57 @@ class SafetyManager:
                     if data.get("daily_date") != today_utc:
                         data["daily_date"] = today_utc
                         data["realized_daily_pnl"] = 0.0
+                        data["unrealized_daily_pnl"] = 0.0
                         data["daily_circuit_breaker_tripped"] = False
                         data["first_trade_confirmed_date"] = ""
                     for k, v in default_state.items():
                         if k not in data:
                             data[k] = v
                     return data
+            except Exception as e:
+                logger.warning(f"Corrupt safety state detected in {self.state_file} ({e}). Attempting .bak recovery...")
+                if os.path.exists(self.bak_file):
+                    try:
+                        with open(self.bak_file, "r", encoding="utf-8") as bf:
+                            data = json.load(bf)
+                            logger.info(f"Restored safety state from backup {self.bak_file} successfully.")
+                            # Re-save to repair original
+                            with open(self.state_file, "w", encoding="utf-8") as out_f:
+                                json.dump(data, out_f, indent=2)
+                            return data
+                    except Exception as be:
+                        logger.warning(f"Backup state also corrupted ({be}).")
+                
+                logger.warning("Initializing minimal valid safety state schema and creating backups.")
+                self._notify_telegram_alert("⚠️ *SAFETY STATE AUTO-RECOVERY*\nCorrupt safety_state.json was restored to minimal valid schema.")
+                try:
+                    with open(self.state_file, "w", encoding="utf-8") as sf:
+                        json.dump(default_state, sf, indent=2)
+                    with open(self.bak_file, "w", encoding="utf-8") as sbf:
+                        json.dump(default_state, sbf, indent=2)
+                except Exception:
+                    pass
+                return default_state
+
+        elif os.path.exists(self.bak_file):
+            try:
+                with open(self.bak_file, "r", encoding="utf-8") as bf:
+                    data = json.load(bf)
+                    return data
             except Exception:
                 pass
+
         return default_state
 
     def save_state(self):
         try:
+            # Atomic backup write first
+            with open(self.bak_file, "w", encoding="utf-8") as bf:
+                json.dump(self.state, bf, indent=2)
             with open(self.state_file, "w", encoding="utf-8") as f:
                 json.dump(self.state, f, indent=2)
         except Exception as e:
-            print(f"[!] Warning: Could not save safety state: {e}")
+            logger.warning(f"Could not save safety state: {e}")
 
     # ── 1. Trading Modes ──────────────────────────────────────────
     def get_trading_mode(self) -> str:
@@ -188,6 +268,14 @@ class SafetyManager:
         closed_paper = len(self.state["paper_account"]["positions"])
         self.state["paper_account"]["positions"] = []
         self.save_state()
+        logger.critical(f"EMERGENCY KILL-SWITCH TRIGGERED: {reason}")
+        self._notify_telegram_alert(
+            f"🚨 *EMERGENCY KILL-SWITCH ACTIVATED*\n"
+            f"• Reason: `{reason}`\n"
+            f"• All new orders BLOCKED\n"
+            f"• Closed paper positions: {closed_paper}\n"
+            f"• Run: `/kill_reset CONFIRM` to reset"
+        )
         return {
             "kill_switch_active": True,
             "reason": reason,
@@ -214,10 +302,19 @@ class SafetyManager:
 
         self.state["realized_daily_pnl"] += pnl
         starting_eq = self.state.get("starting_daily_equity", DEFAULT_ACCOUNT_BALANCE)
-        daily_loss_pct = (self.state["realized_daily_pnl"] / starting_eq) * 100.0
+        daily_loss_pct = (self.state["realized_daily_pnl"] / starting_eq) * 100.0 if starting_eq > 0 else 0.0
 
-        if daily_loss_pct <= -DAILY_LOSS_LIMIT_PCT:
+        max_daily_loss = float(os.getenv("MAX_DAILY_LOSS_PCT", str(DAILY_LOSS_LIMIT_PCT)))
+        if daily_loss_pct <= -max_daily_loss:
             self.state["daily_circuit_breaker_tripped"] = True
+            self.state["kill_switch_active"] = True
+            self.state["kill_switch_reason"] = f"Daily Loss Circuit Breaker: Realized loss {daily_loss_pct:.2f}% >= limit -{max_daily_loss:.2f}%"
+            self._notify_telegram_alert(
+                f"🛑 *DAILY DRAWDOWN KILL-SWITCH TRIPPED*\n"
+                f"• Realized loss: {daily_loss_pct:.2f}% (Limit: -{max_daily_loss:.2f}%)\n"
+                f"• All new entries are BLOCKED.\n"
+                f"• Set KILL_SWITCH_ACTIVE=true."
+            )
 
         self.save_state()
 
@@ -245,9 +342,22 @@ class SafetyManager:
         open_positions = open_positions or []
         asset_key = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
 
-        # Check 1: Kill-Switch
+        starting_eq = self.state.get("starting_daily_equity", current_equity or DEFAULT_ACCOUNT_BALANCE)
+        daily_pnl = self.state.get("realized_daily_pnl", 0.0)
+        daily_loss_pct = (daily_pnl / starting_eq) * 100.0 if starting_eq > 0 else 0.0
+        max_daily_loss = float(os.getenv("MAX_DAILY_LOSS_PCT", str(DAILY_LOSS_LIMIT_PCT)))
+
+        # Auto-synchronize daily kill-switch if daily circuit breaker was reset
+        if not self.state.get("daily_circuit_breaker_tripped") and daily_loss_pct > -max_daily_loss:
+            if "Daily Loss" in self.state.get("kill_switch_reason", ""):
+                self.state["kill_switch_active"] = False
+                self.state["kill_switch_reason"] = ""
+
+        # Check 1: Kill-Switch (handles both manual kill-switch and daily drawdown kill-switch)
         if self.state.get("kill_switch_active"):
             reason = self.state.get("kill_switch_reason", "Emergency Halt Active")
+            if "Daily Loss" in reason:
+                return False, f"🛑 Daily Loss Circuit Breaker TRIPPED: Realized daily loss is {daily_loss_pct:.2f}% (Limit: -{max_daily_loss:.1f}% = -${starting_eq * (max_daily_loss/100):,.2f}). Trading locked until daily reset."
             return False, f"🚨 Kill-Switch is ACTIVE ({reason}). All trading blocked."
 
         # Check 1.5: Weekly Drawdown Ceiling (-5.0% High-Water Mark)
@@ -256,13 +366,11 @@ class SafetyManager:
         if starting_eq_val > 0 and (weekly_pnl / starting_eq_val) * 100.0 <= -5.0:
             return False, f"🚨 Weekly Loss Limit TRIPPED (-5.0% reached). Trading locked until Monday to preserve capital."
 
-        # Check 2: Daily Loss Circuit Breaker
-        starting_eq = self.state.get("starting_daily_equity", current_equity or DEFAULT_ACCOUNT_BALANCE)
-        daily_pnl = self.state.get("realized_daily_pnl", 0.0)
-        daily_loss_pct = (daily_pnl / starting_eq) * 100.0 if starting_eq > 0 else 0.0
-
-        if self.state.get("daily_circuit_breaker_tripped") or daily_loss_pct <= -DAILY_LOSS_LIMIT_PCT:
-            return False, f"🛑 Daily Loss Circuit Breaker TRIPPED: Realized daily loss is {daily_loss_pct:.2f}% (Limit: -{DAILY_LOSS_LIMIT_PCT:.1f}% = -${starting_eq * (DAILY_LOSS_LIMIT_PCT/100):,.2f}). Trading locked until daily reset."
+        # Check 2: Daily Loss Circuit Breaker & Kill-Switch
+        if self.state.get("daily_circuit_breaker_tripped") or daily_loss_pct <= -max_daily_loss:
+            self.state["kill_switch_active"] = True
+            self.state["kill_switch_reason"] = f"Daily Loss Circuit Breaker: Realized daily loss is {daily_loss_pct:.2f}%"
+            return False, f"🛑 Daily Loss Circuit Breaker TRIPPED: Realized daily loss is {daily_loss_pct:.2f}% (Limit: -{max_daily_loss:.1f}% = -${starting_eq * (max_daily_loss/100):,.2f}). Trading locked until daily reset."
 
         # Check 3: Max Concurrent Open Positions
         if len(open_positions) >= MAX_CONCURRENT_POSITIONS:
@@ -331,8 +439,33 @@ class SafetyManager:
         asset_key = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
 
         sim_spread = 0.15 if asset_key == "GOLD" else 8.0
-        fill_price = round(price + (sim_spread / 2.0) if action.upper() == "BUY" else price - (sim_spread / 2.0), 2)
+        is_buy = action.upper() in ("BUY", "LONG")
+        fill_price = round(price + (sim_spread / 2.0) if is_buy else price - (sim_spread / 2.0), 2)
         initial_sl_dist = round(abs(fill_price - stop_loss), 2) if (fill_price > 0 and stop_loss > 0) else (3.0 if asset_key == "GOLD" else 250.0)
+        initial_tp_dist = round(abs(tp1 - fill_price), 2) if (fill_price > 0 and tp1 > 0) else (initial_sl_dist * 1.25)
+
+        # SL/TP Side Validation Gate for Paper
+        if is_buy:
+            if not (stop_loss < fill_price < tp1):
+                logger.warning(f"Inverted SL/TP for Paper BUY on {asset_key}. Correcting sides.")
+                stop_loss = round(fill_price - initial_sl_dist, 2)
+                tp1 = round(fill_price + initial_tp_dist, 2)
+                tp2 = round(fill_price + (initial_sl_dist * 1.85), 2)
+        else:
+            if not (tp1 < fill_price < stop_loss):
+                logger.warning(f"Inverted SL/TP for Paper SELL on {asset_key}. Correcting sides.")
+                stop_loss = round(fill_price + initial_sl_dist, 2)
+                tp1 = round(fill_price - initial_tp_dist, 2)
+                tp2 = round(fill_price - (initial_sl_dist * 1.85), 2)
+
+        # Margin Check Gate with 25% buffer
+        paper_bal = self.state.get("paper_account", {}).get("balance", DEFAULT_ACCOUNT_BALANCE)
+        c_size = 100.0 if asset_key == "GOLD" else 1.0
+        req_margin = (c_size * lots * fill_price) / 100.0
+        if paper_bal < (req_margin * 1.25):
+            msg = f"Margin Check REJECTED: Required margin ${req_margin:,.2f} with 25% buffer (${req_margin * 1.25:,.2f}) exceeds paper balance ${paper_bal:,.2f}."
+            logger.warning(msg)
+            return {"success": False, "error": msg, "mode": "PAPER"}
 
         position = {
             "ticket": ticket,
