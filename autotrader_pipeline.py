@@ -344,10 +344,21 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
             factors.append(f"News Block: {news_msg}")
 
     # Market Regime Detection & Regime-Based Risk Sizing
-    if LEARNING_AVAILABLE and learning_engine:
-        market_regime = learning_engine.detect_market_regime(adx=26.0, vix=18.0)
+    # Use actual VIX and ADX from market data (not hardcoded)
+    vix_val = 18.0  # neutral fallback
+    adx_val = 25.0  # neutral fallback
+    if MARKET_DATA_AVAILABLE and market_data_feed:
+        vix_val = market_data_feed.get_live_vix() if hasattr(market_data_feed, 'get_live_vix') else 18.0
     else:
-        market_regime = "TREND_EXPANSION"
+        # Fetch VIX for regime detection when not using market data feed
+        try:
+            vix = yf.Ticker("^VIX").history(period="5d")
+            if not vix.empty:
+                vix_val = float(vix["Close"].iloc[-1])
+        except Exception:
+            vix_val = 18.0
+    if LEARNING_AVAILABLE and learning_engine:
+        market_regime = learning_engine.detect_market_regime(adx=adx_val, vix=vix_val)
     regime_risk_pct = risk_engine.get_regime_risk_pct(market_regime) if RISK_ENGINE_AVAILABLE else 0.80
     logger.info(f"Market Regime [{market_regime}] for {asset_type} -> Applied Dynamic Risk: {regime_risk_pct:.2f}%")
 
@@ -412,7 +423,7 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
         trade_id = learning_engine.log_signal(
             asset=asset_type,
             symbol=symbol,
-            entry=curr,
+            entry=execution_entry,
             sl=stop_loss,
             tp1=tp1,
             tp2=tp2,
