@@ -73,11 +73,11 @@ def validate_config(fail_fast: bool = False) -> Tuple[bool, List[str]]:
     load_env_file()
     errors: List[str] = []
 
-    # 1. Trading Mode & Live Confirmation Check
-    trading_mode = os.environ.get("TRADING_MODE", "paper").strip().lower()
-    valid_modes = ("paper", "demo", "live")
-    if trading_mode not in valid_modes:
-        errors.append(f"Invalid TRADING_MODE='{trading_mode}'. Must be one of {valid_modes}.")
+    # 1. Trading Mode - LIVE ONLY
+    trading_mode = os.environ.get("TRADING_MODE", "live").strip().lower()
+    if trading_mode != "live":
+        errors.append(f"TRADING_MODE='{trading_mode}' is invalid. Only 'live' mode is supported.")
+        trading_mode = "live"
 
     if trading_mode == "live":
         live_confirm = os.environ.get("LIVE_CONFIRM", "").strip().upper()
@@ -145,7 +145,7 @@ def validate_config(fail_fast: bool = False) -> Tuple[bool, List[str]]:
         if fail_fast:
             raise ValueError(error_msg)
     else:
-        logger.info(f"Startup Config Validation Passed. Trading Mode: {trading_mode.upper()} ✅")
+        logger.info(f"Startup Config Validation Passed. Trading Mode: LIVE ✅")
 
     return is_valid, errors
 

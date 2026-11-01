@@ -74,8 +74,8 @@ DAILY_DRAWDOWN_HALT_PCT = 2.0       # Halt new trades if daily loss reaches 2.0%
 MAX_TOTAL_DRAWDOWN_PCT = 6.0        # Portfolio halt at 6.0% drawdown
 
 # ── Priority 1: Safety & Multi-Layer Circuit Breaker Parameters ──
-TRADING_MODES = ("PAPER", "DEMO", "LIVE")
-DEFAULT_TRADING_MODE = "PAPER"
+TRADING_MODES = ("LIVE",)
+DEFAULT_TRADING_MODE = "LIVE"
 MAX_CONCURRENT_POSITIONS = 2         # Max 2 concurrent open positions across Gold & BTC
 MAX_TOTAL_OPEN_RISK_PCT = 2.5        # Max 2.5% combined open risk across all positions
 DAILY_LOSS_LIMIT_PCT = 2.0           # 2% hard daily loss circuit breaker
@@ -95,10 +95,9 @@ AUDIT_LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trade
 class SafetyManager:
     """
     Priority 1 Institutional Risk & Safety Architecture:
-      1. Trading Modes: Strict PAPER | DEMO | LIVE separation.
-      2. Double Confirmation for Live Capital:
-         - /enable_live CONFIRM required to switch to LIVE mode.
-         - Second confirmation required for first trade of the day.
+      1. Trading Modes: LIVE ONLY (real capital execution).
+      2. Double Confirmation for Live Trading:
+         - LIVE_CONFIRM=CONFIRM required in .env.
       3. Multi-Layer Circuit Breakers:
          - Daily loss limit (2.0% halt).
          - Max concurrent open positions (2 positions max).
@@ -140,7 +139,7 @@ class SafetyManager:
         today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         default_state = {
             "trading_mode": DEFAULT_TRADING_MODE,
-            "live_mode_confirmed": False,
+            "live_mode_confirmed": True,
             "kill_switch_active": False,
             "kill_switch_reason": "",
             "daily_date": today_utc,
@@ -150,12 +149,6 @@ class SafetyManager:
             "consecutive_losses": 0,
             "cooldown_until": 0.0,
             "daily_circuit_breaker_tripped": False,
-            "paper_account": {
-                "balance": DEFAULT_ACCOUNT_BALANCE,
-                "equity": DEFAULT_ACCOUNT_BALANCE,
-                "positions": [],
-                "closed_history": []
-            }
         }
 
         # 1. Attempt loading original state file
@@ -223,28 +216,16 @@ class SafetyManager:
 
     def set_trading_mode(self, mode: str, confirmation: str = "") -> tuple:
         target = mode.strip().upper()
-        if target not in TRADING_MODES:
-            return False, f"Invalid mode '{mode}'. Supported modes: {', '.join(TRADING_MODES)}"
+        if target != "LIVE":
+            return False, f"❌ Only LIVE trading mode is supported. Got: '{mode}'. Use: `/mode live CONFIRM`"
 
-        if target == "LIVE":
-            if confirmation.strip().upper() != "CONFIRM":
-                return False, "⚠️ LIVE trading with real capital requires explicit confirmation.\nRun: `/enable_live CONFIRM` or `/mode live CONFIRM`"
-            self.state["trading_mode"] = "LIVE"
-            self.state["live_mode_confirmed"] = True
-            self.save_state()
-            return True, "🔴 *LIVE TRADING MODE ENABLED*\nReal capital execution is now active on your live MT5 account.\nFirst trade of the day will require a second one-time confirmation."
-
-        elif target == "DEMO":
-            self.state["trading_mode"] = "DEMO"
-            self.state["live_mode_confirmed"] = False
-            self.save_state()
-            return True, "🟡 *DEMO TRADING MODE ACTIVE*\nOrders are sent to your connected MT5 Demo account."
-
-        else:  # PAPER
-            self.state["trading_mode"] = "PAPER"
-            self.state["live_mode_confirmed"] = False
-            self.save_state()
-            return True, "⚪ *PAPER TRADING MODE ACTIVE*\nAll trades are simulated risk-free in memory with realistic fills & slippage."
+        if confirmation.strip().upper() != "CONFIRM":
+            return False, "⚠️ LIVE trading with real capital requires explicit confirmation.\nRun: `/enable_live CONFIRM` or `/mode live CONFIRM`"
+        
+        self.state["trading_mode"] = "LIVE"
+        self.state["live_mode_confirmed"] = True
+        self.save_state()
+        return True, "🔴 *LIVE TRADING MODE ACTIVE*\nReal capital execution is now active on your live MT5 account.\nFirst trade of the day will require a second one-time confirmation."
 
     def is_first_trade_confirmed_today(self) -> bool:
         """First trade confirmation removed - auto-trade is always allowed."""

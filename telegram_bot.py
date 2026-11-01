@@ -3724,43 +3724,34 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
         send_message(token, sender_id, table, reply_markup=strategy_markup)
         return
 
-    # ── MODERN TRADING MODE CONTROLLER (/mode [paper|demo|live]) ──
+    # ── LIVE TRADING MODE CONTROLLER (/mode live CONFIRM) ──
     if cmd == "/mode":
         sub = args_lower.strip()
         if not sub:
-            curr_mode = safety_manager.get_trading_mode() if RISK_ENGINE_AVAILABLE else "PAPER"
-            mode_badge = "⚪ PAPER (Simulation)" if curr_mode == "PAPER" else "🟡 DEMO (MT5 Test Account)" if curr_mode == "DEMO" else "🔴 LIVE (Real Capital)"
+            curr_mode = safety_manager.get_trading_mode() if RISK_ENGINE_AVAILABLE else "LIVE"
+            mode_badge = "🔴 LIVE (Real Capital)" if curr_mode == "LIVE" else "⚠️ UNKNOWN"
             send_message(token, sender_id, (
                 f"🎛️ *TRADING MODE CONTROLLER*\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"• Current Mode: `{mode_badge}`\n\n"
-                f"Available Modes:\n"
-                f"• `/mode paper`  ──► Risk-free simulation with virtual fills\n"
-                f"• `/mode demo`   ──► Connected MT5 Demo account\n"
-                f"• `/enable_live CONFIRM` ──► Live capital execution (requires explicit confirmation)\n"
+                f"Available Mode:\n"
+                f"• `/mode live CONFIRM` ──► Live capital execution (requires explicit confirmation)\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"Run `/safety` to view circuit breaker limits."
             ))
             return
-        elif sub == "paper":
-            if RISK_ENGINE_AVAILABLE:
-                _, msg = safety_manager.set_trading_mode("PAPER")
-                send_message(token, sender_id, msg)
-            else:
-                send_message(token, sender_id, "⚪ Switched to Paper Trading Mode.")
-            return
-        elif sub == "demo":
-            if RISK_ENGINE_AVAILABLE:
-                _, msg = safety_manager.set_trading_mode("DEMO")
-                send_message(token, sender_id, msg)
-            else:
-                send_message(token, sender_id, "🟡 Switched to Demo Trading Mode.")
-            return
         elif sub == "live":
-            send_message(token, sender_id, "⚠️ *LIVE CAPITAL CONFIRMATION REQUIRED*\nSwitching to real capital execution requires explicit confirmation.\nRun: `/enable_live CONFIRM`")
+            if args.strip().upper() == "CONFIRM":
+                if RISK_ENGINE_AVAILABLE:
+                    ok, msg = safety_manager.set_trading_mode("LIVE", "CONFIRM")
+                    send_message(token, sender_id, msg)
+                else:
+                    send_message(token, sender_id, "🔴 Live mode enabled.")
+            else:
+                send_message(token, sender_id, "⚠️ *LIVE CAPITAL CONFIRMATION REQUIRED*\nSwitching to real capital execution requires explicit confirmation.\nRun: `/mode live CONFIRM`")
             return
         else:
-            send_message(token, sender_id, f"Unknown mode '{sub}'. Options: `/mode paper`, `/mode demo`, `/enable_live CONFIRM`")
+            send_message(token, sender_id, f"Unknown mode '{sub}'. Only `/mode live CONFIRM` is supported.")
             return
 
     # ── ENABLE LIVE CONFIRMATION (/enable_live CONFIRM) ──
@@ -3820,9 +3811,7 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             safety_markup = {
                 "inline_keyboard": [
                     [
-                        {"text": "⚪ Paper Mode", "callback_data": "mode_paper"},
-                        {"text": "🟡 Demo Mode", "callback_data": "mode_demo"},
-                        {"text": "🔴 Live Mode", "callback_data": "mode_live"}
+                        {"text": "🔴 Live Mode", "callback_data": "mode_live"},
                     ],
                     [
                         {"text": "🔓 Unlock Scanners", "callback_data": "unlock_all"},
@@ -3841,57 +3830,20 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
 
     # ── 5. MODERN PORTFOLIO HUB (/portfolio, /account, /positions) ──
     if cmd in ("/portfolio", "/account", "/positions"):
-        curr_mode = safety_manager.get_trading_mode() if RISK_ENGINE_AVAILABLE else "PAPER"
+        curr_mode = safety_manager.get_trading_mode() if RISK_ENGINE_AVAILABLE else "LIVE"
         acc = live_broker.get_live_account_data() if (MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected) else None
         positions = live_broker.get_open_positions() if (MT5_EXECUTOR_AVAILABLE and live_broker) else []
 
-        # If in PAPER mode, show virtual paper account portfolio
-        if curr_mode == "PAPER" and safety_manager:
-            p_acc = safety_manager.state.get("paper_account", {})
-            p_bal = p_acc.get("balance", 10000.0)
-            p_eq = p_acc.get("equity", 10000.0)
-            strat = get_active_strategy() if RISK_ENGINE_AVAILABLE else {"name": "Scalp Sniper", "code": "SCALP"}
-            tot_pnl = sum(p.get("profit", 0.0) for p in positions)
-            lines = [
-                "💼 *PAPER TRADING PORTFOLIO OVERVIEW*",
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-                f"• Execution Mode    : `⚪ PAPER (Risk-Free Simulation)`",
-                f"• Virtual Balance   : `${p_bal:,.2f}`",
-                f"• Virtual Equity    : `${p_eq:,.2f}`",
-                f"• Active Strategy   : `{strat['name']}` (`{strat['code']}`) 🎯",
-                f"• Open Paper Trades : `{len(positions)}`",
-                f"• Floating PnL      : `${tot_pnl:+,.2f}`",
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            ]
-            if positions:
-                lines.append("📋 *Active Paper Positions:*")
-                for p in positions:
-                    lines.append(
-                        f"• `{p['symbol']}` {p['type']} `{p['lots']}` lots (Ticket `#{p['ticket']}`)\n"
-                        f"  Entry: `${p['open_price']:,.2f}` | Current: `${p.get('current_price', p['open_price']):,.2f}`\n"
-                        f"  SL: `${p['sl']:,.2f}` | TP: `${p['tp']:,.2f}`"
-                    )
-            else:
-                lines.append("No active open paper positions.")
-            lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nSwitch mode anytime: `/mode demo` or `/enable_live CONFIRM`")
-            pos_markup = {
-                "inline_keyboard": [
-                    [
-                        {"text": "🛑 Close All Positions", "callback_data": "close_all"}
-                    ] if positions else [
-                        {"text": "📊 Live Scan", "callback_data": "scan"},
-                        {"text": "🔮 Digital Twin", "callback_data": "predict"}
-                    ],
-                    [
-                        {"text": "🛡️ Trail Hub", "callback_data": "trail"},
-                        {"text": "⚡ Auto-Push", "callback_data": "autopush"}
-                    ]
-                ]
-            }
-            send_message(token, sender_id, "\n".join(lines), reply_markup=pos_markup)
-            return
-
         if not acc:
+            text = (
+                "❌ *LIVE MT5 BROKER NOT CONNECTED*\n\n"
+                "Please make sure:\n"
+                "1. MetaTrader 5 terminal is running on your VPS.\n"
+                "2. You are logged into your live trading account.\n"
+                "3. 'Allow algorithmic trading' is checked in `Tools -> Options -> Expert Advisors`.\n"
+            )
+            send_message(token, sender_id, text)
+            return
             text = (
                 "❌ *LIVE MT5 BROKER NOT CONNECTED*\n\n"
                 "Please make sure:\n"
@@ -4715,7 +4667,7 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
         auto_desc = f"ENABLED 🟢 ({AUTO_TRADE_MODE})" if AUTO_TRADE_MODE != "OFF" else "DISABLED ⚪"
         auto_push_desc = f"ENABLED 🟢 ({AUTO_PUSH_MODE})" if AUTO_PUSH_MODE != "OFF" else "DISABLED ⚪"
         trail_desc = "ACTIVE 🛡️" if TRAILING_STOP_ENABLED else "DISABLED ⚪"
-        curr_mode = safety_manager.get_trading_mode() if RISK_ENGINE_AVAILABLE else "PAPER"
+        curr_mode = safety_manager.get_trading_mode() if RISK_ENGINE_AVAILABLE else "LIVE"
         kill_act, _ = safety_manager.is_kill_switch_active() if RISK_ENGINE_AVAILABLE else (False, "")
         kill_str = "LOCKED 🚨 (Halted)" if kill_act else "ARMED ✅"
         gold_buf = learning_engine.get_dynamic_sl_buffer("GOLD") if (LEARNING_AVAILABLE and learning_engine) else 0.0
@@ -4724,11 +4676,12 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
         status_msg = (
             f"🤖 *SYSTEM & DUAL-SLOT HEALTH*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"• Execution Mode        : `{curr_mode}` (PAPER / LIVE)\n"
+            f"• Execution Mode        : `{curr_mode}` (LIVE)\n"
             f"• Broker Connection     : `{broker_line}`\n"
             f"• Live Account Equity   : `{eq_line}`\n"
             f"• 1M Auto-Push Execution: `{auto_push_desc}`\n"
-            f"• Trailing & Breakeven  : `{trail_desc}`\n\n"
+            f"• Trailing & Breakeven  : `{trail_desc}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"👥 *Concurrent Execution Slots:*\n"
             f"• 🥇 *Slot 1 (Gold)*    : `Active (Continuous 1M)`\n"
             f"• ₿  *Slot 2 (BTC)*     : `Active (Continuous 1M)`\n\n"
