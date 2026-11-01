@@ -4410,10 +4410,36 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             if buy_zones:
                 for z in buy_zones[:5]:
                     conf_bar = "🟢" * int(z["confidence"] * 10) + "⚪" * (10 - int(z["confidence"] * 10))
-                    msg_lines.append(
-                        f"• `${z['zone_price']:,.2f}` - {z['zone_type']} ({z['distance_pct']:.1f}% below)\n"
-                        f"  Strength: `{z['strength']:.2f}` | Touches: `{z['touch_count']}` | Confidence: `{z['confidence']:.0%}` {conf_bar}"
-                    )
+                    zone_price = z["zone_price"]
+                    # Calculate SL/TP for this zone using risk_engine
+                    try:
+                        strat_levels = calculate_strategy_levels(
+                            asset_type, zone_price,
+                            atr=float(hist["High"].astype(float).sub(hist["Low"].astype(float)).rolling(14).mean().iloc[-1]) if len(hist) >= 15 else 28.0,
+                            action="BUY",
+                            strategy="SCALP"
+                        )
+                        sl = strat_levels["stop_loss"]
+                        tp1 = strat_levels["tp1"]
+                        tp2 = strat_levels["tp2"]
+                        risk_pct = strat_levels.get("risk_pct", 0.0)
+                        reward_pct = strat_levels.get("reward_pct", 0.0)
+                        rr = strat_levels.get("rr_tp1", 0.0)
+                        lot_info = strat_levels.get("lot_info", {})
+                        lots = lot_info.get("lots", 0.01)
+                        risk_usd = lot_info.get("actual_risk_usd", 0.0)
+                        
+                        msg_lines.append(
+                            f"• `${zone_price:,.2f}` - {z['zone_type']} ({z['distance_pct']:.1f}% below)\n"
+                            f"  • Entry: `${zone_price:,.2f}` | SL: `${sl:,.2f}`\n"
+                            f"  • TP1: `${tp1:,.2f}` | TP2: `${tp2:,.2f}`\n"
+                            f"  • Risk: `{risk_pct:.2f}%` (~`${risk_usd:,.2f}`) | Reward: `{reward_pct:.2f}%` | R:R `1:{rr:.2f}`\n"
+                        )
+                    except Exception:
+                        msg_lines.append(
+                            f"• `${zone_price:,.2f}` - {z['zone_type']} ({z['distance_pct']:.1f}% below)\n"
+                            f"  Strength: `{z['strength']:.2f}` | Touches: `{z['touch_count']}` | Confidence: `{z['confidence']:.0%}`"
+                        )
             else:
                 msg_lines.append("• No buy zones detected within 3% of current price.")
 
@@ -4423,17 +4449,42 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             if sell_zones:
                 for z in sell_zones[:5]:
                     conf_bar = "🟢" * int(z["confidence"] * 10) + "⚪" * (10 - int(z["confidence"] * 10))
-                    msg_lines.append(
-                        f"• `${z['zone_price']:,.2f}` - {z['zone_type']} ({z['distance_pct']:.1f}% above)\n"
-                        f"  Strength: `{z['strength']:.2f}` | Touches: `{z['touch_count']}` | Confidence: `{z['confidence']:.0%}` {conf_bar}"
-                    )
+                    zone_price = z["zone_price"]
+                    try:
+                        strat_levels = calculate_strategy_levels(
+                            asset_type, zone_price,
+                            atr=float(hist["High"].astype(float).sub(hist["Low"].astype(float)).rolling(14).mean().iloc[-1]) if len(hist) >= 15 else 28.0,
+                            action="SELL",
+                            strategy="SCALP"
+                        )
+                        sl = strat_levels["stop_loss"]
+                        tp1 = strat_levels["tp1"]
+                        tp2 = strat_levels["tp2"]
+                        risk_pct = strat_levels.get("risk_pct", 0.0)
+                        reward_pct = strat_levels.get("reward_pct", 0.0)
+                        rr = strat_levels.get("rr_tp1", 0.0)
+                        lot_info = strat_levels.get("lot_info", {})
+                        lots = lot_info.get("lots", 0.01)
+                        risk_usd = lot_info.get("actual_risk_usd", 0.0)
+                        
+                        msg_lines.append(
+                            f"• `${zone_price:,.2f}` - {z['zone_type']} ({z['distance_pct']:.1f}% above)\n"
+                            f"  • Entry: `${zone_price:,.2f}` | SL: `${sl:,.2f}`\n"
+                            f"  • TP1: `${tp1:,.2f}` | TP2: `${tp2:,.2f}`\n"
+                            f"  • Risk: `{risk_pct:.2f}%` (~`${risk_usd:,.2f}`) | Reward: `{reward_pct:.2f}%` | R:R `1:{rr:.2f}`\n"
+                        )
+                    except Exception:
+                        msg_lines.append(
+                            f"• `${zone_price:,.2f}` - {z['zone_type']} ({z['distance_pct']:.1f}% above)\n"
+                            f"  Strength: `{z['strength']:.2f}` | Touches: `{z['touch_count']}` | Confidence: `{z['confidence']:.0%}`"
+                        )
             else:
                 sell_zones.append("• No sell zones detected within 3% of current price.")
 
             msg_lines.extend([
                 "",
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-                f"💡 *How to use:* Place limit orders near these zones for better entry prices.",
+                f"💡 *How to use:* Place limit orders at zone prices for better entries.",
                 f"⚠️ *Probabilistic zones - price may never reach them.*",
                 f"🔄 *Run again anytime for updated zones.*"
             ])
