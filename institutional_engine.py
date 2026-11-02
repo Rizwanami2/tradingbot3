@@ -1450,8 +1450,244 @@ omniscient_matrix = OmniscientQuantitativeMatrix()
 
 
 # ==============================================================================
-# 5. MULTI-TIMEFRAME TREND CHANGE & ADAPTIVE STRATEGY ORCHESTRATION
+# 5. MULTI-TIMEFRAME TREND CHANGE & REVERSAL ENGINES
 # ==============================================================================
+
+class SmallTimeframeReversalEngine:
+    """
+    Institutional Small-Timeframe (1M, 5M, 15M) Trend Change & Reversal Engine.
+    Detects early trend inflection points before higher-timeframe indicators register:
+      1. Micro Fractal Swing Pivots & Change of Character (ChoCH / MSS)
+      2. RSI Momentum Divergences (Bullish at bottoms, Bearish at tops)
+      3. 9/21 Micro EMA Crossovers & Trend Shifts
+      4. Liquidity Sweeps with Reversal Rejection Wicks (Wyckoff Spring / Upthrust)
+      5. Micro Fibonacci Golden Pocket Retests (0.618 - 0.650)
+    """
+
+    def detect_micro_reversal(self, df: pd.DataFrame, period: int = 14) -> Dict[str, Any]:
+        """Analyzes a single small-timeframe DataFrame for trend reversal signals."""
+        if df is None or len(df) < 10:
+            return {"reversal_detected": False, "side": None, "score": 0, "reasons": []}
+
+        c = df["Close"].astype(float)
+        h = df["High"].astype(float)
+        l = df["Low"].astype(float)
+        o = df["Open"].astype(float)
+
+        curr_c = float(c.iloc[-1])
+        prev_c = float(c.iloc[-2])
+        curr_o = float(o.iloc[-1])
+        curr_h = float(h.iloc[-1])
+        curr_l = float(l.iloc[-1])
+
+        # 1. Micro EMAs
+        ema9 = float(c.ewm(span=9, adjust=False).mean().iloc[-1])
+        ema21 = float(c.ewm(span=21, adjust=False).mean().iloc[-1])
+        prev_ema9 = float(c.ewm(span=9, adjust=False).mean().iloc[-2])
+        prev_ema21 = float(c.ewm(span=21, adjust=False).mean().iloc[-2])
+
+        ema_bull_cross = (ema9 >= ema21 and prev_ema9 < prev_ema21) or (curr_c > ema21 and prev_c <= ema21)
+        ema_bear_cross = (ema9 <= ema21 and prev_ema9 > prev_ema21) or (curr_c < ema21 and prev_c >= ema21)
+
+        # 2. Candle geometry & multi-bar engulfing
+        rng = max(curr_h - curr_l, 0.001)
+        low_wick = (min(curr_o, curr_c) - curr_l) / rng * 100
+        up_wick = (curr_h - max(curr_o, curr_c)) / rng * 100
+        body_pct = abs(curr_c - curr_o) / rng * 100
+
+        # Multi-bar break: current close breaks above the last 2 to 4 candle highs
+        lookback_high = float(h.iloc[-4:-1].max()) if len(h) >= 4 else float(h.iloc[-2])
+        lookback_low = float(l.iloc[-4:-1].min()) if len(l) >= 4 else float(l.iloc[-2])
+
+        bull_structural_break = curr_c > lookback_high
+        bear_structural_break = curr_c < lookback_low
+
+        # 3. RSI Divergence approximation
+        delta = c.diff()
+        gain = delta.clip(lower=0).rolling(period).mean()
+        loss = (-delta.clip(upper=0)).rolling(period).mean()
+        rs = gain / (loss + 1e-9)
+        rsi_series = 100 - (100 / (1 + rs))
+        curr_rsi = float(rsi_series.iloc[-1]) if not np.isnan(rsi_series.iloc[-1]) else 50.0
+
+        past_window = min(len(df) - 2, 20)
+        past_l = l.iloc[-past_window:-2]
+        past_rsi = rsi_series.iloc[-past_window:-2]
+        bull_div = False
+        if not past_l.empty and not past_rsi.empty:
+            lowest_past_l = float(past_l.min())
+            rsi_at_low = float(past_rsi.loc[past_l.idxmin()])
+            if curr_l <= lowest_past_l * 1.002 and curr_rsi > rsi_at_low + 2.5:
+                bull_div = True
+
+        past_h = h.iloc[-past_window:-2]
+        bear_div = False
+        if not past_h.empty and not past_rsi.empty:
+            highest_past_h = float(past_h.max())
+            rsi_at_high = float(past_rsi.loc[past_h.idxmax()])
+            if curr_h >= highest_past_h * 0.998 and curr_rsi < rsi_at_high - 2.5:
+                bear_div = True
+
+        # 4. Score Bullish Reversal
+        bull_score = 0
+        bull_reasons = []
+        if bull_structural_break:
+            bull_score += 3
+            bull_reasons.append(f"M1/M5 ChoCH: Breakout above past candles (${lookback_high:,.2f})")
+        if ema_bull_cross:
+            bull_score += 2
+            bull_reasons.append("9/21 EMA Bullish Crossover")
+        elif curr_c > ema21:
+            bull_score += 1
+            bull_reasons.append("Price Holding above 21 EMA")
+        if bull_div:
+            bull_score += 3
+            bull_reasons.append(f"Bullish RSI Divergence (RSI {curr_rsi:.1f})")
+        if low_wick >= 30.0:
+            bull_score += 2
+            bull_reasons.append(f"Wyckoff Spring Absorption Wick ({low_wick:.0f}%)")
+        if curr_c > curr_o and body_pct >= 40.0:
+            bull_score += 1
+            bull_reasons.append("Bullish Momentum Candle Body")
+
+        # 5. Score Bearish Reversal
+        bear_score = 0
+        bear_reasons = []
+        if bear_structural_break:
+            bear_score += 3
+            bear_reasons.append(f"M1/M5 ChoCH: Breakdown below past candles (${lookback_low:,.2f})")
+        if ema_bear_cross:
+            bear_score += 2
+            bear_reasons.append("9/21 EMA Bearish Crossover")
+        elif curr_c < ema21:
+            bear_score += 1
+            bear_reasons.append("Price Holding below 21 EMA")
+        if bear_div:
+            bear_score += 3
+            bear_reasons.append(f"Bearish RSI Divergence (RSI {curr_rsi:.1f})")
+        if up_wick >= 30.0:
+            bear_score += 2
+            bear_reasons.append(f"Upthrust Liquidity Sweep Upper Wick ({up_wick:.0f}%)")
+        if curr_c < curr_o and body_pct >= 40.0:
+            bear_score += 1
+            bear_reasons.append("Bearish Momentum Candle Body")
+
+        is_bull = bull_score >= 4 and bull_score > bear_score
+        is_bear = bear_score >= 4 and bear_score > bull_score
+
+        side = "BUY" if is_bull else ("SELL" if is_bear else None)
+        score = bull_score if is_bull else (bear_score if is_bear else 0)
+        reasons = bull_reasons if is_bull else (bear_reasons if is_bear else [])
+
+        return {
+            "reversal_detected": is_bull or is_bear,
+            "side": side,
+            "score": score,
+            "reasons": reasons,
+            "curr_rsi": round(curr_rsi, 1),
+            "ema9": round(ema9, 2),
+            "ema21": round(ema21, 2)
+        }
+
+    def compute_micro_key_levels(self, df: pd.DataFrame, bars_lookback: int = 40) -> Dict[str, Any]:
+        """Calculates micro Fibonacci levels (0.382, 0.500, 0.618, 0.650) on recent 5M/15M impulse leg."""
+        if df is None or len(df) < 10:
+            return {"in_micro_gp": False, "sw_high": 0.0, "sw_low": 0.0, "fib_618": 0.0, "fib_650": 0.0}
+
+        recent = df.tail(min(len(df), bars_lookback))
+        sw_h = float(recent["High"].max())
+        sw_l = float(recent["Low"].min())
+        curr = float(df["Close"].iloc[-1])
+        diff = sw_h - sw_l
+
+        if diff <= 0:
+            return {"in_micro_gp": False, "sw_high": sw_h, "sw_low": sw_l, "fib_618": curr, "fib_650": curr}
+
+        fib_382 = sw_h - 0.382 * diff
+        fib_500 = sw_h - 0.500 * diff
+        fib_618 = sw_h - 0.618 * diff
+        fib_650 = sw_h - 0.650 * diff
+        fib_786 = sw_h - 0.786 * diff
+
+        in_gp = (curr >= min(fib_618, fib_650) * 0.998) and (curr <= max(fib_618, fib_650) * 1.002)
+
+        return {
+            "curr": round(curr, 2),
+            "sw_high": round(sw_h, 2),
+            "sw_low": round(sw_l, 2),
+            "fib_382": round(fib_382, 2),
+            "fib_500": round(fib_500, 2),
+            "fib_618": round(fib_618, 2),
+            "fib_650": round(fib_650, 2),
+            "fib_786": round(fib_786, 2),
+            "in_micro_gp": in_gp
+        }
+
+    def evaluate_small_timeframe_reversal(self, asset: str, mtf_bars: Dict[str, pd.DataFrame]) -> Dict[str, Any]:
+        """Synthesizes M1, M5, and M15 bars into a comprehensive trend change & reversal evaluation."""
+        m1 = mtf_bars.get("m1", pd.DataFrame())
+        m5 = mtf_bars.get("m5", pd.DataFrame())
+        m15 = mtf_bars.get("m15", pd.DataFrame())
+
+        res_m1 = self.detect_micro_reversal(m1)
+        res_m5 = self.detect_micro_reversal(m5)
+        res_m15 = self.detect_micro_reversal(m15)
+        micro_levels = self.compute_micro_key_levels(m5 if (m5 is not None and len(m5) >= 10) else m1)
+
+        # Aggregate reasons and scores
+        bull_votes = 0
+        bear_votes = 0
+        all_reasons = []
+
+        for tf_label, r in [("M1", res_m1), ("M5", res_m5), ("M15", res_m15)]:
+            if r.get("reversal_detected"):
+                if r.get("side") == "BUY":
+                    bull_votes += r.get("score", 0)
+                    all_reasons.extend([f"[{tf_label}] {x}" for x in r.get("reasons", [])])
+                elif r.get("side") == "SELL":
+                    bear_votes += r.get("score", 0)
+                    all_reasons.extend([f"[{tf_label}] {x}" for x in r.get("reasons", [])])
+
+        if micro_levels.get("in_micro_gp"):
+            all_reasons.append(f"Resting in Micro Golden Pocket (${micro_levels.get('fib_650', 0):,.2f} - ${micro_levels.get('fib_618', 0):,.2f})")
+            if bull_votes > 0: bull_votes += 2
+            if bear_votes > 0: bear_votes += 2
+
+        reversal_type = "NONE"
+        side = "NEUTRAL"
+        confidence = 0.0
+        badge = "⚪ No Reversal Active"
+        summary = "No small-timeframe trend reversal detected."
+
+        if bull_votes >= 4 and bull_votes > bear_votes:
+            reversal_type = "CONFIRMED_BULLISH_REVERSAL"
+            side = "BUY"
+            confidence = min(1.0, round(bull_votes / 10.0, 2))
+            badge = "🔄 CONFIRMED BULLISH REVERSAL (M1/M5 ChoCH)"
+            summary = " | ".join(all_reasons[:3])
+        elif bear_votes >= 4 and bear_votes > bull_votes:
+            reversal_type = "CONFIRMED_BEARISH_REVERSAL"
+            side = "SELL"
+            confidence = min(1.0, round(bear_votes / 10.0, 2))
+            badge = "🔄 CONFIRMED BEARISH REVERSAL (M1/M5 ChoCH)"
+            summary = " | ".join(all_reasons[:3])
+
+        return {
+            "asset": asset,
+            "reversal_type": reversal_type,
+            "side": side,
+            "confidence": confidence,
+            "bull_votes": bull_votes,
+            "bear_votes": bear_votes,
+            "badge": badge,
+            "summary": summary,
+            "all_reasons": all_reasons,
+            "micro_levels": micro_levels,
+            "m1_detail": res_m1,
+            "m5_detail": res_m5,
+            "m15_detail": res_m15
+        }
+
 
 class MultiTimeframeTrendEngine:
     """
@@ -1461,6 +1697,9 @@ class MultiTimeframeTrendEngine:
       2. Multi-Timeframe Trend Alignment & Momentum Confluence
       3. Trend Exhaustion, Liquidity Sweeps & Impending Reversals
     """
+
+    def __init__(self):
+        self.reversal_engine = SmallTimeframeReversalEngine()
 
     TF_WEIGHTS = {
         "m1": 0.8,
@@ -1621,8 +1860,27 @@ class MultiTimeframeTrendEngine:
         shift_detected = False
         shift_alert = ""
 
-        # 1. Early Reversal / Change of Character (ChoCH) from small to high TF
-        if (h1["direction"] == "BEARISH" or d1["direction"] == "BEARISH") and (m1["direction"] == "BULLISH" and m5["direction"] == "BULLISH"):
+        # Evaluate Small-Timeframe (M1/M5/M15) Trend Change & Reversal Engine
+        reversal_audit = self.reversal_engine.evaluate_small_timeframe_reversal(asset, mtf_bars)
+        rev_type = reversal_audit.get("reversal_type", "NONE")
+
+        # 1. Confirmed Small-Timeframe Trend Reversals (ChoCH / MSS / Momentum)
+        if rev_type == "CONFIRMED_BULLISH_REVERSAL":
+            movement = "EARLY_BULLISH_REVERSAL"
+            movement_badge = "🔄 Confirmed Bullish Reversal (M1/M5 ChoCH)"
+            movement_desc = f"Micro trend reversed Bullish: {reversal_audit.get('summary')}"
+            shift_detected = True
+            shift_alert = f"⚡ *{asset} BULLISH REVERSAL:* Microstructure flipped Bullish (M1/M5 ChoCH Breakout Up)!"
+            dominant_dir = "BUY"
+        elif rev_type == "CONFIRMED_BEARISH_REVERSAL":
+            movement = "EARLY_BEARISH_REVERSAL"
+            movement_badge = "🔄 Confirmed Bearish Reversal (M1/M5 ChoCH)"
+            movement_desc = f"Micro trend reversed Bearish: {reversal_audit.get('summary')}"
+            shift_detected = True
+            shift_alert = f"⚡ *{asset} BEARISH REVERSAL:* Microstructure flipped Bearish (M1/M5 ChoCH Breakdown)!"
+            dominant_dir = "SELL"
+        # 1b. Early Reversal / Change of Character (ChoCH) from small to high TF
+        elif (h1["direction"] == "BEARISH" or d1["direction"] == "BEARISH") and (m1["direction"] == "BULLISH" and m5["direction"] == "BULLISH"):
             movement = "EARLY_BULLISH_REVERSAL"
             movement_badge = "🔄 Early Bullish Inflection (M1/M5 Leading)"
             movement_desc = "Microstructure has flipped Bullish (M1/M5 ChoCH) against high-timeframe downtrend."
@@ -1678,6 +1936,7 @@ class MultiTimeframeTrendEngine:
             "movement_desc": movement_desc,
             "shift_detected": shift_detected,
             "shift_alert": shift_alert,
+            "reversal_audit": reversal_audit if 'reversal_audit' in locals() else {},
             "timeframes": tf_results
         }
 
@@ -1813,4 +2072,39 @@ def format_combined_mtf_card(gold_mtf: dict, gold_strat: dict, btc_mtf: dict, bt
 # Global Singleton Instances
 mtf_trend_engine = MultiTimeframeTrendEngine()
 adaptive_strategy_orchestrator = AdaptiveStrategyOrchestrator()
+def format_reversal_radar_card(gold_data: dict, gold_rev: dict, btc_data: dict, btc_rev: dict) -> str:
+    """Renders a Telegram radar report for small-timeframe trend changes and reversals."""
+    g_price = gold_data.get("price", 0.0) if gold_data else 0.0
+    b_price = btc_data.get("price", 0.0) if btc_data else 0.0
+
+    g_type = gold_rev.get("reversal_type", "NONE")
+    b_type = btc_rev.get("reversal_type", "NONE")
+
+    g_badge = "🟢 BULLISH REVERSAL (M1/M5 ChoCH)" if g_type == "CONFIRMED_BULLISH_REVERSAL" else ("🔴 BEARISH REVERSAL (M1/M5 ChoCH)" if g_type == "CONFIRMED_BEARISH_REVERSAL" else "⚪ Trend Continuing / Range")
+    b_badge = "🟢 BULLISH REVERSAL (M1/M5 ChoCH)" if b_type == "CONFIRMED_BULLISH_REVERSAL" else ("🔴 BEARISH REVERSAL (M1/M5 ChoCH)" if b_type == "CONFIRMED_BEARISH_REVERSAL" else "⚪ Trend Continuing / Range")
+
+    g_gp = gold_rev.get("micro_levels", {})
+    b_gp = btc_rev.get("micro_levels", {})
+
+    lines = [
+        "🔄 *SMALL-TIMEFRAME TREND REVERSAL RADAR (1M / 5M / 15M)*",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "🥇 *GOLD (XAU/USD) REVERSAL STATE:*",
+        f"• Status      : *{g_badge}*",
+        f"• Price       : `${g_price:,.2f}`",
+        f"• Micro GP    : `${g_gp.get('fib_650', 0):,.2f} - ${g_gp.get('fib_618', 0):,.2f}` | In Zone: `{g_gp.get('in_micro_gp', False)}`",
+        f"• Audit Notes : {gold_rev.get('summary', 'Structure normal')}",
+        "",
+        "₿ *BITCOIN (BTC/USD) REVERSAL STATE:*",
+        f"• Status      : *{b_badge}*",
+        f"• Price       : `${b_price:,.2f}`",
+        f"• Micro GP    : `${b_gp.get('fib_650', 0):,.2f} - ${b_gp.get('fib_618', 0):,.2f}` | In Zone: `{b_gp.get('in_micro_gp', False)}`",
+        f"• Audit Notes : {btc_rev.get('summary', 'Structure normal')}",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "💡 _Microstructure shifts (ChoCH), 9/21 EMA crosses, and RSI divergences automatically adapt execution entries._"
+    ]
+    return "\n".join(lines)
+
+small_tf_reversal_engine = SmallTimeframeReversalEngine()
+
 

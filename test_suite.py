@@ -257,6 +257,9 @@ class TestHardAssetProject(unittest.TestCase):
             "/asset btc",
             "/asset gold",
             "/asset both",
+            "/reversal",
+            "/trend_change",
+            "/choch",
 
             # Modern Market Hub & Subcommands
             "/market",
@@ -1695,7 +1698,23 @@ class TestHardAssetProject(unittest.TestCase):
         telegram_bot.handle_callback_query(token, {"id": "cb_mtf2", "from": {"id": sender_id, "first_name": sender_name}, "data": "mtf_gold"})
         telegram_bot.handle_callback_query(token, {"id": "cb_mtf3", "from": {"id": sender_id, "first_name": sender_name}, "data": "mtf_btc"})
 
-        print("    ✅ Multi-Timeframe Trend Detection & Adaptive Strategy: ALL PASSED")
+        # 7. Small-Timeframe Reversal Engine & /reversal Command
+        from institutional_engine import small_tf_reversal_engine
+        rev_btc = small_tf_reversal_engine.evaluate_small_timeframe_reversal("BTC", mtf_btc)
+        self.assertIn("reversal_type", rev_btc)
+        self.assertIn("side", rev_btc)
+        self.assertIn("confidence", rev_btc)
+        self.assertIn("badge", rev_btc)
+
+        self.mock_tg.sent_messages.clear()
+        telegram_bot.process_telegram_command(token, sender_id, sender_name, "/reversal")
+        self.assertGreater(len(self.mock_tg.sent_messages), 0)
+        rev_resp = self.mock_tg.sent_messages[-1][1]
+        self.assertIn("SMALL-TIMEFRAME TREND REVERSAL RADAR", rev_resp)
+
+        telegram_bot.handle_callback_query(token, {"id": "cb_rev", "from": {"id": sender_id, "first_name": sender_name}, "data": "reversal"})
+
+        print("    ✅ Multi-Timeframe Trend Detection, Small TF Reversals & Adaptive Strategy: ALL PASSED")
 
 
 

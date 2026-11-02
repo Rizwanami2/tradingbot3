@@ -341,6 +341,13 @@ class MarketDataFeed:
 
                     # Micro 1m
                     if "m1" not in result or result["m1"].empty:
+                        try:
+                            m1_raw = t.history(period="1d", interval="1m")
+                            if not m1_raw.empty:
+                                result["m1"] = self._sanitize_dataframe(m1_raw)
+                        except Exception:
+                            pass
+                    if "m1" not in result or result["m1"].empty:
                         result["m1"] = m5_clean.tail(25).copy()
             except Exception as e:
                 logger.debug(f"Secondary MTF fallback: {e}")

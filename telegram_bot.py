@@ -159,7 +159,8 @@ except Exception:
 try:
     from institutional_engine import (
         institutional_engine, neuro_predictor, forensic_council, omniscient_matrix,
-        mtf_trend_engine, adaptive_strategy_orchestrator, format_multitimeframe_trend_card, format_combined_mtf_card
+        mtf_trend_engine, adaptive_strategy_orchestrator, format_multitimeframe_trend_card, format_combined_mtf_card,
+        format_reversal_radar_card, small_tf_reversal_engine
     )
     INSTITUTIONAL_AVAILABLE = True
 except Exception:
@@ -168,6 +169,8 @@ except Exception:
     forensic_council = None
     mtf_trend_engine = None
     adaptive_strategy_orchestrator = None
+    format_reversal_radar_card = None
+    small_tf_reversal_engine = None
     INSTITUTIONAL_AVAILABLE = False
 
 # Live auto-trade and separate watchlist ('OFF', 'BOTH', 'GOLD', 'BTC')
@@ -1619,20 +1622,38 @@ def _analyze_single_side(symbol: str, asset_type: str, macro: dict, hist, levels
     if mtf_trend:
         norm_sc = mtf_trend.get("normalized_score", 0.0)
         mov = mtf_trend.get("market_movement", "")
-        if is_buy and norm_sc >= 0.25:
-            factors_hit.append(f"MTF Alignment: Small-to-High TF Bullish Expansion (+{norm_sc*100:.0f}%)")
-        elif not is_buy and norm_sc <= -0.25:
-            factors_hit.append(f"MTF Alignment: Small-to-High TF Bearish Expansion ({norm_sc*100:.0f}%)")
-        elif mtf_trend.get("shift_detected"):
-            factors_hit.append(f"Market Movement: {mtf_trend.get('movement_badge')}")
+        rev_audit = mtf_trend.get("reversal_audit", {})
+        is_bull_rev = (rev_audit.get("reversal_type") == "CONFIRMED_BULLISH_REVERSAL") or (mov == "EARLY_BULLISH_REVERSAL")
+        is_bear_rev = (rev_audit.get("reversal_type") == "CONFIRMED_BEARISH_REVERSAL") or (mov == "EARLY_BEARISH_REVERSAL")
 
-        # Veto counter-inflection trades
-        if is_buy and mov == "EARLY_BEARISH_REVERSAL":
-            factors_hit = [f for f in factors_hit if not f.startswith("Trend:")]
-            factors_hit.append("⚠️ Vetoed: Microstructure flipped Bearish (M1/M5 ChoCH Breakout Down)")
-        elif not is_buy and mov == "EARLY_BULLISH_REVERSAL":
-            factors_hit = [f for f in factors_hit if not f.startswith("Trend:")]
-            factors_hit.append("⚠️ Vetoed: Microstructure flipped Bullish (M1/M5 ChoCH Breakout Up)")
+        if is_buy:
+            if is_bull_rev:
+                factors_hit.append(f"Microstructure Reversal: {rev_audit.get('summary', 'M1/M5 Bullish ChoCH & 9/21 EMA Flip')}")
+                if rev_audit.get("micro_levels", {}).get("in_micro_gp"):
+                    factors_hit.append("Micro Key Level: Resting in Micro Golden Pocket (0.618 Retest)")
+                if not any("50 SMA" in f for f in factors_hit):
+                    factors_hit.append("Inflection Pivot: Early Reversal entry at institutional liquidity floor")
+            elif is_bear_rev:
+                factors_hit = [f for f in factors_hit if not f.startswith("Trend:") and not f.startswith("Momentum:")]
+                factors_hit.append("⚠️ Vetoed: Microstructure flipped Bearish (M1/M5 ChoCH Breakdown)")
+            elif norm_sc >= 0.25:
+                factors_hit.append(f"MTF Alignment: Small-to-High TF Bullish Expansion (+{norm_sc*100:.0f}%)")
+            elif mtf_trend.get("shift_detected"):
+                factors_hit.append(f"Market Movement: {mtf_trend.get('movement_badge')}")
+        else: # is_sell
+            if is_bear_rev:
+                factors_hit.append(f"Microstructure Reversal: {rev_audit.get('summary', 'M1/M5 Bearish ChoCH & 9/21 EMA Flip')}")
+                if rev_audit.get("micro_levels", {}).get("in_micro_gp"):
+                    factors_hit.append("Micro Key Level: Resting in Micro Golden Pocket (0.618 Retest)")
+                if not any("50 SMA" in f for f in factors_hit):
+                    factors_hit.append("Inflection Pivot: Early Reversal entry at institutional liquidity ceiling")
+            elif is_bull_rev:
+                factors_hit = [f for f in factors_hit if not f.startswith("Trend:") and not f.startswith("Momentum:")]
+                factors_hit.append("⚠️ Vetoed: Microstructure flipped Bullish (M1/M5 ChoCH Breakout Up)")
+            elif norm_sc <= -0.25:
+                factors_hit.append(f"MTF Alignment: Small-to-High TF Bearish Expansion ({norm_sc*100:.0f}%)")
+            elif mtf_trend.get("shift_detected"):
+                factors_hit.append(f"Market Movement: {mtf_trend.get('movement_badge')}")
 
     # Profile-Specific Strategy Accuracy Verification
     strat_accuracy = {"passed": True, "veto_reasons": []}
@@ -2648,6 +2669,8 @@ def handle_callback_query(token: str, cq: dict):
         process_telegram_command(token, sender_id, sender_name, "/trail")
     elif data in ("all", "cockpit", "cockpit_refresh", "combined"):
         process_telegram_command(token, sender_id, sender_name, "/all")
+    elif data in ("reversal", "reversals", "trend_change", "choch", "reversal_refresh"):
+        process_telegram_command(token, sender_id, sender_name, "/reversal")
     elif data in ("mtf", "trend", "trends", "mtf_refresh"):
         process_telegram_command(token, sender_id, sender_name, "/mtf")
     elif data == "mtf_gold":
@@ -4571,6 +4594,36 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             ]
         }
         send_message(token, sender_id, "\n".join(lines), reply_markup=pos_markup)
+        return
+
+    # ── 1C. SMALL-TIMEFRAME TREND REVERSAL RADAR (/reversal, /trend_change, /choch) ──
+    if cmd in ("/reversal", "/reversals", "/trend_change", "/choch", "/mss", "/rev"):
+        send_message(token, sender_id, "🔄 *Scanning 1M, 5M & 15M candles for market structure shifts (ChoCH), 9/21 EMA flips & RSI divergences...*")
+        data = run_full_pipeline()
+        b = data.get("btc", {})
+        g = data.get("gold", {})
+        b_mtf = b.get("mtf_trend", {})
+        g_mtf = g.get("mtf_trend", {})
+        b_rev = b_mtf.get("reversal_audit", {})
+        g_rev = g_mtf.get("reversal_audit", {})
+
+        if format_reversal_radar_card:
+            rev_card = format_reversal_radar_card(g, g_rev, b, b_rev)
+        else:
+            rev_card = "🔄 *Small-Timeframe Reversal Radar:* Engine unavailable."
+        rev_markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "🔄 Refresh Reversals", "callback_data": "reversal"},
+                    {"text": "🌐 MTF Trends", "callback_data": "mtf"}
+                ],
+                [
+                    {"text": "⚡ Auto-Trade Hub", "callback_data": "autopush"},
+                    {"text": "📊 Live Scan", "callback_data": "scan"}
+                ]
+            ]
+        }
+        send_message(token, sender_id, rev_card, reply_markup=rev_markup)
         return
 
     # ── 5C. ACTIVE ASSET FOCUS CONTROLLER (/asset [btc|gold|both|status], /focus) ──

@@ -461,6 +461,22 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
         if feat_ma50: score_buy += 1; factors_buy.append("Momentum: Above 50 SMA")
         if feat_vol: score_buy += 1; factors_buy.append(f"Risk: Volatility normalized ({vol30:.1f}%)")
 
+        # Small Timeframe Trend Reversal Confluence Integration
+        rev_audit = mtf_result.get("reversal_audit", {}) if mtf_result else {}
+        is_bull_rev = (rev_audit.get("reversal_type") == "CONFIRMED_BULLISH_REVERSAL") or (mtf_result and mtf_result.get("market_movement") == "EARLY_BULLISH_REVERSAL")
+        is_bear_rev = (rev_audit.get("reversal_type") == "CONFIRMED_BEARISH_REVERSAL") or (mtf_result and mtf_result.get("market_movement") == "EARLY_BEARISH_REVERSAL")
+
+        if is_bull_rev:
+            score_buy += 2
+            factors_buy.append(f"Micro Reversal: {rev_audit.get('summary', 'M1/M5 Bullish ChoCH & Divergence')}")
+            score_sell = min(score_sell, 4)
+            factors_sell.append("⚠️ Vetoed: Microstructure flipped Bullish (M1/M5 ChoCH)")
+        elif is_bear_rev:
+            score_sell += 2
+            factors_sell.append(f"Micro Reversal: {rev_audit.get('summary', 'M1/M5 Bearish ChoCH & Divergence')}")
+            score_buy = min(score_buy, 4)
+            factors_buy.append("⚠️ Vetoed: Microstructure flipped Bearish (M1/M5 ChoCH)")
+
         # Multi-Timeframe Alignment Buy Factor
         feat_mtf_buy = False
         if mtf_result and mtf_result.get("dominant_direction") == "BUY":
@@ -522,6 +538,22 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
         if feat_vol: score_buy += 1; factors_buy.append(f"Risk: Orderly volatility ({vol30:.1f}%)")
         if feat_no_trap: score_buy += 1; factors_buy.append("Microstructure: Clean auction; no Bull Trap")
         if feat_near_support: score_buy += 1; factors_buy.append("Structure: Near major swing support floor")
+
+        # Small Timeframe Trend Reversal Confluence Integration (GOLD)
+        rev_audit_g = mtf_result.get("reversal_audit", {}) if mtf_result else {}
+        is_bull_rev_g = (rev_audit_g.get("reversal_type") == "CONFIRMED_BULLISH_REVERSAL") or (mtf_result and mtf_result.get("market_movement") == "EARLY_BULLISH_REVERSAL")
+        is_bear_rev_g = (rev_audit_g.get("reversal_type") == "CONFIRMED_BEARISH_REVERSAL") or (mtf_result and mtf_result.get("market_movement") == "EARLY_BEARISH_REVERSAL")
+
+        if is_bull_rev_g:
+            score_buy += 2
+            factors_buy.append(f"Micro Reversal: {rev_audit_g.get('summary', 'M1/M5 Bullish ChoCH & Divergence')}")
+            score_sell = min(score_sell, 4)
+            factors_sell.append("⚠️ Vetoed: Microstructure flipped Bullish (M1/M5 ChoCH)")
+        elif is_bear_rev_g:
+            score_sell += 2
+            factors_sell.append(f"Micro Reversal: {rev_audit_g.get('summary', 'M1/M5 Bearish ChoCH & Divergence')}")
+            score_buy = min(score_buy, 4)
+            factors_buy.append("⚠️ Vetoed: Microstructure flipped Bearish (M1/M5 ChoCH)")
 
         # Multi-Timeframe Alignment Buy Factor (GOLD)
         feat_mtf_buy = False
