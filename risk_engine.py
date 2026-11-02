@@ -74,7 +74,7 @@ DAILY_DRAWDOWN_HALT_PCT = 2.0       # Halt new trades if daily loss reaches 2.0%
 MAX_TOTAL_DRAWDOWN_PCT = 6.0        # Portfolio halt at 6.0% drawdown
 
 # ── Priority 1: Safety & Multi-Layer Circuit Breaker Parameters ──
-TRADING_MODES = ("LIVE",)
+TRADING_MODES = ("PAPER", "DEMO", "LIVE")
 DEFAULT_TRADING_MODE = "LIVE"
 MAX_CONCURRENT_POSITIONS = 2         # Max 2 concurrent open positions across Gold & BTC
 MAX_TOTAL_OPEN_RISK_PCT = 2.5        # Max 2.5% combined open risk across all positions
@@ -149,6 +149,12 @@ class SafetyManager:
             "consecutive_losses": 0,
             "cooldown_until": 0.0,
             "daily_circuit_breaker_tripped": False,
+            "paper_account": {
+                "balance": DEFAULT_ACCOUNT_BALANCE,
+                "equity": DEFAULT_ACCOUNT_BALANCE,
+                "positions": [],
+                "closed_history": []
+            }
         }
 
         # 1. Attempt loading original state file
@@ -216,15 +222,13 @@ class SafetyManager:
 
     def set_trading_mode(self, mode: str, confirmation: str = "") -> tuple:
         target = mode.strip().upper()
-        # Legacy support: PAPER and DEMO modes are treated as LIVE internally
-        # but return True for backward compatibility
         if target in ("PAPER", "DEMO"):
-            self.state["trading_mode"] = "LIVE"
-            self.state["live_mode_confirmed"] = True
+            self.state["trading_mode"] = target
+            self.state["live_mode_confirmed"] = False
             self.save_state()
-            return True, f"🟡 Trading mode set to {target} (mapped to LIVE mode for execution)"
+            return True, f"🟡 Trading mode set to {target}"
         if target != "LIVE":
-            return False, f"❌ Only LIVE trading mode is supported. Got: '{mode}'. Use: `/mode live CONFIRM`"
+            return False, f"❌ Only LIVE, DEMO, or PAPER trading modes are supported. Got: '{mode}'. Use: `/mode live CONFIRM`"
 
         if confirmation.strip().upper() != "CONFIRM":
             return False, "⚠️ LIVE trading with real capital requires explicit confirmation.\nRun: `/enable_live CONFIRM` or `/mode live CONFIRM`"

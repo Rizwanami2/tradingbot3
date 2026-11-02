@@ -4263,8 +4263,6 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
         m_lbl = safety_manager.get_trading_mode() if (RISK_ENGINE_AVAILABLE and safety_manager) else "LIVE"
         if sub in ("on", "true", "enable", "both", "all", "1"):
             mode, ok = set_auto_push_mode("BOTH")
-        if RISK_ENGINE_AVAILABLE and safety_manager and safety_manager.get_trading_mode() == "LIVE":
-            mode, ok = set_auto_push_mode("BOTH")
             send_message(token, sender_id, (
                 f"⚡ *AUTOMATED PUSH ACTIVATED: BOTH GOLD & BITCOIN 🟢*\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
