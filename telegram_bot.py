@@ -206,7 +206,7 @@ elif _init_mode in ("BTC", "BITCOIN"):
 elif _init_mode in ("GOLD", "XAU"):
     ACTIVE_ASSET = "GOLD"
 else:
-    ACTIVE_ASSET = "BTC" 
+    ACTIVE_ASSET = "BOTH" 
 
 # Automated Trailing Stop & Breakeven Protection
 TRAILING_STOP_ENABLED = True
