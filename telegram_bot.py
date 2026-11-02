@@ -87,6 +87,17 @@ try:
 except Exception:
     CHARTS_AVAILABLE = False
 
+try:
+    from autotrader_pipeline import _get_cached_hist
+except Exception:
+    def _get_cached_hist(symbol: str, period: str = "350d"):
+        try:
+            from market_data import market_data_feed
+            asset = "GOLD" if ("GC=F" in str(symbol) or "GOLD" in str(symbol).upper()) else "BTC"
+            return market_data_feed.get_historical_bars(asset, period=period)
+        except Exception:
+            return None
+
 # Import Institutional Risk Management & Sizing Engine
 try:
     from risk_engine import (
@@ -278,6 +289,7 @@ def _calculate_predictive_entry_zones(hist: Any, asset_type: str, curr_price: fl
                 "zone_price": round(zone_level, 2),
                 "touch_count": touch_count,
                 "strength": round(strength, 2),
+                "confidence": round(strength, 2),
                 "distance_pct": round(distance_pct, 2),
                 "zone_type": "SUPPORT"
             })
@@ -290,6 +302,7 @@ def _calculate_predictive_entry_zones(hist: Any, asset_type: str, curr_price: fl
                 "zone_price": round(zone_level, 2),
                 "touch_count": touch_count,
                 "strength": round(strength, 2),
+                "confidence": round(strength, 2),
                 "distance_pct": round(distance_pct, 2),
                 "zone_type": "RESISTANCE"
             })
@@ -301,6 +314,7 @@ def _calculate_predictive_entry_zones(hist: Any, asset_type: str, curr_price: fl
                 "zone_price": round(zone_center, 2),
                 "touch_count": 1,
                 "strength": round(strength, 2),
+                "confidence": round(strength, 2),
                 "distance_pct": round((curr_price - zone_center) / curr_price * 100, 2),
                 "zone_type": zone_type
             })
@@ -309,6 +323,7 @@ def _calculate_predictive_entry_zones(hist: Any, asset_type: str, curr_price: fl
                 "zone_price": round(zone_center, 2),
                 "touch_count": 1,
                 "strength": round(strength, 2),
+                "confidence": round(strength, 2),
                 "distance_pct": round((zone_center - curr_price) / curr_price * 100, 2),
                 "zone_type": zone_type
             })
@@ -2400,6 +2415,13 @@ def approve_active_setup(token: str, chat_id: str, asset: str) -> dict:
             f"🛡️ Auto-trailing and breakeven monitor active."
         )
         send_message(token, chat_id, reply_txt)
+        if CHARTS_AVAILABLE:
+            sym_app = res.get('symbol', 'GC=F' if asset == 'GOLD' else 'BTC-USD')
+            threading.Thread(
+                target=_send_chart_async,
+                args=(token, chat_id, sym_app, f"📈 Execution Chart: {asset} #{res['ticket']}"),
+                daemon=True
+            ).start()
         return {"success": True, "ticket": res.get("ticket")}
     elif res.get("requires_confirmation"):
         send_message(token, chat_id, f"⚠️ *FIRST LIVE TRADE CONFIRMATION REQUIRED ({asset})*\n• Price: `${setup['entry']:,.2f}`\n• Risk: `${setup.get('risk_usd', 50):,.2f}`\nReply with `/confirm_trade YES` to authorize execution.")
@@ -2995,7 +3017,7 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
     Central command processor for Telegram bot.
     Supports both Modern Combined Hubs and Direct Legacy Shortcuts.
     """
-    global AUTO_TRADE_MODE, AUTO_TRADE_LIVE, TRAILING_STOP_ENABLED, ACTIVE_CHAT_ID
+    global AUTO_TRADE_MODE, AUTO_TRADE_LIVE, TRAILING_STOP_ENABLED, ACTIVE_CHAT_ID, market_data_feed, live_broker, safety_manager, learning_engine, omniscient_matrix, neuro_predictor
 
     if sender_id and sender_id not in ("YOUR_TELEGRAM_CHAT_ID_HERE", "0", ""):
         ACTIVE_CHAT_ID = str(sender_id)
@@ -3586,7 +3608,20 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             send_message(token, sender_id, f"❌ Error disconnecting MT5: {e}")
         return
 
-    # ── 2C. DIRECT MT5 TRADE COMMANDS ──
+    # ── 2C. DIRECT MT5 TRADE COMMANDS & COMBINED SHORTCUTS ──
+    if cmd in ("/buy", "/sell"):
+        parts = args_lower.split()
+        sub_asset = parts[0] if parts else ""
+        if "gold" in sub_asset or "xau" in sub_asset:
+            process_telegram_command(token, sender_id, sender_name, f"/{cmd.replace('/', '')}_gold")
+            return
+        elif "btc" in sub_asset or "bitcoin" in sub_asset:
+            process_telegram_command(token, sender_id, sender_name, f"/{cmd.replace('/', '')}_btc")
+            return
+        else:
+            send_message(token, sender_id, f"💡 *Usage:* `{cmd} gold` or `{cmd} btc`\nExample: `/buy gold` or `/sell btc`")
+            return
+
     if cmd in ("/buy_gold", "/buygold", "/sell_gold", "/sellgold", "/buy_btc", "/buybtc", "/sell_btc", "/sellbtc"):
         if not (MT5_EXECUTOR_AVAILABLE and live_broker):
             send_message(token, sender_id, "⚠️ MT5 Executor module not available.")
@@ -3670,8 +3705,8 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
         return
 
     # ── 3. MODERN TRADE HUB (/trade [buy|sell|close|auto]) ──
-    # Dedicated signal commands - returns only the signal setup (no macro/news)
-    if cmd in ("/signal_gold", "/signalgold"):
+    # Combined & Dedicated Signal Commands (/signal, /signals, /alert, /alerts, /signal_gold, /signal_btc)
+    if cmd in ("/signal", "/signals", "/alert", "/alerts", "/signal_gold", "/signalgold", "/signal_btc", "/signalbtc"):
         if not (MARKET_DATA_AVAILABLE and market_data_feed):
             send_message(token, sender_id, "⚠️ Market data feed unavailable. Cannot compute signal.")
             return
@@ -3716,6 +3751,10 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             ]
         }
         send_message(token, sender_id, signal_msg, reply_markup=signal_markup)
+        if CHARTS_AVAILABLE:
+            g_buf = generate_mt5_chart("GC=F", "GOLD (XAU/USD)", df_input=g.get("hist"))
+            if g_buf:
+                send_telegram_chart(token, sender_id, g_buf, f"🥇 Predictive Signal Chart: Gold (${g['price']:,.2f}) | {g_dom}")
         return
 
     if cmd in ("/signal_btc", "/signalbtc"):
@@ -3763,6 +3802,10 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             ]
         }
         send_message(token, sender_id, signal_msg, reply_markup=signal_markup)
+        if CHARTS_AVAILABLE:
+            b_buf = generate_mt5_chart("BTC-USD", "BITCOIN (BTC-USD)", df_input=b.get("hist"))
+            if b_buf:
+                send_telegram_chart(token, sender_id, b_buf, f"₿ Predictive Signal Chart: Bitcoin (${b['price']:,.2f}) | {b_dom}")
         return
 
     # ── 2C. LEVEL COMMANDS (/level_gold | /level_btc | /levelgold | /levelbtc) ──
@@ -3788,6 +3831,10 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             f"💡 Use /signal_gold for full signal ticket."
         )
         send_message(token, sender_id, levels_msg)
+        if CHARTS_AVAILABLE:
+            g_buf = generate_mt5_chart("GC=F", "GOLD (Key Levels)", df_input=g.get("hist"))
+            if g_buf:
+                send_telegram_chart(token, sender_id, g_buf, f"📐 Gold Key Levels Chart (${lv['curr']:,.2f})")
         return
 
     if cmd in ("/level_btc", "/levelbtc"):
@@ -3812,6 +3859,10 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             f"💡 Use /signal_btc for full signal ticket."
         )
         send_message(token, sender_id, levels_msg)
+        if CHARTS_AVAILABLE:
+            b_buf = generate_mt5_chart("BTC-USD", "BITCOIN (Key Levels)", df_input=b.get("hist"))
+            if b_buf:
+                send_telegram_chart(token, sender_id, b_buf, f"📐 Bitcoin Key Levels Chart (${lv['curr']:,.2f})")
         return
 
     # ── 3. MODERN TRADE HUB (/trade [buy|sell|close|auto]) ──
@@ -4761,6 +4812,11 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
                     ]
                 }
                 send_message(token, sender_id, sim_msg, reply_markup=predict_markup)
+                if CHARTS_AVAILABLE:
+                    sym_c = "GC=F" if asset_target == "GOLD" else "BTC-USD"
+                    buf_c = generate_mt5_chart(sym_c, f"{asset_target} (Forecast)", df_input=item.get("hist"))
+                    if buf_c:
+                        send_telegram_chart(token, sender_id, buf_c, f"🔮 Digital Twin Forecast Chart: {asset_target}")
             else:
                 send_message(token, sender_id, "⚠️ Outcome predictor engine unavailable.")
             return
@@ -4800,6 +4856,15 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
                 ]
             }
             send_message(token, sender_id, dual_card, reply_markup=markup)
+            if CHARTS_AVAILABLE:
+                if g:
+                    g_buf = generate_mt5_chart("GC=F", "GOLD (Digital Twin)", df_input=g.get("hist"))
+                    if g_buf:
+                        send_telegram_chart(token, sender_id, g_buf, f"🔮 Digital Twin Forecast Chart: Gold (${g['price']:,.2f})")
+                if b:
+                    b_buf = generate_mt5_chart("BTC-USD", "BITCOIN (Digital Twin)", df_input=b.get("hist"))
+                    if b_buf:
+                        send_telegram_chart(token, sender_id, b_buf, f"🔮 Digital Twin Forecast Chart: Bitcoin (${b['price']:,.2f})")
             return
 
     # ── 7F. PREDICTIVE ENTRY ZONES (/predict_gold | /predict_btc | /predictgold | /predictbtc) ──
@@ -4840,7 +4905,7 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
 
             if buy_zones:
                 for z in buy_zones[:5]:
-                    conf_bar = "🟢" * int(z["confidence"] * 10) + "⚪" * (10 - int(z["confidence"] * 10))
+                    conf_bar = "🟢" * int(z.get("confidence", z.get("strength", 0.8)) * 10) + "⚪" * (10 - int(z.get("confidence", z.get("strength", 0.8)) * 10))
                     zone_price = z["zone_price"]
                     # Calculate SL/TP for this zone using risk_engine
                     try:
@@ -4869,7 +4934,7 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
                     except Exception:
                         msg_lines.append(
                             f"• `${zone_price:,.2f}` - {z['zone_type']} ({z['distance_pct']:.1f}% below)\n"
-                            f"  Strength: `{z['strength']:.2f}` | Touches: `{z['touch_count']}` | Confidence: `{z['confidence']:.0%}`"
+                            f"  Strength: `{z['strength']:.2f}` | Touches: `{z['touch_count']}` | Confidence: `{z.get('confidence', z.get('strength', 0.8)):.0%}`"
                         )
             else:
                 msg_lines.append("• No buy zones detected within 3% of current price.")
@@ -4879,7 +4944,7 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
 
             if sell_zones:
                 for z in sell_zones[:5]:
-                    conf_bar = "🟢" * int(z["confidence"] * 10) + "⚪" * (10 - int(z["confidence"] * 10))
+                    conf_bar = "🟢" * int(z.get("confidence", z.get("strength", 0.8)) * 10) + "⚪" * (10 - int(z.get("confidence", z.get("strength", 0.8)) * 10))
                     zone_price = z["zone_price"]
                     try:
                         strat_levels = calculate_strategy_levels(
@@ -4907,7 +4972,7 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
                     except Exception:
                         msg_lines.append(
                             f"• `${zone_price:,.2f}` - {z['zone_type']} ({z['distance_pct']:.1f}% above)\n"
-                            f"  Strength: `{z['strength']:.2f}` | Touches: `{z['touch_count']}` | Confidence: `{z['confidence']:.0%}`"
+                            f"  Strength: `{z['strength']:.2f}` | Touches: `{z['touch_count']}` | Confidence: `{z.get('confidence', z.get('strength', 0.8)):.0%}`"
                         )
             else:
                 sell_zones.append("• No sell zones detected within 3% of current price.")
@@ -4934,6 +4999,10 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
                 ]
             }
             send_message(token, sender_id, predict_msg, reply_markup=predict_markup)
+            if CHARTS_AVAILABLE:
+                pz_buf = generate_mt5_chart(symbol, f"{asset_type} (Predictive Zones)", df_input=hist)
+                if pz_buf:
+                    send_telegram_chart(token, sender_id, pz_buf, f"🎯 Predictive Zones Chart: {asset_type} (${curr_price:,.2f})")
         except Exception as e:
             logger.error(f"Predictive zone error: {e}")
             send_message(token, sender_id, f"❌ Error computing predictive zones: {e}")
