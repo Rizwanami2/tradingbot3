@@ -3324,6 +3324,151 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
                 send_telegram_chart(token, sender_id, g_buf, f"📊 MT5 Chart Scan: Gold (${data['gold']['price']:,.2f}) | {data['gold']['verdict']}")
         return
 
+    # ── 2B. PREDICTIVE SIGNAL COMMANDS (/signal_gold | /signal_btc | /signalgold | /signalbtc) ──
+    # Dedicated signal commands - returns only the signal setup (no macro/news)
+    if cmd in ("/signal_gold", "/signalgold"):
+        if not (MARKET_DATA_AVAILABLE and market_data_feed):
+            send_message(token, sender_id, "⚠️ Market data feed unavailable. Cannot compute signal.")
+            return
+        data = run_full_pipeline()
+        g = data.get("gold")
+        if not g:
+            send_message(token, sender_id, "⚠️ Gold data temporarily unavailable. Please retry.")
+            return
+        lv = g["levels"]
+        strat_info = g.get("lot_info", {})
+        if INSTITUTIONAL_AVAILABLE and omniscient_matrix:
+            try:
+                omniscient_matrix.evaluate_full_matrix(data)
+            except Exception:
+                pass
+        m_st = omniscient_matrix.get_latest_matrix() if (INSTITUTIONAL_AVAILABLE and omniscient_matrix) else {}
+        g_mat = m_st.get("gold", {})
+        g_dom = g.get("dominant_side", "BUY")
+        g_act = g.get("buy", g) if g_dom == "BUY" else g.get("sell", g)
+        signal_msg = (
+            f"🥇 *GOLD (XAU/USD) — PREDICTIVE SIGNAL*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"• Current Price: `${g['price']:,.2f}`\n"
+            f"• Signal: *{'🟢 BUY (LONG)' if g_dom == 'BUY' else '🔴 SELL (SHORT)'}*\n"
+            f"• Confluence Score: `{g_act['final_score']}/10`\n"
+            f"• HTF Bias: `{g.get('htf_bias', {}).get('simple_bias', 'Neutral')}`\n"
+            f"• Verdict: {g_act['verdict'][:40]}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📋 *Signal Ticket:*\n"
+            f"• Entry: `${g_act['entry']:,.2f}`\n"
+            f"• SL: `${g_act['stop_loss']:,.2f}`\n"
+            f"• TP1: `${g_act['tp1']:,.2f}` | TP2: `${g_act['tp2']:,.2f}`\n"
+            f"• Lot Size: `{strat_info.get('lots', 0.05)}`\n"
+            f"• Risk/Reward: `1:{g_act['rr']:.2f}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"💡 _Use /buy_gold or /sell_gold to execute this signal._"
+        )
+        signal_markup = {
+            "inline_keyboard": [
+                [{"text": "🟢 Buy Gold", "callback_data": "buy_gold"}, {"text": "🔴 Sell Gold", "callback_data": "sell_gold"}],
+                [{"text": "📊 Dual Scan", "callback_data": "scan"}, {"text": "🔄 Refresh Signal", "callback_data": "signal_gold"}]
+            ]
+        }
+        send_message(token, sender_id, signal_msg, reply_markup=signal_markup)
+        return
+
+    if cmd in ("/signal_btc", "/signalbtc"):
+        if not (MARKET_DATA_AVAILABLE and market_data_feed):
+            send_message(token, sender_id, "⚠️ Market data feed unavailable. Cannot compute signal.")
+            return
+        data = run_full_pipeline()
+        b = data.get("btc")
+        if not b:
+            send_message(token, sender_id, "⚠️ Bitcoin data temporarily unavailable. Please retry.")
+            return
+        lv = b["levels"]
+        strat_info = b.get("lot_info", {})
+        if INSTITUTIONAL_AVAILABLE and omniscient_matrix:
+            try:
+                omniscient_matrix.evaluate_full_matrix(data)
+            except Exception:
+                pass
+        m_st = omniscient_matrix.get_latest_matrix() if (INSTITUTIONAL_AVAILABLE and omniscient_matrix) else {}
+        b_mat = m_st.get("btc", {})
+        b_dom = b.get("dominant_side", "BUY")
+        b_act = b.get("buy", b) if b_dom == "BUY" else b.get("sell", b)
+        signal_msg = (
+            f"₿ *BITCOIN (BTC/USD) — PREDICTIVE SIGNAL*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"• Current Price: `${b['price']:,.2f}`\n"
+            f"• Signal: *{'🟢 BUY (LONG)' if b_dom == 'BUY' else '🔴 SELL (SHORT)'}*\n"
+            f"• Confluence Score: `{b_act['final_score']}/10`\n"
+            f"• HTF Bias: `{b.get('htf_bias', {}).get('simple_bias', 'Neutral')}`\n"
+            f"• Verdict: {b_act['verdict'][:40]}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📋 *Signal Ticket:*\n"
+            f"• Entry: `${b_act['entry']:,.2f}`\n"
+            f"• SL: `${b_act['stop_loss']:,.2f}`\n"
+            f"• TP1: `${b_act['tp1']:,.2f}` | TP2: `${b_act['tp2']:,.2f}`\n"
+            f"• Lot Size: `{strat_info.get('lots', 0.05)}` BTC\n"
+            f"• Risk/Reward: `1:{b_act['rr']:.2f}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"💡 _Use /buy_btc or /sell_btc to execute this signal._"
+        )
+        signal_markup = {
+            "inline_keyboard": [
+                [{"text": "🟢 Buy BTC", "callback_data": "buy_btc"}, {"text": "🔴 Sell BTC", "callback_data": "sell_btc"}],
+                [{"text": "📊 Dual Scan", "callback_data": "scan"}, {"text": "🔄 Refresh Signal", "callback_data": "signal_btc"}]
+            ]
+        }
+        send_message(token, sender_id, signal_msg, reply_markup=signal_markup)
+        return
+
+    # ── 2C. LEVEL COMMANDS (/level_gold | /level_btc | /levelgold | /levelbtc) ──
+    if cmd in ("/level_gold", "/levelgold"):
+        if not (MARKET_DATA_AVAILABLE and market_data_feed):
+            send_message(token, sender_id, "⚠️ Market data feed unavailable.")
+            return
+        data = run_full_pipeline()
+        g = data.get("gold")
+        if not g:
+            send_message(token, sender_id, "⚠️ Gold data unavailable.")
+            return
+        lv = g["levels"]
+        levels_msg = (
+            f"🥇 *GOLD KEY LEVELS*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"• Current Price: `${lv['curr']:,.2f}`\n"
+            f"• Support (S1): `${lv['s1']:,.2f}`\n"
+            f"• Resistance (R1): `${lv['r1']:,.2f}`\n"
+            f"• Golden Pocket: `${lv['fib_650']:,.0f} - ${lv['fib_618']:,.0f}`\n"
+            f"• 200 SMA: `${lv['ma200']:,.2f}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"💡 Use /signal_gold for full signal ticket."
+        )
+        send_message(token, sender_id, levels_msg)
+        return
+
+    if cmd in ("/level_btc", "/levelbtc"):
+        if not (MARKET_DATA_AVAILABLE and market_data_feed):
+            send_message(token, sender_id, "⚠️ Market data feed unavailable.")
+            return
+        data = run_full_pipeline()
+        b = data.get("btc")
+        if not b:
+            send_message(token, sender_id, "⚠️ Bitcoin data unavailable.")
+            return
+        lv = b["levels"]
+        levels_msg = (
+            f"₿ *BITCOIN KEY LEVELS*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"• Current Price: `${lv['curr']:,.2f}`\n"
+            f"• Support (S1): `${lv['s1']:,.2f}`\n"
+            f"• Resistance (R1): `${lv['r1']:,.2f}`\n"
+            f"• Golden Pocket: `${lv['fib_650']:,.0f} - ${lv['fib_618']:,.0f}`\n"
+            f"• 200 SMA: `${lv['ma200']:,.2f}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"💡 Use /signal_btc for full signal ticket."
+        )
+        send_message(token, sender_id, levels_msg)
+        return
+
     # ── 3. MODERN TRADE HUB (/trade [buy|sell|close|auto]) ──
     if cmd in ("/close_all", "/closeall", "/auto_trade", "/autotrade", "/trade"):
         if cmd == "/buy_gold" or cmd == "/buygold": action_mode = "buy gold"
