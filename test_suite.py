@@ -253,6 +253,10 @@ class TestHardAssetProject(unittest.TestCase):
             "/cockpit",
             "/omni",
             "/terminal",
+            "/asset",
+            "/asset btc",
+            "/asset gold",
+            "/asset both",
 
             # Modern Market Hub & Subcommands
             "/market",

@@ -193,6 +193,21 @@ else:
     AUTO_PUSH_MODE = "OFF"
     AUTO_PUSH_ENABLED = False
 
+# Active Asset Selection: 'BTC', 'GOLD', 'BOTH' (Controls scanning, alerting, and trading focus)
+_init_asset = (os.environ.get("ACTIVE_ASSET", "") or os.environ.get("TRADING_ASSET", "")).strip().upper()
+if _init_asset in ("BTC", "BITCOIN", "BTCUSD"):
+    ACTIVE_ASSET = "BTC"
+elif _init_asset in ("GOLD", "XAU", "XAUUSD"):
+    ACTIVE_ASSET = "GOLD"
+elif _init_asset in ("BOTH", "ALL"):
+    ACTIVE_ASSET = "BOTH"
+elif _init_mode in ("BTC", "BITCOIN"):
+    ACTIVE_ASSET = "BTC"
+elif _init_mode in ("GOLD", "XAU"):
+    ACTIVE_ASSET = "GOLD"
+else:
+    ACTIVE_ASSET = "BTC" 
+
 # Automated Trailing Stop & Breakeven Protection
 TRAILING_STOP_ENABLED = True
 
@@ -468,6 +483,39 @@ def is_auto_push_active(asset: str) -> bool:
         return True
     asset_norm = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
     return mode == asset_norm
+
+
+def is_asset_enabled(asset: str) -> bool:
+    """Returns True if the asset is enabled for scanning, alerting, and trading."""
+    mode = (ACTIVE_ASSET or "BOTH").upper()
+    if mode in ("BOTH", "ALL"):
+        return True
+    asset_norm = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
+    return mode == asset_norm
+
+
+def save_active_asset_state(asset_str: str):
+    """Persists active asset mode into safety_state.json (git-ignored)."""
+    if RISK_ENGINE_AVAILABLE and safety_manager:
+        try:
+            safety_manager.state["active_asset"] = asset_str
+            safety_manager.save_state()
+        except Exception:
+            pass
+
+
+def set_active_asset(mode_str: str) -> str:
+    """Sets ACTIVE_ASSET to 'BTC', 'GOLD', or 'BOTH' and persists state."""
+    global ACTIVE_ASSET
+    m = mode_str.strip().upper()
+    if m in ("BTC", "BITCOIN", "BTCUSD"):
+        ACTIVE_ASSET = "BTC"
+    elif m in ("GOLD", "XAU", "XAUUSD"):
+        ACTIVE_ASSET = "GOLD"
+    else:
+        ACTIVE_ASSET = "BOTH"
+    save_active_asset_state(ACTIVE_ASSET)
+    return ACTIVE_ASSET
 
 
 def save_auto_push_state(mode_str: str):
@@ -2062,8 +2110,9 @@ def format_welcome_menu(sender_name: str) -> str:
 
     b_pend = get_pending_setup("BTC")
     g_pend = get_pending_setup("GOLD")
-    g_state = f"💼 In Trade (#{g_pend.get('ticket')})" if (g_pend and g_pend.get("status") == "EXECUTED") else ("⏳ Pending Approval" if (g_pend and g_pend.get("status") == "PENDING") else "🟢 Scanning 1M")
-    b_state = f"💼 In Trade (#{b_pend.get('ticket')})" if (b_pend and b_pend.get("status") == "EXECUTED") else ("⏳ Pending Approval" if (b_pend and b_pend.get("status") == "PENDING") else "🟢 Scanning 1M")
+    g_state = f"💼 In Trade (#{g_pend.get('ticket')})" if (g_pend and g_pend.get("status") == "EXECUTED") else ("⏳ Pending Approval" if (g_pend and g_pend.get("status") == "PENDING") else ("🟢 Scanning 1M" if is_asset_enabled("GOLD") else "⚪ Muted (BTC Only)"))
+    b_state = f"💼 In Trade (#{b_pend.get('ticket')})" if (b_pend and b_pend.get("status") == "EXECUTED") else ("⏳ Pending Approval" if (b_pend and b_pend.get("status") == "PENDING") else ("🟢 Scanning 1M" if is_asset_enabled("BTC") else "⚪ Muted (Gold Only)"))
+    asset_focus_label = "₿ Bitcoin Only (Gold Muted)" if ACTIVE_ASSET == "BTC" else ("🥇 Gold Only (BTC Muted)" if ACTIVE_ASSET == "GOLD" else "⚡ Both Assets (Gold & BTC)")
 
     return (
         f"🏛️ *HARD-ASSET TRADING ENGINE (GOLD & BITCOIN)*\n"
@@ -2072,9 +2121,10 @@ def format_welcome_menu(sender_name: str) -> str:
         f"🎛️ *System State:*\n"
         f"• Execution Mode  : `{mode_badge}`\n"
         f"• Broker Feed     : `{mt5_status}`\n"
+        f"• Asset Focus     : `{asset_focus_label}`\n"
         f"• Auto-Trade Mode : `{auto_desc}`\n"
         f"• Trailing Stop   : `ACTIVE 🛡️` (Auto Breakeven & Profit Trail)\n\n"
-        f"👥 *Concurrent Execution Slots (2 Slots Active):*\n"
+        f"👥 *Execution Slots:*\n"
         f"• 🥇 *Slot 1 (Gold)* : `{g_state}`\n"
         f"• ₿  *Slot 2 (BTC)*  : `{b_state}`\n\n"
         f"⚡ *Quick Commands:*\n"
@@ -2186,8 +2236,8 @@ def format_combined_cockpit() -> tuple[str, dict]:
 
     b_pend = get_pending_setup("BTC")
     g_pend = get_pending_setup("GOLD")
-    g_st = f"💼 In Trade (#{g_pend.get('ticket')})" if (g_pend and g_pend.get("status") == "EXECUTED") else ("⏳ Pending Approval" if (g_pend and g_pend.get("status") == "PENDING") else "🟢 Scanning 1M")
-    b_st = f"💼 In Trade (#{b_pend.get('ticket')})" if (b_pend and b_pend.get("status") == "EXECUTED") else ("⏳ Pending Approval" if (b_pend and b_pend.get("status") == "PENDING") else "🟢 Scanning 1M")
+    g_st = f"💼 In Trade (#{g_pend.get('ticket')})" if (g_pend and g_pend.get("status") == "EXECUTED") else ("⏳ Pending Approval" if (g_pend and g_pend.get("status") == "PENDING") else ("🟢 Scanning 1M" if is_asset_enabled("GOLD") else "⚪ Muted (BTC Only)"))
+    b_st = f"💼 In Trade (#{b_pend.get('ticket')})" if (b_pend and b_pend.get("status") == "EXECUTED") else ("⏳ Pending Approval" if (b_pend and b_pend.get("status") == "PENDING") else ("🟢 Scanning 1M" if is_asset_enabled("BTC") else "⚪ Muted (Gold Only)"))
 
     lines = [
         "🏛️ *HARD-ASSET INSTITUTIONAL COCKPIT*",
@@ -2580,6 +2630,14 @@ def handle_callback_query(token: str, cq: dict):
         process_telegram_command(token, sender_id, sender_name, "/autopush gold")
     elif data in ("autopush_btc", "push_btc"):
         process_telegram_command(token, sender_id, sender_name, "/autopush btc")
+    elif data in ("asset_btc", "set_asset_btc"):
+        process_telegram_command(token, sender_id, sender_name, "/asset btc")
+    elif data in ("asset_gold", "set_asset_gold"):
+        process_telegram_command(token, sender_id, sender_name, "/asset gold")
+    elif data in ("asset_both", "set_asset_both"):
+        process_telegram_command(token, sender_id, sender_name, "/asset both")
+    elif data in ("asset", "assets", "focus"):
+        process_telegram_command(token, sender_id, sender_name, "/asset")
     elif data in ("autopush", "push"):
         process_telegram_command(token, sender_id, sender_name, "/autopush")
     elif data in ("trail_on", "trail_enable"):
@@ -2896,7 +2954,7 @@ def auto_scanner_worker(token: str, chat_id_getter):
                 b_target['final_score'] >= 7
             )
             has_btc_open = live_broker.has_open_position("BTC") if (MT5_EXECUTOR_AVAILABLE and live_broker) else False
-            if is_qualified_b and not has_btc_open:
+            if is_asset_enabled("BTC") and is_qualified_b and not has_btc_open:
                 if should_send_alert("BTC", b_act, b_target['price'], b_target['final_score'], cooldown_seconds=ALERT_COOLDOWN_SECONDS):
                     setup_data = {
                         "asset": "BTC",
@@ -2950,7 +3008,7 @@ def auto_scanner_worker(token: str, chat_id_getter):
                 g_target['final_score'] >= 7
             )
             has_gold_open = live_broker.has_open_position("GOLD") if (MT5_EXECUTOR_AVAILABLE and live_broker) else False
-            if is_qualified_g and not has_gold_open:
+            if is_asset_enabled("GOLD") and is_qualified_g and not has_gold_open:
                 if should_send_alert("GOLD", g_act, g_target['price'], g_target['final_score'], cooldown_seconds=ALERT_COOLDOWN_SECONDS):
                     setup_data = {
                         "asset": "GOLD",
@@ -3006,7 +3064,9 @@ def auto_scanner_worker(token: str, chat_id_getter):
             b_pend = get_pending_setup("BTC")
             g_pend = get_pending_setup("GOLD")
 
-            if b_pend and b_pend.get("status") == "PENDING":
+            if not is_asset_enabled("BTC"):
+                btc_st = "MUTED"
+            elif b_pend and b_pend.get("status") == "PENDING":
                 b_age = int((current_time - b_pend.get("time", current_time)) // 60)
                 btc_st = f"Score {b['final_score']}/10 [Pending {b_age}m]"
             elif b_pend and b_pend.get("status") == "EXECUTED":
@@ -3014,7 +3074,9 @@ def auto_scanner_worker(token: str, chat_id_getter):
             else:
                 btc_st = f"Score {b['final_score']}/10"
 
-            if g_pend and g_pend.get("status") == "PENDING":
+            if not is_asset_enabled("GOLD"):
+                gold_st = "MUTED"
+            elif g_pend and g_pend.get("status") == "PENDING":
                 g_age = int((current_time - g_pend.get("time", current_time)) // 60)
                 gold_st = f"Score {g['final_score']}/10 [Pending {g_age}m]"
             elif g_pend and g_pend.get("status") == "EXECUTED":
@@ -4511,6 +4573,78 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
         send_message(token, sender_id, "\n".join(lines), reply_markup=pos_markup)
         return
 
+    # ── 5C. ACTIVE ASSET FOCUS CONTROLLER (/asset [btc|gold|both|status], /focus) ──
+    if cmd in ("/asset", "/assets", "/focus"):
+        sub = args_lower.strip()
+        if sub in ("btc", "bitcoin", "btcusd"):
+            set_active_asset("BTC")
+            set_auto_push_mode("BTC")
+            send_message(token, sender_id, (
+                "₿ *ACTIVE ASSET FOCUS: BITCOIN (BTC/USD) ONLY 🟢*\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "• 1-Minute Scanner  : Focusing strictly on Bitcoin (BTC/USD)\n"
+                "• Gold Scanner      : MUTED ⚪ (Zero Gold alerts, charts or trades)\n"
+                "• Auto-Trade Mode   : Active for Bitcoin (BTC/USD)\n"
+                "• Micro-Scalp Bounds: SL $100–$180 | TP1 1.15R | TP2 1.60R | BE +0.30R\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "💡 Switch anytime with `/asset both` or `/asset gold`."
+            ))
+            return
+        elif sub in ("gold", "xau", "xauusd"):
+            set_active_asset("GOLD")
+            set_auto_push_mode("GOLD")
+            send_message(token, sender_id, (
+                "🥇 *ACTIVE ASSET FOCUS: GOLD (XAU/USD) ONLY 🟢*\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "• 1-Minute Scanner  : Focusing strictly on Gold (XAU/USD)\n"
+                "• Bitcoin Scanner   : MUTED ⚪ (Zero Bitcoin alerts, charts or trades)\n"
+                "• Auto-Trade Mode   : Active for Gold (XAU/USD)\n"
+                "• Micro-Scalp Bounds: SL $1.80–$2.80 | TP1 1.15R | TP2 1.60R | BE +0.30R\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "💡 Switch anytime with `/asset both` or `/asset btc`."
+            ))
+            return
+        elif sub in ("both", "all"):
+            set_active_asset("BOTH")
+            set_auto_push_mode("BOTH")
+            send_message(token, sender_id, (
+                "⚡ *ACTIVE ASSET FOCUS: BOTH GOLD & BITCOIN 🟢*\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "• Dual 1-Minute Scanner : Scanning Gold (XAU) & Bitcoin (BTC) concurrently\n"
+                "• Auto-Trade Mode       : Active for both assets\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "💡 Switch anytime with `/asset btc` or `/asset gold`."
+            ))
+            return
+        else:
+            st_asset = "₿ BITCOIN ONLY (Gold Muted)" if ACTIVE_ASSET == "BTC" else ("🥇 GOLD ONLY (BTC Muted)" if ACTIVE_ASSET == "GOLD" else "⚡ BOTH (Gold & Bitcoin Active)")
+            reply_markup = {
+                "inline_keyboard": [
+                    [
+                        {"text": "₿ Bitcoin Only", "callback_data": "asset_btc"},
+                        {"text": "🥇 Gold Only", "callback_data": "asset_gold"}
+                    ],
+                    [
+                        {"text": "⚡ Both Gold & BTC", "callback_data": "asset_both"}
+                    ],
+                    [
+                        {"text": "⚡ Auto-Trade Hub", "callback_data": "autopush"},
+                        {"text": "📊 Live Scan", "callback_data": "scan"}
+                    ]
+                ]
+            }
+            send_message(token, sender_id, (
+                f"🎯 *ACTIVE ASSET CONTROLLER*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"• Current Asset Focus  : `{st_asset}`\n"
+                f"• Auto-Trade Mode      : `{AUTO_TRADE_MODE}`\n\n"
+                f"Select an option below or use:\n"
+                f"• `/asset btc`  ──► Focus exclusively on Bitcoin (Gold muted)\n"
+                f"• `/asset gold` ──► Focus exclusively on Gold (Bitcoin muted)\n"
+                f"• `/asset both` ──► Enable both Gold & Bitcoin concurrently"
+            ), reply_markup=reply_markup)
+            return
+
     # ── 5B. AUTOMATED PUSH CONTROLLER HUB (/autopush [on|off|both|gold|btc|status], /push) ──
     if cmd in ("/autopush", "/push"):
         sub = args_lower.strip()
@@ -5351,6 +5485,23 @@ def start_bot():
     if not ok:
         print(f"❌ Telegram Connection Failed: {bot_first_name}")
         return
+
+    # Restore Active Asset Selection from .env or persistent storage
+    env_asset = (os.environ.get("ACTIVE_ASSET", "") or os.environ.get("TRADING_ASSET", "")).strip().upper()
+    if env_asset in ("BTC", "BITCOIN", "BTCUSD"):
+        set_active_asset("BTC")
+        print("🎯 Active Asset Focus from .env: BITCOIN ONLY (Gold Muted)")
+    elif env_asset in ("GOLD", "XAU", "XAUUSD"):
+        set_active_asset("GOLD")
+        print("🎯 Active Asset Focus from .env: GOLD ONLY (BTC Muted)")
+    elif env_asset in ("BOTH", "ALL"):
+        set_active_asset("BOTH")
+        print("🎯 Active Asset Focus from .env: BOTH (Gold & Bitcoin Active)")
+    elif RISK_ENGINE_AVAILABLE and safety_manager:
+        persisted_asset = safety_manager.state.get("active_asset")
+        if persisted_asset:
+            set_active_asset(persisted_asset)
+            print(f"🎯 Restored Active Asset Focus from storage: {persisted_asset}")
 
     # Restore Auto Push / Auto Trade Mode from persistent storage or .env
     env_push = (os.environ.get("AUTO_TRADE", "") or os.environ.get("AUTO_PUSH", "") or os.environ.get("AUTO_EXECUTE", "")).strip().upper()

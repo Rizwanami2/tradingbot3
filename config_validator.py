@@ -94,6 +94,15 @@ def validate_config(fail_fast: bool = False) -> Tuple[bool, List[str]]:
     if mt5_path and not os.path.exists(mt5_path):
         errors.append(f"Configured MT5_PATH does not exist: '{mt5_path}'")
 
+    # 2b. Active Asset and Auto-Trade Watchlist
+    active_asset = os.environ.get("ACTIVE_ASSET", "BTC").strip().upper()
+    if active_asset and active_asset not in ("BTC", "GOLD", "BOTH", "ALL"):
+        errors.append(f"ACTIVE_ASSET='{active_asset}' is invalid. Allowed values: 'BTC', 'GOLD', 'BOTH'.")
+
+    auto_trade = os.environ.get("AUTO_TRADE", "BTC").strip().upper()
+    if auto_trade and auto_trade not in ("BTC", "GOLD", "BOTH", "OFF", "ON", "ALL", "TRUE", "ENABLE", "1", "YES"):
+        errors.append(f"AUTO_TRADE='{auto_trade}' is invalid. Allowed values: 'BTC', 'GOLD', 'BOTH', 'OFF'.")
+
     # 3. Numeric Safety Ranges
     def check_float(var_name: str, default: float, min_val: float, max_val: float, inclusive_max: bool = False):
         raw = os.environ.get(var_name, str(default)).strip()
