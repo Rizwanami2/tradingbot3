@@ -559,7 +559,7 @@ class SelfLearningEngine:
         reg = regime or "TREND_EXPANSION"
 
         regime_brains = self.memory.get("regime_brains", {}).get(asset_norm, {})
-        active_brain = regime_brains.get(reg, self.memory["weights"].get(asset_norm, DEFAULT_WEIGHTS))
+        active_brain = regime_brains.get(reg, REGIME_BRAIN_DEFAULTS.get(reg, DEFAULT_WEIGHTS))
 
         earned_score = 0.0
         max_score = 0.0

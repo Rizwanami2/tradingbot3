@@ -538,7 +538,7 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
         sell_ma50 = curr < ma50
         sell_rsi = (rsi_sell_min <= rsi <= rsi_sell_max) or (rsi >= rsi_sell_overbought)
         sell_gsr = gsr < 75
-        sell_vol = vol30 < 25
+        sell_vol = vol30 < 22
         sell_no_trap = trap_state != "BEAR_TRAP"
         sell_near_res = (sw_high - curr) / curr <= 0.05
 
@@ -551,7 +551,7 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
         if sell_gsr: score_sell += 1; factors_sell.append(f"Metals Value: GSR compressed ({gsr:.1f}x)")
         if sell_vol: score_sell += 1; factors_sell.append(f"Risk: Volatility tradeable ({vol30:.1f}%)")
         if sell_no_trap: score_sell += 1; factors_sell.append("Microstructure: Clean auction; no Bear Trap")
-        if (sw_high - curr) / curr <= 0.08: score_sell += 1; factors_sell.append("Structure: Distribution near resistance")
+        if sell_near_res: score_sell += 1; factors_sell.append("Structure: Distribution near resistance")
 
         # Multi-Timeframe Alignment Sell Factor (GOLD)
         feat_mtf_sell = False

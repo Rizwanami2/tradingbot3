@@ -221,7 +221,7 @@ class SafetyManager:
 
         if confirmation.strip().upper() != "CONFIRM":
             return False, "⚠️ LIVE trading with real capital requires explicit confirmation.\nRun: `/enable_live CONFIRM` or `/mode live CONFIRM`"
-        
+
         self.state["trading_mode"] = "LIVE"
         self.state["live_mode_confirmed"] = True
         self.save_state()
