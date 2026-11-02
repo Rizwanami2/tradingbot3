@@ -971,10 +971,13 @@ class MT5LiveBroker:
             point = sym_info.point or (10 ** -digits)
             spread_buffer = max(sym_info.spread * point, 2 * point)
             is_gold = ("XAU" in symbol.upper() or "GOLD" in symbol.upper())
-            # Break-Even Plus (BE+): Guarantee covering spread, commissions, and min profit
-            # $0.25 per 0.01 lot round trip cost must be covered
-            cost_buffer_pips = self.breakeven_cost_buffer_pips.get("GOLD" if is_gold else "BTC", 5.0)
-            be_offset = max(0.50, round(spread_buffer + cost_buffer_pips + 0.35, digits)) if is_gold else max(50.0, round(spread_buffer + cost_buffer_pips + 25.0, digits))
+            stops_level = getattr(sym_info, "stops_level", 0) or 0
+            min_stop_gap = max(stops_level * point, sym_info.spread * point, 2 * point)
+            # Break-Even Plus (BE+): Realistic buffer covering spread + comms, safely clamped
+            if is_gold:
+                be_offset = max(0.15, min(0.35, round(spread_buffer + 0.10, digits)))
+            else:
+                be_offset = max(5.0, min(15.0, round(spread_buffer + 3.0, digits)))
 
             is_buy = p.type == mt5.ORDER_TYPE_BUY
             curr_price = tick.bid if is_buy else tick.ask
@@ -1025,8 +1028,16 @@ class MT5LiveBroker:
             peak_profit_dist = (peak_price - entry) if is_buy else (entry - peak_price)
             peak_r = peak_profit_dist / risk_dist
 
-            # ── 2. Strategy-Specific Breakeven Trigger (BE+ Offset) ──
-            breakeven_sl = round(entry + be_offset if is_buy else entry - be_offset, digits)
+            # ── 2. Strategy-Specific Breakeven Trigger (BE+ Offset: Clamped below current market) ──
+            if is_buy:
+                target_be = entry + be_offset
+                max_be_sl = curr_price - min_stop_gap - point
+                breakeven_sl = round(min(target_be, max_be_sl), digits)
+            else:
+                target_be = entry - be_offset
+                min_be_sl = curr_price + min_stop_gap + point
+                breakeven_sl = round(max(target_be, min_be_sl), digits)
+
             if not hasattr(self, "tracked_live_tickets"):
                 self.tracked_live_tickets = {}
             self.tracked_live_tickets[ticket] = {
@@ -1039,14 +1050,15 @@ class MT5LiveBroker:
                 "tp": curr_tp
             }
             needs_breakeven = False
-            if is_buy and current_r >= active_be_r and curr_sl < entry:
+            if is_buy and current_r >= active_be_r and curr_sl < entry and breakeven_sl > curr_sl:
                 needs_breakeven = True
-            elif not is_buy and current_r >= active_be_r and (curr_sl > entry or curr_sl == 0):
+            elif not is_buy and current_r >= active_be_r and (curr_sl > entry or curr_sl == 0) and (curr_sl == 0 or breakeven_sl < curr_sl):
                 needs_breakeven = True
 
             if needs_breakeven:
                 res = self.modify_position_sltp(ticket, breakeven_sl, curr_tp)
                 if res.get("success"):
+                    curr_sl = breakeven_sl
                     asset_norm = "GOLD" if ("XAU" in symbol or "GOLD" in symbol) else "BTC"
                     events.append({
                         "ticket": ticket,
@@ -1055,7 +1067,7 @@ class MT5LiveBroker:
                         "type": "BUY" if is_buy else "SELL",
                         "strategy": strat_name,
                         "action": "BREAKEVEN",
-                        "old_sl": curr_sl,
+                        "old_sl": p.sl,
                         "new_sl": breakeven_sl,
                         "current_price": curr_price,
                         "profit_r": current_r,
@@ -1063,9 +1075,20 @@ class MT5LiveBroker:
                     })
                     continue
 
-            # ── 3. ATR-Based Swing Trailing ── Trail behind swing extreme with wick buffer ──
+            # ── 3. Profile-Aware Dynamic Trailing Engine (Ratio Baseline + Swing Auto-Ratcheting) ──
             if peak_r >= active_trail_start_r:
-                # Fetch recent MT5 data for swing level calculation
+                # 3a. Baseline dynamic ratio trailing stop
+                if is_buy:
+                    ratio_sl = round(peak_price - (risk_dist * active_trail_step_r), digits)
+                    candidate_sl = max(ratio_sl, breakeven_sl)
+                else:
+                    ratio_sl = round(peak_price + (risk_dist * active_trail_step_r), digits)
+                    candidate_sl = min(ratio_sl, breakeven_sl)
+
+                trail_type = "TRAILED"
+                extra_trail_info = ""
+
+                # 3b. Fetch recent MT5 data for swing structure upgrade
                 mt5_hist = None
                 try:
                     mt5_hist = self._get_mt5_hist(symbol, count=30,
@@ -1073,89 +1096,63 @@ class MT5LiveBroker:
                 except Exception:
                     mt5_hist = None
 
-                # Update swing levels for this position
                 if mt5_hist is not None and len(mt5_hist) > 10:
-                    self._update_swing_levels(ticket, is_buy, mt5_hist, lookback=self.swing_lookback)
+                    try:
+                        self._update_swing_levels(ticket, is_buy, mt5_hist, lookback=self.swing_lookback)
+                        swing_level = self._get_best_swing_level(ticket, is_buy)
+                        if swing_level > 0:
+                            atr = self._calculate_atr(mt5_hist, period=self.atr_lookback)
+                            min_dist = self.min_trail_distance_pips.get("GOLD" if is_gold else "BTC", 8.0)
+                            swing_sl = self._calculate_swing_trailing_sl(
+                                is_buy=is_buy, current_price=curr_price,
+                                swing_level=swing_level, atr=atr,
+                                buffer_pct=self.wick_buffer_pct,
+                                min_dist_pips=min_dist
+                            )
+                            if is_buy and swing_sl > candidate_sl:
+                                candidate_sl = round(swing_sl, digits)
+                                trail_type = "SWING_TRAIL"
+                                extra_trail_info = f" (swing={swing_level:,.2f}, ATR={atr:.2f})"
+                            elif (not is_buy) and swing_sl < candidate_sl:
+                                candidate_sl = round(swing_sl, digits)
+                                trail_type = "SWING_TRAIL"
+                                extra_trail_info = f" (swing={swing_level:,.2f}, ATR={atr:.2f})"
+                    except Exception:
+                        pass
 
-                # Get best swing level for trailing
-                swing_level = self._get_best_swing_level(ticket, is_buy)
-                if swing_level > 0:
-                    # ATR-based trailing with wick buffer
-                    atr = self._calculate_atr(mt5_hist, period=self.atr_lookback)
-                    min_dist = self.min_trail_distance_pips.get("GOLD" if is_gold else "BTC", 8.0)
+                # 3c. Safety Clamps against broker stops_level & market price
+                if is_buy:
+                    max_allowed_sl = curr_price - min_stop_gap - point
+                    candidate_sl = min(candidate_sl, max_allowed_sl)
+                    candidate_sl = max(candidate_sl, breakeven_sl)
+                    candidate_sl = round(candidate_sl, digits)
+                    should_trail = candidate_sl > curr_sl and (candidate_sl - curr_sl) >= (3 * point)
+                else:
+                    min_allowed_sl = curr_price + min_stop_gap + point
+                    candidate_sl = max(candidate_sl, min_allowed_sl)
+                    candidate_sl = min(candidate_sl, breakeven_sl)
+                    candidate_sl = round(candidate_sl, digits)
+                    should_trail = (curr_sl == 0 or candidate_sl < curr_sl) and abs(candidate_sl - curr_sl) >= (3 * point)
 
-                    if is_buy:
-                        # For BUY: trail SL below swing low with ATR + wick buffer
-                        new_sl = self._calculate_swing_trailing_sl(
-                            is_buy=True, current_price=curr_price,
-                            swing_level=swing_level, atr=atr,
-                            buffer_pct=self.wick_buffer_pct,
-                            min_dist_pips=min_dist
-                        )
-                        # Only trail UP (never move SL down for BUY)
-                        should_trail = new_sl > curr_sl and (new_sl - curr_sl) >= (5 * point)
-                        new_sl = max(new_sl, breakeven_sl)  # never below breakeven
-                    else:
-                        # For SELL: trail SL above swing high with ATR + wick buffer
-                        new_sl = self._calculate_swing_trailing_sl(
-                            is_buy=False, current_price=curr_price,
-                            swing_level=swing_level, atr=atr,
-                            buffer_pct=self.wick_buffer_pct,
-                            min_dist_pips=min_dist
-                        )
-                        # Only trail DOWN (never move SL up for SELL)
-                        should_trail = (curr_sl == 0 or new_sl < curr_sl) and abs(new_sl - curr_sl) >= (5 * point)
-                        new_sl = min(new_sl, breakeven_sl)  # never above breakeven
-
-                    if should_trail:
-                        new_sl = round(new_sl, digits)
-                        res = self.modify_position_sltp(ticket, new_sl, curr_tp)
-                        if res.get("success"):
-                            asset_norm = "GOLD" if ("XAU" in symbol or "GOLD" in symbol) else "BTC"
-                            events.append({
-                                "ticket": ticket,
-                                "symbol": symbol,
-                                "asset": asset_norm,
-                                "type": "BUY" if is_buy else "SELL",
-                                "strategy": strat_name,
-                                "action": "SWING_TRAIL",
-                                "old_sl": curr_sl,
-                                "new_sl": new_sl,
-                                "current_price": curr_price,
-                                "swing_level": swing_level,
-                                "atr": atr,
-                                "profit_r": current_r,
-                                "msg": f"📈 *[{strat_name}] SWING TRAIL:* #{ticket} `{symbol}` SL trailed to `${new_sl:,.2f}` (swing={swing_level:,.2f}, ATR={atr:.2f}, +{current_r:.2f}R)"
-                            })
-                    else:
-                        # Fallback to fixed-ratio trailing if swing data unavailable
-                        if is_buy:
-                            trailing_sl = round(peak_price - (risk_dist * active_trail_step_r), digits)
-                            trailing_sl = max(trailing_sl, breakeven_sl)
-                            should_trail = trailing_sl > curr_sl and (trailing_sl - curr_sl) >= (10 * point)
-                        else:
-                            trailing_sl = round(peak_price + (risk_dist * active_trail_step_r), digits)
-                            trailing_sl = min(trailing_sl, breakeven_sl)
-                            should_trail = (curr_sl == 0 or trailing_sl < curr_sl) and abs(trailing_sl - curr_sl) >= (10 * point)
-
-                        if should_trail:
-                            res = self.modify_position_sltp(ticket, trailing_sl, curr_tp)
-                            if res.get("success"):
-                                asset_norm = "GOLD" if ("XAU" in symbol or "GOLD" in symbol) else "BTC"
-                                events.append({
-                                    "ticket": ticket,
-                                    "symbol": symbol,
-                                    "asset": asset_norm,
-                                    "type": "BUY" if is_buy else "SELL",
-                                    "strategy": strat_name,
-                                    "action": "TRAILED",
-                                    "old_sl": curr_sl,
-                                    "new_sl": trailing_sl,
-                                    "current_price": curr_price,
-                                    "peak_price": peak_price,
-                                    "profit_r": current_r,
-                                    "msg": f"📈 *[{strat_name}] TRAILING ADVANCED:* #{ticket} `{symbol}` SL trailed to `${trailing_sl:,.2f}` (+{current_r:.2f}R — Profit Secured!)"
-                                })
+                if should_trail:
+                    res = self.modify_position_sltp(ticket, candidate_sl, curr_tp)
+                    if res.get("success"):
+                        curr_sl = candidate_sl
+                        asset_norm = "GOLD" if ("XAU" in symbol or "GOLD" in symbol) else "BTC"
+                        events.append({
+                            "ticket": ticket,
+                            "symbol": symbol,
+                            "asset": asset_norm,
+                            "type": "BUY" if is_buy else "SELL",
+                            "strategy": strat_name,
+                            "action": trail_type,
+                            "old_sl": p.sl,
+                            "new_sl": candidate_sl,
+                            "current_price": curr_price,
+                            "peak_price": peak_price,
+                            "profit_r": current_r,
+                            "msg": f"📈 *[{strat_name}] {trail_type}:* #{ticket} `{symbol}` SL trailed to `${candidate_sl:,.2f}` (+{current_r:.2f}R — Profit Secured!{extra_trail_info})"
+                        })
 
             # ── 4. REVERSAL DETECTION ── Close profitable position on confirmed reversal ──
             if mt5_hist is not None and len(mt5_hist) >= 20 and current_r >= 0.5:
@@ -1335,25 +1332,35 @@ class MT5LiveBroker:
                 logger.warning(msg)
                 return {"success": False, "error": msg}
 
+        stops_dist = max(sym_info.stops_level * point, sym_info.spread * point, 2 * point)
         aligned_limit = round(limit_price, digits)
         aligned_sl = round(stop_loss, digits)
         aligned_tp = round(take_profit, digits)
+
+        # Enforce valid limit placement relative to market and stops_level
         if is_buy:
-            if not (aligned_sl < aligned_limit < aligned_tp):
-                logger.warning(f"Inverted SL/TP for Limit BUY on {symbol}. Correcting.")
-                dist = abs(aligned_limit - aligned_sl)
+            if aligned_limit >= tick.ask:
+                aligned_limit = round(tick.ask - stops_dist, digits)
+            if aligned_sl >= aligned_limit:
+                dist = max(abs(limit_price - stop_loss), stops_dist * 2)
                 aligned_sl = round(aligned_limit - dist, digits)
-                aligned_tp = round(aligned_limit + (dist * 1.5), digits)
+            if aligned_tp <= aligned_limit:
+                dist = max(abs(take_profit - limit_price), stops_dist * 3)
+                aligned_tp = round(aligned_limit + dist, digits)
         else:
-            if not (aligned_tp < aligned_limit < aligned_sl):
-                logger.warning(f"Inverted SL/TP for Limit SELL on {symbol}. Correcting.")
-                dist = abs(aligned_limit - aligned_sl)
+            if aligned_limit <= tick.bid:
+                aligned_limit = round(tick.bid + stops_dist, digits)
+            if aligned_sl <= aligned_limit:
+                dist = max(abs(stop_loss - limit_price), stops_dist * 2)
                 aligned_sl = round(aligned_limit + dist, digits)
-                aligned_tp = round(aligned_limit - (dist * 1.5), digits)
+            if aligned_tp >= aligned_limit:
+                dist = max(abs(limit_price - take_profit), stops_dist * 3)
+                aligned_tp = round(aligned_limit - dist, digits)
 
         order_type = mt5.ORDER_TYPE_BUY_LIMIT if is_buy else mt5.ORDER_TYPE_SELL_LIMIT
         expiration_time = int(time.time() + (expiry_minutes * 60))
 
+        # Standard pending order filling is ORDER_FILLING_RETURN
         req = {
             "action": mt5.TRADE_ACTION_PENDING,
             "symbol": symbol,
@@ -1366,14 +1373,28 @@ class MT5LiveBroker:
             "comment": comment,
             "type_time": mt5.ORDER_TIME_SPECIFIED,
             "expiration": expiration_time,
-            "type_filling": mt5.ORDER_FILLING_IOC
+            "type_filling": mt5.ORDER_FILLING_RETURN
         }
         res = mt5.order_send(req)
+
+        # Fallback matrix: if expiration rejected (10022) or filling rejected (10030)
         if res is None or res.retcode != mt5.TRADE_RETCODE_DONE:
-            for filling in [mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN]:
-                req["type_filling"] = filling
-                res = mt5.order_send(req)
+            req_gtc = dict(req)
+            req_gtc["type_time"] = mt5.ORDER_TIME_GTC
+            req_gtc.pop("expiration", None)
+            res = mt5.order_send(req_gtc)
+            if res is not None and res.retcode == mt5.TRADE_RETCODE_DONE:
+                req = req_gtc
+
+        if res is None or res.retcode != mt5.TRADE_RETCODE_DONE:
+            for filling in [0, mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK]:
+                req_alt = dict(req)
+                req_alt["type_time"] = mt5.ORDER_TIME_GTC
+                req_alt.pop("expiration", None)
+                req_alt["type_filling"] = filling
+                res = mt5.order_send(req_alt)
                 if res is not None and res.retcode == mt5.TRADE_RETCODE_DONE:
+                    req = req_alt
                     break
 
         if res is not None and res.retcode == mt5.TRADE_RETCODE_DONE:
@@ -1862,13 +1883,23 @@ class MT5LiveBroker:
         info = mt5.symbol_info(sym)
         digits = getattr(info, "digits", 2)
         spread_pts = getattr(tick, "ask", 0) - getattr(tick, "bid", 0) if tick else 0.0
+        point = getattr(info, "point", 0.01) or (10 ** -digits)
+        stops_level = getattr(info, "stops_level", 0) or 0
+        min_stop_gap = max(stops_level * point, spread_pts, 2 * point)
         asset_key = "GOLD" if "XAU" in sym or "GOLD" in sym else "BTC"
-        # Include trading cost buffer in breakeven offset
-        cost_buffer_pips = self.breakeven_cost_buffer_pips.get(asset_key, 5.0)
-        be_offset = max(0.50, round(spread_pts + cost_buffer_pips + 0.35, digits)) if asset_key == "GOLD" else max(50.0, round(spread_pts + cost_buffer_pips + 25.0, digits))
+        if asset_key == "GOLD":
+            be_offset = max(0.15, min(0.35, round(spread_pts + 0.10, digits)))
+        else:
+            be_offset = max(5.0, min(15.0, round(spread_pts + 3.0, digits)))
 
         is_buy = (p.type == mt5.ORDER_TYPE_BUY)
-        new_sl = round(p.price_open + be_offset, digits) if is_buy else round(p.price_open - be_offset, digits)
+        curr_price = tick.bid if is_buy else tick.ask
+        if is_buy:
+            target_be = p.price_open + be_offset
+            new_sl = round(min(target_be, curr_price - min_stop_gap - point), digits)
+        else:
+            target_be = p.price_open - be_offset
+            new_sl = round(max(target_be, curr_price + min_stop_gap + point), digits)
 
         req = {
             "action": mt5.TRADE_ACTION_SLTP,
@@ -1905,6 +1936,23 @@ class MT5LiveBroker:
         return False
 
     # ── ATR-Based Trailing Helpers ──
+    def _get_mt5_hist(self, symbol: str, count: int = 30, timeframe=None):
+        """Fetches recent OHLCV history DataFrame with standard column names for trailing analysis."""
+        if not self.ensure_connected():
+            return None
+        tf = timeframe if timeframe is not None else (mt5.TIMEFRAME_M5 if mt5 else None)
+        if not mt5 or tf is None:
+            return None
+        rates = mt5.copy_rates_from_pos(symbol, tf, 0, count)
+        if rates is None or len(rates) == 0:
+            return None
+        df = pd.DataFrame(rates)
+        df.rename(columns={
+            "open": "Open", "high": "High", "low": "Low", "close": "Close",
+            "tick_volume": "Volume"
+        }, inplace=True)
+        return df
+
     def _calculate_atr(self, df: pd.DataFrame, period: int = 14) -> float:
         """Calculate Average True Range from OHLCV DataFrame."""
         if df is None or len(df) < period + 1:

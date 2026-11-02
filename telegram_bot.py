@@ -2181,6 +2181,7 @@ def format_welcome_menu(sender_name: str) -> str:
         f"• `/trade`       ──► Instant manual order placement\n"
         f"• `/auto_trade`  ──► Toggle automated execution ON / OFF\n"
         f"• `/positions`   ──► View open trades & live floating PnL\n"
+        f"• `/pending`     ──► View & cancel pending limit orders\n"
         f"• `/close_all`   ──► Instantly close all open positions\n"
         f"• `/status`      ──► Bot health, connection & risk limits\n"
         f"• `/hidden`      ──► View all hidden & advanced background commands\n"
@@ -2217,6 +2218,9 @@ def format_hidden_commands_menu() -> tuple[str, dict]:
         "• `/locks` / `/unlock [gold|btc|all]` ──► View or clear trade locks",
         "• `/part <ticket>` ──► Bank 50% partial profit",
         "• `/be <ticket>` ──► Move stop-loss to Breakeven Plus",
+        "• `/limit [gold|btc] [buy|sell]` ──► Place pending limit order in zone",
+        "• `/pending` or `/orders` ──► View active pending limit orders",
+        "• `/cancel <ticket>` ──► Cancel a pending limit order",
         "",
         "⚡ *3. Strategy, Risk & Automation*",
         "• `/strategy [scalp|swing|momentum]` ──► Multi-regime strategy profiles",
@@ -2370,6 +2374,22 @@ def trailing_monitor_worker(token: str, chat_id_getter):
                 print(f"⚠️ Friday gap shield check error: {e_fri}")
 
             events = live_broker.trail_positions(default_strategy=strat_code)
+
+            # Auto-manage pending limit orders (fills, expirations & trap invalidations)
+            try:
+                curr_prices = {}
+                for a_key in ["GOLD", "BTC"]:
+                    tick_info = live_broker.get_latest_tick(a_key) if live_broker else None
+                    if tick_info and tick_info.get("bid", 0) > 0:
+                        curr_prices[a_key] = tick_info["bid"]
+                pend_events = live_broker.manage_pending_orders(current_prices=curr_prices)
+                if pend_events:
+                    target_chat_id = chat_id_getter()
+                    for pev in pend_events:
+                        if target_chat_id and pev.get("msg"):
+                            send_message(token, target_chat_id, pev["msg"])
+            except Exception:
+                pass
             if events:
                 target_chat_id = chat_id_getter()
                 for ev in events:
@@ -2504,6 +2524,7 @@ def approve_active_setup(token: str, chat_id: str, asset: str) -> dict:
         item = data.get("btc") if asset.upper() == "BTC" else data.get("gold")
         if item:
             active_strat = get_active_strategy() if RISK_ENGINE_AVAILABLE else {"code": "SCALP"}
+            ot = item.get("order_ticket", {})
             setup = {
                 "asset": asset.upper(),
                 "symbol": item["symbol"],
@@ -2518,7 +2539,12 @@ def approve_active_setup(token: str, chat_id: str, asset: str) -> dict:
                 "strategy": active_strat["code"],
                 "executed": False,
                 "ticket": None,
-                "status": "PENDING"
+                "status": "PENDING",
+                "order_type": ot.get("order_type") or item.get("order_type", "MARKET"),
+                "order_ticket": ot,
+                "limit_price": ot.get("limit_price") or item.get("limit_price"),
+                "zone": ot.get("zone") or item.get("zone"),
+                "expiry_minutes": ot.get("expiry_minutes", 35)
             }
         else:
             send_message(token, chat_id, f"⚠️ *No Actionable Setup for {asset}*\n• Scanner is monitoring 1-minute close.\n• Use `/scan` or `/buy_{asset.lower()}` to enter manually.")
@@ -3026,6 +3052,7 @@ def auto_scanner_worker(token: str, chat_id_getter):
             has_btc_open = live_broker.has_open_position("BTC") if (MT5_EXECUTOR_AVAILABLE and live_broker) else False
             if is_asset_enabled("BTC") and is_qualified_b and not has_btc_open:
                 if should_send_alert("BTC", b_act, b_target['price'], b_target['final_score'], cooldown_seconds=ALERT_COOLDOWN_SECONDS):
+                    b_ot = b_target.get("order_ticket", {})
                     setup_data = {
                         "asset": "BTC",
                         "symbol": b_target['symbol'],
@@ -3041,7 +3068,12 @@ def auto_scanner_worker(token: str, chat_id_getter):
                         "strategy": active_strat['code'],
                         "executed": False,
                         "ticket": None,
-                        "status": "PENDING"
+                        "status": "PENDING",
+                        "order_type": b_ot.get("order_type") or b_target.get("order_type", "MARKET"),
+                        "order_ticket": b_ot,
+                        "limit_price": b_ot.get("limit_price") or b_target.get("limit_price"),
+                        "zone": b_ot.get("zone") or b_target.get("zone"),
+                        "expiry_minutes": b_ot.get("expiry_minutes", 35)
                     }
                     set_pending_setup("BTC", setup_data)
 
@@ -3104,6 +3136,7 @@ def auto_scanner_worker(token: str, chat_id_getter):
             has_gold_open = live_broker.has_open_position("GOLD") if (MT5_EXECUTOR_AVAILABLE and live_broker) else False
             if is_asset_enabled("GOLD") and is_qualified_g and not has_gold_open:
                 if should_send_alert("GOLD", g_act, g_target['price'], g_target['final_score'], cooldown_seconds=ALERT_COOLDOWN_SECONDS):
+                    g_ot = g_target.get("order_ticket", {})
                     setup_data = {
                         "asset": "GOLD",
                         "symbol": g_target['symbol'],
@@ -3119,7 +3152,12 @@ def auto_scanner_worker(token: str, chat_id_getter):
                         "strategy": active_strat['code'],
                         "executed": False,
                         "ticket": None,
-                        "status": "PENDING"
+                        "status": "PENDING",
+                        "order_type": g_ot.get("order_type") or g_target.get("order_type", "MARKET"),
+                        "order_ticket": g_ot,
+                        "limit_price": g_ot.get("limit_price") or g_target.get("limit_price"),
+                        "zone": g_ot.get("zone") or g_target.get("zone"),
+                        "expiry_minutes": g_ot.get("expiry_minutes", 35)
                     }
                     set_pending_setup("GOLD", setup_data)
 
@@ -4670,6 +4708,97 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
             ]
         }
         send_message(token, sender_id, "\n".join(lines), reply_markup=pos_markup)
+        return
+
+    # ── 1B-2. PENDING LIMIT ORDERS & CANCELLATION (/pending, /orders, /cancel) ──
+    if cmd in ("/pending", "/orders", "/pending_orders", "/limit_orders"):
+        if not (MT5_EXECUTOR_AVAILABLE and live_broker):
+            send_message(token, sender_id, "⚠️ MT5 Executor not available.")
+            return
+        curr_mode = safety_manager.get_trading_mode() if RISK_ENGINE_AVAILABLE else "LIVE"
+        orders = live_broker.get_pending_orders()
+        if not orders:
+            send_message(token, sender_id, f"⏳ *PENDING LIMIT ORDERS [{curr_mode}]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nNo pending limit orders active.\n\n• Auto-Scanner places limit orders inside Golden Pocket / S/R zones.\n• Use `/limit gold` or `/limit btc` to queue an institutional limit order.")
+            return
+        lines = [
+            f"⏳ *PENDING LIMIT ORDERS [{curr_mode}]*",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        ]
+        for o in orders:
+            sym = o.get('symbol', 'N/A')
+            o_type = o.get('type', 'LIMIT')
+            vol = o.get('volume', o.get('lots', 0.01))
+            t_num = o.get('ticket', 'N/A')
+            p_val = o.get('price', o.get('limit_price', 0.0))
+            sl_val = o.get('sl', o.get('stop_loss', 0.0))
+            tp_val = o.get('tp', o.get('tp1', 0.0))
+            lines.append(
+                f"• `{sym}` *{o_type}* `{vol}` lots (Ticket `#{t_num}`)\n"
+                f"  Limit Price: `${p_val:,.2f}`\n"
+                f"  SL: `${sl_val:,.2f}` | TP: `${tp_val:,.2f}`"
+            )
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append("Cancel an order: `/cancel <ticket>`")
+        send_message(token, sender_id, "\n".join(lines))
+        return
+
+    if cmd in ("/cancel", "/cancel_order"):
+        if not args:
+            send_message(token, sender_id, "💡 *Usage:* `/cancel <ticket>`\nExample: `/cancel 12345678`")
+            return
+        t_str = args.strip()
+        c_res = live_broker.cancel_pending_order(t_str, reason="USER_TELEGRAM_CANCEL")
+        if c_res.get("success"):
+            send_message(token, sender_id, f"✅ *PENDING ORDER CANCELLED*\nTicket `#{t_str}` successfully removed.")
+        else:
+            send_message(token, sender_id, f"❌ *CANCEL FAILED*\n{c_res.get('error', 'Order not found')}")
+        return
+
+    if cmd in ("/limit", "/limit_order", "/limit_gold", "/limit_btc"):
+        if not (MT5_EXECUTOR_AVAILABLE and live_broker):
+            send_message(token, sender_id, "⚠️ MT5 Executor not available.")
+            return
+        parts = args_lower.split()
+        if cmd in ("/limit", "/limit_order"):
+            sub_asset = parts[0] if parts else "gold"
+            act_arg = parts[1] if len(parts) > 1 else "buy"
+        else:
+            sub_asset = "gold" if "gold" in cmd else "btc"
+            act_arg = parts[0] if parts else "buy"
+
+        asset_type = "GOLD" if ("gold" in sub_asset or "xau" in sub_asset) else "BTC"
+        action = "SELL" if "sell" in act_arg.lower() else "BUY"
+        data = run_full_pipeline()
+        item = data.get("gold") if asset_type == "GOLD" else data.get("btc")
+        if not item:
+            send_message(token, sender_id, f"⚠️ Market data unavailable for {asset_type}.")
+            return
+        ot = item.get("order_ticket", {})
+        l_price = ot.get("limit_price") or item.get("entry")
+        sl_val = item.get("stop_loss")
+        tp_val = item.get("tp1")
+        lots_val = item.get("lot_info", {}).get("lots", 0.01)
+        z_bounds = ot.get("zone")
+        res = live_broker.execute_live_limit_order(
+            asset_type, action, l_price, sl_val, tp_val, lots_val,
+            zone=z_bounds, comment=f"Telegram-Limit-{action}"
+        )
+        if res.get("success"):
+            m_mode = res.get("mode", "LIVE")
+            send_message(token, sender_id, (
+                f"✅ *LIMIT ORDER PLACED [{m_mode}]*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"• Asset: {asset_type}\n"
+                f"• Action: {action}_LIMIT\n"
+                f"• Limit Price: `${l_price:,.2f}`\n"
+                f"• Stop Loss: `${sl_val:,.2f}`\n"
+                f"• Take Profit: `${tp_val:,.2f}`\n"
+                f"• Ticket: `#{res.get('ticket')}`\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Monitor with `/pending` or `/positions`."
+            ))
+        else:
+            send_message(token, sender_id, f"❌ *LIMIT ORDER REJECTED*\n{res.get('error', 'Execution failed')}")
         return
 
     # ── 1C. SMALL-TIMEFRAME TREND REVERSAL RADAR (/reversal, /trend_change, /choch) ──

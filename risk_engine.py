@@ -631,13 +631,18 @@ class SafetyManager:
             peak_profit_dist = (peak_price - entry) if is_buy else (entry - peak_price)
             peak_r = peak_profit_dist / initial_risk_dist
 
-            # 5. Breakeven Trigger (BE+ Offset: Minimum +$0.50 Net Profit Guarantee)
-            be_offset = max(0.50, spread_buffer + 0.30) if asset == "GOLD" else max(50.0, spread_buffer + 25.0)
-            breakeven_sl = round(entry + be_offset if is_buy else entry - be_offset, 2)
+            # 5. Breakeven Trigger (BE+ Offset: Minimum Net Profit Guarantee, safely clamped)
+            spread_buffer = 0.15 if asset == "GOLD" else 8.0
+            if asset == "GOLD":
+                be_offset = max(0.15, min(0.35, spread_buffer + 0.10))
+                breakeven_sl = round(min(entry + be_offset, curr_price - 0.20) if is_buy else max(entry - be_offset, curr_price + 0.20), 2)
+            else:
+                be_offset = max(5.0, min(15.0, spread_buffer + 3.0))
+                breakeven_sl = round(min(entry + be_offset, curr_price - 10.0) if is_buy else max(entry - be_offset, curr_price + 10.0), 2)
             needs_be = False
-            if is_buy and current_r >= active_be_r and curr_sl < entry:
+            if is_buy and current_r >= active_be_r and curr_sl < entry and breakeven_sl > curr_sl:
                 needs_be = True
-            elif not is_buy and current_r >= active_be_r and (curr_sl > entry or curr_sl == 0):
+            elif not is_buy and current_r >= active_be_r and (curr_sl > entry or curr_sl == 0) and (curr_sl == 0 or breakeven_sl < curr_sl):
                 needs_be = True
 
             if needs_be:
@@ -662,9 +667,11 @@ class SafetyManager:
             if peak_r >= active_trail_start_r:
                 desired_sl = round(peak_price - (initial_risk_dist * active_trail_step_r) if is_buy else peak_price + (initial_risk_dist * active_trail_step_r), 2)
                 if is_buy:
+                    desired_sl = min(desired_sl, curr_price - (0.20 if asset == "GOLD" else 10.0))
                     desired_sl = max(desired_sl, breakeven_sl)
                     should_trail = desired_sl > curr_sl and (desired_sl - curr_sl) >= (0.10 if asset == "GOLD" else 5.0)
                 else:
+                    desired_sl = max(desired_sl, curr_price + (0.20 if asset == "GOLD" else 10.0))
                     desired_sl = min(desired_sl, breakeven_sl)
                     should_trail = (curr_sl == 0 or desired_sl < curr_sl) and abs(desired_sl - curr_sl) >= (0.10 if asset == "GOLD" else 5.0)
 
@@ -1013,8 +1020,8 @@ STRATEGIES = {
         "name": "Institutional Micro Scalp",
         "description": "Ultra-fast micro SL/TP on 1M/5M candles. Quick momentum capture with early risk-free breakeven.",
         "sl_mult": float(os.getenv("BTC_SCALP_SL_MULT", "0.16")),
-        "rr_tp1": float(os.getenv("BTC_SCALP_RR_TP1", "1.15")),
-        "rr_tp2": float(os.getenv("BTC_SCALP_RR_TP2", "1.60")),
+        "rr_tp1": float(os.getenv("BTC_SCALP_RR_TP1", "1.85")),
+        "rr_tp2": float(os.getenv("BTC_SCALP_RR_TP2", "2.80")),
         "breakeven_r": float(os.getenv("BTC_SCALP_BE_R", "0.30")),   # Ultra-fast breakeven lock at +0.30R
         "trail_start_r": 0.65,                                        # Dynamic trail starts at +0.65R
         "trail_step_r": 0.20,                                         # Tight 0.15R trailing step
@@ -1583,9 +1590,20 @@ def calculate_strategy_levels(asset: str, current_price: float, atr: float = 0.0
 
     sl_dist = round(sl_dist, 2)
 
-    # 2. Strategy-Specific Take-Profit Distances
-    tp1_dist = round(sl_dist * strat["rr_tp1"], 2)
-    tp2_dist = round(sl_dist * strat["rr_tp2"], 2)
+    # 2. Strategy-Specific Take-Profit Distances (Extended Scalp TP while strictly preserving micro SL)
+    if strat_key == "SCALP":
+        if asset_key == "GOLD":
+            rr_tp1_mult = float(os.getenv("GOLD_SCALP_RR_TP1", os.getenv("BTC_SCALP_RR_TP1", "1.85")))
+            rr_tp2_mult = float(os.getenv("GOLD_SCALP_RR_TP2", os.getenv("BTC_SCALP_RR_TP2", "2.80")))
+        else:
+            rr_tp1_mult = float(os.getenv("BTC_SCALP_RR_TP1", "1.85"))
+            rr_tp2_mult = float(os.getenv("BTC_SCALP_RR_TP2", "2.80"))
+    else:
+        rr_tp1_mult = strat["rr_tp1"]
+        rr_tp2_mult = strat["rr_tp2"]
+
+    tp1_dist = round(sl_dist * rr_tp1_mult, 2)
+    tp2_dist = round(sl_dist * rr_tp2_mult, 2)
 
     if is_buy:
         stop_loss = round(current_price - sl_dist, 2)
@@ -1607,8 +1625,8 @@ def calculate_strategy_levels(asset: str, current_price: float, atr: float = 0.0
                 tp1 = round(eq_val, 2)
                 tp1_dist = round(current_price - tp1, 2)
 
-    rr_tp1 = round(tp1_dist / sl_dist, 2) if sl_dist > 0 else strat["rr_tp1"]
-    rr_tp2 = round(tp2_dist / sl_dist, 2) if sl_dist > 0 else strat["rr_tp2"]
+    rr_tp1 = round(tp1_dist / sl_dist, 2) if sl_dist > 0 else rr_tp1_mult
+    rr_tp2 = round(tp2_dist / sl_dist, 2) if sl_dist > 0 else rr_tp2_mult
 
     # 3. Dynamic Position Sizing with Leverage & Margin Limits
     lot_info = calculate_lot_size(asset_key, current_price, stop_loss, account_balance, target_risk, broker_leverage, margin_free)
