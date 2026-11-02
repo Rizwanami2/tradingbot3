@@ -2621,6 +2621,30 @@ def handle_callback_query(token: str, cq: dict):
         process_telegram_command(token, sender_id, sender_name, "/gold")
     elif data in ("train_model", "train", "retrain"):
         process_telegram_command(token, sender_id, sender_name, "/train")
+    elif data == "mt5_connect":
+        process_telegram_command(token, sender_id, sender_name, "/mt5_connect")
+    elif data == "mt5_status":
+        process_telegram_command(token, sender_id, sender_name, "/mt5_status")
+    elif data == "mt5_positions":
+        process_telegram_command(token, sender_id, sender_name, "/mt5_positions")
+    elif data == "mt5_disconnect":
+        process_telegram_command(token, sender_id, sender_name, "/mt5_disconnect")
+    elif data == "signal_gold":
+        process_telegram_command(token, sender_id, sender_name, "/signal_gold")
+    elif data == "signal_btc":
+        process_telegram_command(token, sender_id, sender_name, "/signal_btc")
+    elif data in ("chart", "charts"):
+        process_telegram_command(token, sender_id, sender_name, "/chart")
+    elif data in ("chart_gold", "chartgold"):
+        process_telegram_command(token, sender_id, sender_name, "/chart gold")
+    elif data in ("chart_btc", "chartbtc"):
+        process_telegram_command(token, sender_id, sender_name, "/chart btc")
+    elif data in ("diagnose", "diag"):
+        process_telegram_command(token, sender_id, sender_name, "/diagnose")
+    elif data == "gsr":
+        process_telegram_command(token, sender_id, sender_name, "/gsr")
+    elif data in ("fng", "fear", "greed"):
+        process_telegram_command(token, sender_id, sender_name, "/fng")
 
 
 def get_market_session_badge() -> str:
@@ -3098,9 +3122,138 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
         send_message(token, sender_id, msg, reply_markup=mtf_markup)
         return
 
+    # ── 1B. VISUAL CANDLESTICK CHART HUB (/chart [gold|btc|all], /charts, /chart_gold, /chart_btc) ──
+    if cmd in ("/chart", "/charts", "/chart_gold", "/chartgold", "/chart_btc", "/chartbtc"):
+        sub = args_lower.strip()
+        if cmd in ("/chart_gold", "/chartgold"):
+            sub = "gold"
+        elif cmd in ("/chart_btc", "/chartbtc"):
+            sub = "btc"
+
+        if not CHARTS_AVAILABLE:
+            send_message(token, sender_id, "⚠️ Candlestick chart generation module is unavailable (requires matplotlib).")
+            return
+
+        if sub in ("gold", "xau"):
+            send_message(token, sender_id, "⏳ Generating MT5 candlestick chart for Gold (XAU/USD)...")
+            g_buf = generate_mt5_chart("GC=F", "GOLD (XAU/USD)")
+            if g_buf:
+                chart_markup = {
+                    "inline_keyboard": [
+                        [{"text": "🟢 Buy Gold", "callback_data": "buy_gold"}, {"text": "🔴 Sell Gold", "callback_data": "sell_gold"}],
+                        [{"text": "📊 Live Scan", "callback_data": "scan"}, {"text": "₿ Bitcoin Chart", "callback_data": "chart_btc"}]
+                    ]
+                }
+                send_telegram_chart(token, sender_id, g_buf, "📊 *MT5 Institutional Candlestick Chart: Gold (XAU/USD)*\n• Indicators: 50 SMA (Blue), 200 SMA (Red), Golden Pocket (0.618-0.650)")
+            else:
+                send_message(token, sender_id, "⚠️ Failed to render Gold candlestick chart.")
+            return
+
+        elif sub in ("btc", "bitcoin"):
+            send_message(token, sender_id, "⏳ Generating MT5 candlestick chart for Bitcoin (BTC/USD)...")
+            b_buf = generate_mt5_chart("BTC-USD", "BITCOIN (BTC-USD)")
+            if b_buf:
+                chart_markup = {
+                    "inline_keyboard": [
+                        [{"text": "🟢 Buy BTC", "callback_data": "buy_btc"}, {"text": "🔴 Sell BTC", "callback_data": "sell_btc"}],
+                        [{"text": "📊 Live Scan", "callback_data": "scan"}, {"text": "🥇 Gold Chart", "callback_data": "chart_gold"}]
+                    ]
+                }
+                send_telegram_chart(token, sender_id, b_buf, "📊 *MT5 Institutional Candlestick Chart: Bitcoin (BTC/USD)*\n• Indicators: 50 SMA (Blue), 200 SMA (Red), Golden Pocket (0.618-0.650)")
+            else:
+                send_message(token, sender_id, "⚠️ Failed to render Bitcoin candlestick chart.")
+            return
+
+        else:
+            send_message(token, sender_id, "⏳ Generating MT5 candlestick charts for Gold & Bitcoin...")
+            g_buf = generate_mt5_chart("GC=F", "GOLD (XAU/USD)")
+            if g_buf:
+                send_telegram_chart(token, sender_id, g_buf, "📊 *MT5 Institutional Chart: Gold (XAU/USD)*")
+            b_buf = generate_mt5_chart("BTC-USD", "BITCOIN (BTC-USD)")
+            if b_buf:
+                send_telegram_chart(token, sender_id, b_buf, "📊 *MT5 Institutional Chart: Bitcoin (BTC/USD)*")
+            return
+
+    # ── 1C. MT5 CONNECTIVITY & ENVIRONMENT DIAGNOSTIC HUB (/diagnose, /mt5_diagnose) ──
+    if cmd in ("/diagnose", "/mt5_diagnose", "/diag"):
+        send_message(token, sender_id, "🔍 *Running MT5 Deep Connectivity & Environment Audit...*")
+        import platform
+        is_64bit = sys.maxsize > 2**32
+        py_arch = platform.architecture()[0]
+        py_ver = platform.python_version()
+
+        mt5_lib_ok = False
+        mt5_lib_ver = "Not installed"
+        try:
+            import MetaTrader5 as mt5
+            mt5_lib_ok = True
+            mt5_lib_ver = getattr(mt5, "__version__", "Installed")
+        except ImportError:
+            pass
+
+        proc_running = False
+        if sys.platform == "win32":
+            try:
+                tasks = os.popen('tasklist /FI "IMAGENAME eq terminal64.exe"').read()
+                if "terminal64.exe" in tasks.lower():
+                    proc_running = True
+            except Exception:
+                pass
+
+        found_paths = []
+        common_paths = [
+            os.environ.get("MT5_PATH", "").strip(),
+            "C:\\Program Files\\MetaTrader 5\\terminal64.exe",
+            "C:\\Program Files (x86)\\MetaTrader 5\\terminal64.exe",
+            "C:\\Program Files\\FTMO MetaTrader 5\\terminal64.exe",
+            "C:\\Program Files\\ICMarkets MetaTrader 5\\terminal64.exe",
+            "C:\\Program Files\\Exness MetaTrader 5\\terminal64.exe",
+            "C:\\Program Files\\XM Global MT5\\terminal64.exe",
+            "C:\\Program Files\\FBS MetaTrader 5\\terminal64.exe",
+            "C:\\Program Files\\Vantage MetaTrader 5\\terminal64.exe",
+        ]
+        for p in common_paths:
+            if p and os.path.exists(p) and p not in found_paths:
+                found_paths.append(p)
+
+        conn_ok = (MT5_EXECUTOR_AVAILABLE and live_broker and live_broker.is_connected)
+
+        diag_lines = [
+            "🔍 *METATRADER 5 CONNECTIVITY DIAGNOSIS*",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            f"• Python Architecture : `{'✅ 64-bit' if is_64bit else '❌ 32-bit (Requires 64-bit)'}` (`{py_arch}`, v`{py_ver}`)",
+            f"• MT5 Python Package  : `{'✅ Version ' + str(mt5_lib_ver) if mt5_lib_ok else '❌ Not Installed'}`",
+            f"• Terminal Process    : `{'✅ terminal64.exe RUNNING' if proc_running else '⚠️ Not running in Task Manager'}`",
+            f"• Broker Installation : `{'✅ Found ' + str(len(found_paths)) + ' path(s)' if found_paths else '⚠️ Standard paths not found'}`",
+            f"• Live IPC Status     : `{'🟢 CONNECTED' if conn_ok else '🔴 DISCONNECTED'}`",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        ]
+
+        if not conn_ok:
+            diag_lines.append("🛠️ *How to Fix Connection:*")
+            diag_lines.append("1. Open the MT5 desktop app on your VPS/PC.")
+            diag_lines.append("2. Log into your broker account in MT5.")
+            diag_lines.append("3. In MT5: Tools ➔ Options ➔ Expert Advisors ➔ check 'Allow algorithmic trading'.")
+            diag_lines.append("4. Send `/mt5_connect` in Telegram.")
+        else:
+            diag_lines.append("✅ *MT5 broker connection is fully operational and ready for live orders.*")
+
+        diag_markup = {
+            "inline_keyboard": [
+                [{"text": "🔌 Connect MT5", "callback_data": "mt5_connect"}, {"text": "📊 MT5 Status", "callback_data": "mt5_status"}],
+                [{"text": "⚙️ Bot Status", "callback_data": "status"}, {"text": "📊 Live Scan", "callback_data": "scan"}]
+            ]
+        }
+        send_message(token, sender_id, "\n".join(diag_lines), reply_markup=diag_markup)
+        return
+
     # ── 2. MODERN MARKET HUB (/market [btc|gold|macro|levels|traps|debate]) ──
-    if cmd == "/market" or cmd in ("/scan", "/btc", "/gold", "/macro", "/levels", "/traps", "/debate"):
-        sub = args_lower if cmd == "/market" else cmd.replace("/", "")
+    if cmd == "/market" or cmd in (
+        "/scan", "/btc", "/bitcoin", "/gold", "/xau", "/macro", "/dxy", "/yields", "/tnx", "/gsr",
+        "/fng", "/fear", "/greed", "/levels", "/fib", "/pivots", "/traps", "/trap", "/fvg", "/liquidity",
+        "/debate", "/bullbear", "/bull_bear"
+    ):
+        sub = args_lower if cmd == "/market" else cmd.replace("/", "").lower()
 
         # Sub-branch: Macro
         if sub in ("macro", "dxy", "yields"):
@@ -3434,18 +3587,17 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
         return
 
     # ── 2C. DIRECT MT5 TRADE COMMANDS ──
-    if cmd in ("/buy_gold", "/sell_gold", "/buy_btc", "/sellbtc", "/sell_btc"):
+    if cmd in ("/buy_gold", "/buygold", "/sell_gold", "/sellgold", "/buy_btc", "/buybtc", "/sell_btc", "/sellbtc"):
         if not (MT5_EXECUTOR_AVAILABLE and live_broker):
             send_message(token, sender_id, "⚠️ MT5 Executor module not available.")
             return
         if not live_broker.is_connected:
             send_message(token, sender_id, "❌ MT5 not connected. Use /mt5_connect first.")
             return
-        # Parse command: /buy_gold, /sell_gold, /buy_btc, /sell_btc
-        parts = cmd.replace("/", "").split("_")
-        action = parts[0].upper()  # BUY or SELL
-        asset_raw = parts[1] if len(parts) > 1 else ""
-        asset_type = "GOLD" if asset_raw in ("gold", "g", "xau", "xauusd") else "BTC"
+        raw_cmd = cmd.replace("/", "").lower()
+        action = "BUY" if "buy" in raw_cmd else "SELL"
+        asset_raw = "gold" if ("gold" in raw_cmd or "xau" in raw_cmd) else "btc"
+        asset_type = "GOLD" if asset_raw == "gold" else "BTC"
         symbol = "GC=F" if asset_type == "GOLD" else "BTC-USD"
 
         # Get current price from market data
@@ -3967,9 +4119,12 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
         return
 
     # ── 4. MODERN STRATEGY & PROFILE HUB (/strategy or /profile [scalp|swing|balance|swap]) ──
-    if cmd in ("/strategy", "/profile"):
+    if cmd in ("/strategy", "/profile", "/scalp", "/swing", "/balance", "/swap"):
         global STRATEGY_AUTO_SWITCH
-        sub = args_lower.strip()
+        if cmd in ("/scalp", "/swing", "/balance", "/swap"):
+            sub = cmd.replace("/", "").lower()
+        else:
+            sub = args_lower.strip()
         if sub in ("auto on", "auto_on", "autoon"):
             STRATEGY_AUTO_SWITCH = True
             send_message(token, sender_id, "🔄 *AUTO-SWITCH STRATEGY: ENABLED 🟢*\nStrategy profile will dynamically adapt to live market movements.")
