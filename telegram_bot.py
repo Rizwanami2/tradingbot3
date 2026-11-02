@@ -51,6 +51,26 @@ try:
 except Exception:
     logger = logging.getLogger("telegram_bot")
 
+ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
+
+def load_env():
+    """Reads credentials from .env into os.environ."""
+    if os.path.exists(ENV_PATH):
+        try:
+            with open(ENV_PATH, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if "=" in line:
+                        k, v = line.split("=", 1)
+                        k, v = k.strip(), v.strip().strip('"').strip("'")
+                        os.environ[k] = v
+        except Exception:
+            pass
+
+load_env()
+
 try:
     from config_validator import ensure_valid_config, validate_config
 except Exception:
@@ -151,12 +171,27 @@ except Exception:
     INSTITUTIONAL_AVAILABLE = False
 
 # Live auto-trade and separate watchlist ('OFF', 'BOTH', 'GOLD', 'BTC')
-AUTO_TRADE_MODE = "OFF"
-AUTO_TRADE_LIVE = False
-
-# Automated Push Order Execution Controller ('OFF', 'BOTH', 'GOLD', 'BTC')
-AUTO_PUSH_MODE = "OFF"
-AUTO_PUSH_ENABLED = False
+_init_mode = (os.environ.get("AUTO_TRADE", "") or os.environ.get("AUTO_PUSH", "") or os.environ.get("AUTO_EXECUTE", "")).strip().upper()
+if _init_mode in ("BOTH", "ALL", "ON", "TRUE", "ENABLE", "1", "YES"):
+    AUTO_TRADE_MODE = "BOTH"
+    AUTO_TRADE_LIVE = True
+    AUTO_PUSH_MODE = "BOTH"
+    AUTO_PUSH_ENABLED = True
+elif _init_mode in ("GOLD", "XAU"):
+    AUTO_TRADE_MODE = "GOLD"
+    AUTO_TRADE_LIVE = True
+    AUTO_PUSH_MODE = "GOLD"
+    AUTO_PUSH_ENABLED = True
+elif _init_mode in ("BTC", "BITCOIN"):
+    AUTO_TRADE_MODE = "BTC"
+    AUTO_TRADE_LIVE = True
+    AUTO_PUSH_MODE = "BTC"
+    AUTO_PUSH_ENABLED = True
+else:
+    AUTO_TRADE_MODE = "OFF"
+    AUTO_TRADE_LIVE = False
+    AUTO_PUSH_MODE = "OFF"
+    AUTO_PUSH_ENABLED = False
 
 # Automated Trailing Stop & Breakeven Protection
 TRAILING_STOP_ENABLED = True
@@ -3893,15 +3928,27 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
                 send_message(token, sender_id, "⚪ *AUTO-TRADE DISABLED*\nAutomated execution is turned off. All 1-minute alerts and MT5 charts will continue broadcasting, requiring manual execution.")
             else:
                 curr_status = f"ENABLED 🟢 ({AUTO_PUSH_MODE})" if AUTO_PUSH_MODE != "OFF" else "DISABLED ⚪"
+                reply_markup = {
+                    "inline_keyboard": [
+                        [
+                            {"text": "⚡ Auto-Trade ON (Both)", "callback_data": "autopush_on"},
+                            {"text": "⚪ Auto-Trade OFF", "callback_data": "autopush_off"}
+                        ],
+                        [
+                            {"text": "🥇 Gold Only", "callback_data": "autopush_gold"},
+                            {"text": "₿ BTC Only", "callback_data": "autopush_btc"}
+                        ]
+                    ]
+                }
                 send_message(token, sender_id, (
                     f"ℹ️ *1M Auto-Trade Watchlist Controller:*\n"
                     f"• Current Mode: `{curr_status}`\n\n"
                     f"Options:\n"
-                    f"• `/trade auto gold`  ──► Auto-trade Gold only\n"
-                    f"• `/trade auto btc`   ──► Auto-trade BTC only\n"
-                    f"• `/trade auto both`  ──► Auto-trade both Gold & BTC\n"
-                    f"• `/trade auto off`   ──► Disable auto-trade (alerts only)"
-                ))
+                    f"• `/trade auto both` (or `/autotrade on`) ──► Auto-trade both Gold & BTC\n"
+                    f"• `/trade auto gold` (or `/autotrade gold`) ──► Auto-trade Gold only\n"
+                    f"• `/trade auto btc` (or `/autotrade btc`) ──► Auto-trade BTC only\n"
+                    f"• `/trade auto off` (or `/autotrade off`) ──► Disable auto-trade (alerts only)"
+                ), reply_markup=reply_markup)
             return
 
         # Sub-branch: Close All / Liquidate
@@ -5304,8 +5351,18 @@ def start_bot():
         print(f"❌ Telegram Connection Failed: {bot_first_name}")
         return
 
-    # Restore Auto Push / Auto Trade Mode from persistent storage
-    if RISK_ENGINE_AVAILABLE and safety_manager:
+    # Restore Auto Push / Auto Trade Mode from persistent storage or .env
+    env_push = (os.environ.get("AUTO_TRADE", "") or os.environ.get("AUTO_PUSH", "") or os.environ.get("AUTO_EXECUTE", "")).strip().upper()
+    if env_push in ("BOTH", "ALL", "ON", "TRUE", "ENABLE", "1", "YES"):
+        set_auto_push_mode("BOTH")
+        print("🤖 Booting Auto-Execution Mode from .env: BOTH (Gold & Bitcoin auto-trade active)")
+    elif env_push in ("GOLD", "XAU"):
+        set_auto_push_mode("GOLD")
+        print("🤖 Booting Auto-Execution Mode from .env: GOLD ONLY")
+    elif env_push in ("BTC", "BITCOIN"):
+        set_auto_push_mode("BTC")
+        print("🤖 Booting Auto-Execution Mode from .env: BTC ONLY")
+    elif RISK_ENGINE_AVAILABLE and safety_manager:
         persisted_push = safety_manager.state.get("auto_push_mode", "OFF")
         if persisted_push and persisted_push != "OFF":
             set_auto_push_mode(persisted_push)

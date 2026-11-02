@@ -537,14 +537,20 @@ class MT5LiveBroker:
         fill_price = tick.ask if is_buy else tick.bid
         digits = sym_info.digits
         point = sym_info.point or (10 ** -digits)
-        pip_unit = (10.0 * point) if digits in (2, 3, 5) else point
-
-        # Pre-Order Spread Guard Gate
-        max_spread_pips = float(os.getenv("MAX_SPREAD_PIPS", "30.0"))
         spread_pts = sym_info.spread
-        spread_pips = (spread_pts * point) / pip_unit if pip_unit > 0 else float(spread_pts)
+        spread_val = (tick.ask - tick.bid) if (tick and getattr(tick, 'ask', 0) > getattr(tick, 'bid', 0)) else (spread_pts * point)
+
+        # Pre-Order Spread Guard Gate (Reworked: 40 pips limit max on BTC, 30 pips on Gold)
+        if is_gold_asset:
+            pip_unit = 0.10
+            max_spread_pips = float(os.getenv("MAX_SPREAD_GOLD_PIPS", os.getenv("MAX_SPREAD_PIPS", "30.0")))
+        else:
+            pip_unit = 1.00  # $1.00 per pip on Bitcoin
+            max_spread_pips = float(os.getenv("MAX_SPREAD_BTC_PIPS", "40.0"))
+
+        spread_pips = (spread_val / pip_unit) if pip_unit > 0 else float(spread_val)
         if spread_pips > max_spread_pips:
-            msg = f"Spread Guard REJECTED: Broker spread {spread_pips:.1f} pips exceeds MAX_SPREAD_PIPS ({max_spread_pips:.1f} pips)."
+            msg = f"Spread Guard REJECTED: Broker spread {spread_pips:.1f} pips exceeds limit ({max_spread_pips:.1f} pips)."
             logger.warning(msg)
             return {"success": False, "error": msg, "mode": current_mode}
 
@@ -643,7 +649,7 @@ class MT5LiveBroker:
             safe_ok, safe_msg = safety_manager.check_trade_safety(
                 asset, proposed_risk_pct=proposed_risk_pct, open_positions=open_pos,
                 current_equity=equity_val, data_timestamp=tick.time,
-                spread_val=spread_pts * point, sl_dist=sl_dist
+                spread_val=spread_val, sl_dist=sl_dist
             )
             if not safe_ok:
                 return {"success": False, "error": safe_msg, "mode": current_mode}
@@ -1281,10 +1287,16 @@ class MT5LiveBroker:
 
         digits = sym_info.digits
         point = sym_info.point or (10 ** -digits)
-        spread_pts = (tick.ask - tick.bid)
-        max_spread_pips = float(os.environ.get("MAX_SPREAD_PIPS", "30"))
-        pip_size = (point * 10) if digits in (3, 5) else point
-        current_spread_pips = (spread_pts / pip_size) if pip_size > 0 else 0.0
+        spread_val = (tick.ask - tick.bid) if (tick and getattr(tick, 'ask', 0) > getattr(tick, 'bid', 0)) else (sym_info.spread * point)
+
+        if asset_key == "GOLD":
+            pip_size = 0.10
+            max_spread_pips = float(os.environ.get("MAX_SPREAD_GOLD_PIPS", os.environ.get("MAX_SPREAD_PIPS", "30.0")))
+        else:
+            pip_size = 1.00  # $1.00 per pip on Bitcoin
+            max_spread_pips = float(os.environ.get("MAX_SPREAD_BTC_PIPS", "40.0"))
+
+        current_spread_pips = (spread_val / pip_size) if pip_size > 0 else 0.0
 
         if current_spread_pips > max_spread_pips:
             msg = f"Spread Guard REJECTED: Current spread {current_spread_pips:.1f} pips > max {max_spread_pips:.1f} pips."

@@ -541,6 +541,17 @@ class TestHardAssetProject(unittest.TestCase):
         self.assertFalse(safe)
         self.assertIn("Excessive Broker Spread", msg)
 
+        # BTC Spread Guard (40 pips limit max): $38.00 spread <= $40.00 limit PASSES
+        from datetime import datetime, timezone
+        non_news_time = datetime(2026, 11, 2, 10, 0, tzinfo=timezone.utc)
+        safe_btc_pass, msg_pass = sm.check_trade_safety("BTC", proposed_risk_pct=0.5, open_positions=[], spread_val=38.00, sl_dist=500.0, now_utc=non_news_time)
+        self.assertTrue(safe_btc_pass, f"Expected pass, got: {msg_pass}")
+
+        # BTC Spread Guard (40 pips limit max): $45.00 spread > $40.00 limit REJECTS
+        safe_btc_fail, msg_fail = sm.check_trade_safety("BTC", proposed_risk_pct=0.5, open_positions=[], spread_val=45.00, sl_dist=500.0, now_utc=non_news_time)
+        self.assertFalse(safe_btc_fail)
+        self.assertIn("Excessive Broker Spread", msg_fail)
+
         # 3. Slippage Guard:
         is_ok, slip, msg = sm.verify_fill_slippage("GOLD", requested_price=2740.0, fill_price=2740.20)
         self.assertTrue(is_ok)

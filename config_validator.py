@@ -30,8 +30,10 @@ except Exception:
     logger = logging.getLogger("config_validator")
 
 
-def load_env_file(filepath: str = ".env"):
+def load_env_file(filepath: str = None):
     """Loads key-value pairs from .env into os.environ if not already set."""
+    if filepath is None:
+        filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
     if not os.path.exists(filepath):
         return
     try:
@@ -114,6 +116,7 @@ def validate_config(fail_fast: bool = False) -> Tuple[bool, List[str]]:
 
     # MAX_SPREAD_PIPS: > 0 and <= 100
     check_float("MAX_SPREAD_PIPS", 30.0, 0.0, 100.0, inclusive_max=True)
+    check_float("MAX_SPREAD_BTC_PIPS", 40.0, 0.0, 100.0, inclusive_max=True)
 
     # MAX_SLIPPAGE_PIPS: > 0 and <= 20
     check_float("MAX_SLIPPAGE_PIPS", 3.0, 0.0, 20.0, inclusive_max=True)

@@ -85,8 +85,8 @@ MAX_ALLOWED_SLIPPAGE = {
     "BTC": 50.00                     # Max $50.00 fill slippage for Bitcoin
 }
 MAX_ALLOWED_SPREAD = {
-    "GOLD": 0.60,                    # Max $0.60 spread for Gold
-    "BTC": 35.00                     # Max $35.00 spread for Bitcoin
+    "GOLD": float(os.getenv("MAX_ALLOWED_SPREAD_GOLD", "0.60")),
+    "BTC": float(os.getenv("MAX_SPREAD_BTC_PIPS", os.getenv("MAX_ALLOWED_SPREAD_BTC", "40.00")))  # Reworked: 40 pips ($40.00) max limit
 }
 SAFETY_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "safety_state.json")
 AUDIT_LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trade_audit.jsonl")
@@ -319,7 +319,8 @@ class SafetyManager:
                            current_equity: float = None,
                            data_timestamp: float = None,
                            spread_val: float = None,
-                           sl_dist: float = None) -> tuple:
+                           sl_dist: float = None,
+                           now_utc=None) -> tuple:
         """
         Multi-Layer Safety Verification Gauntlet:
           1. Kill-Switch verification
@@ -377,23 +378,26 @@ class SafetyManager:
             if age_sec > MAX_DATA_STALENESS_SECONDS:
                 return False, f"⏱️ Stale Market Data: Quote is {age_sec/60.0:.1f} minutes old (limit: {MAX_DATA_STALENESS_SECONDS/60:.0f}m). Order blocked to prevent trading on expired ticks."
 
-        # Check 6: Pre-Order Spread Guard
+        # Check 6: Pre-Order Spread Guard (Reworked: 40 pips limit max on BTC)
         if spread_val is not None and spread_val > 0:
-            max_spread = MAX_ALLOWED_SPREAD.get(asset_key, 0.60)
+            max_spread = float(MAX_ALLOWED_SPREAD.get(asset_key, 0.60 if asset_key == "GOLD" else 40.00))
             if spread_val > max_spread:
                 return False, f"⚠️ Excessive Broker Spread: Current spread ${spread_val:.2f} exceeds institutional threshold (${max_spread:.2f})."
-            if sl_dist and sl_dist > 0 and (spread_val / sl_dist) > 0.15:
-                return False, f"⚠️ High Spread-to-Risk: Spread ${spread_val:.2f} consumes {(spread_val/sl_dist*100):.1f}% of SL distance (${sl_dist:.2f}) > 15% limit."
+            max_spread_ratio = 0.20 if asset_key == "BTC" else 0.15
+            if sl_dist and sl_dist > 0 and (spread_val / sl_dist) > max_spread_ratio:
+                return False, f"⚠️ High Spread-to-Risk: Spread ${spread_val:.2f} consumes {(spread_val/sl_dist*100):.1f}% of SL distance (${sl_dist:.2f}) > {int(max_spread_ratio*100)}% limit."
 
         # Check 7: High-Impact Macroeconomic News Shield (CPI / NFP / FOMC)
-        now_utc = datetime.now(timezone.utc)
-        if now_utc.weekday() < 5:  # Monday through Friday
-            min_day = now_utc.hour * 60 + now_utc.minute
-            # US Inflation & Employment window: 13:20 - 13:45 UTC
-            # FOMC Rate Decision window: 18:50 - 19:20 UTC
-            is_news_window = (800 <= min_day <= 825) or (1130 <= min_day <= 1160)
-            if is_news_window and spread_val and spread_val > (MAX_ALLOWED_SPREAD.get(asset_key, 0.60) * 0.70):
-                return False, f"📰 High-Impact News Shield ACTIVE: Economic release volatility window in progress (Spread ${spread_val:.2f}). Order blocked to prevent slippage."
+        news_avoidance_on = os.getenv("NEWS_AVOIDANCE_ENABLED", "true").strip().lower() in ("true", "1", "yes")
+        if news_avoidance_on:
+            cur_utc = now_utc if now_utc is not None else datetime.now(timezone.utc)
+            if cur_utc.weekday() < 5:  # Monday through Friday
+                min_day = cur_utc.hour * 60 + cur_utc.minute
+                # US Inflation & Employment window: 13:20 - 13:45 UTC
+                # FOMC Rate Decision window: 18:50 - 19:20 UTC
+                is_news_window = (800 <= min_day <= 825) or (1130 <= min_day <= 1160)
+                if is_news_window and spread_val and spread_val > (float(MAX_ALLOWED_SPREAD.get(asset_key, 0.60 if asset_key == "GOLD" else 40.00)) * 0.70):
+                    return False, f"📰 High-Impact News Shield ACTIVE: Economic release volatility window in progress (Spread ${spread_val:.2f}). Order blocked to prevent slippage."
 
         return True, "Safety Verification Passed: All Circuit Breakers Armed ✅"
 
