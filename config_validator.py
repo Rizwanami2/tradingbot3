@@ -118,6 +118,12 @@ def validate_config(fail_fast: bool = False) -> Tuple[bool, List[str]]:
     check_float("MAX_SPREAD_PIPS", 30.0, 0.0, 100.0, inclusive_max=True)
     check_float("MAX_SPREAD_BTC_PIPS", 40.0, 0.0, 100.0, inclusive_max=True)
 
+    # Micro-Scalp SL/TP Bounds
+    check_float("BTC_SCALP_MIN_SL", 100.0, 10.0, 1000.0, inclusive_max=True)
+    check_float("BTC_SCALP_MAX_SL", 180.0, 10.0, 2000.0, inclusive_max=True)
+    check_float("GOLD_SCALP_MIN_SL", 1.80, 0.5, 20.0, inclusive_max=True)
+    check_float("GOLD_SCALP_MAX_SL", 2.80, 0.5, 50.0, inclusive_max=True)
+
     # MAX_SLIPPAGE_PIPS: > 0 and <= 20
     check_float("MAX_SLIPPAGE_PIPS", 3.0, 0.0, 20.0, inclusive_max=True)
 

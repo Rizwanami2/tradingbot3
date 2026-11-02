@@ -665,7 +665,7 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
     execution_entry = limit_entry_price if use_limit_order else curr
 
     # Symmetrical TP & SL Calculation for Profile Execution
-    sl_dist = 3.80 if asset_type == "GOLD" else 350.0
+    sl_dist = 2.80 if asset_type == "GOLD" else 150.0
     if RISK_ENGINE_AVAILABLE:
         active_strat_code = risk_engine.get_active_strategy()["code"] if hasattr(risk_engine, "get_active_strategy") else "SCALP"
         strat_calc = risk_engine.calculate_strategy_levels(

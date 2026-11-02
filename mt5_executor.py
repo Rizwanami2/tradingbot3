@@ -443,7 +443,7 @@ class MT5LiveBroker:
         if current_mode == "PAPER" and safety_manager:
             open_pos = safety_manager.get_paper_positions()
             paper_bal = safety_manager.state.get("paper_account", {}).get("balance", 10000.0)
-            sl_dist = abs(entry_price - stop_loss) if (entry_price > 0 and stop_loss > 0) else (5.0 if is_gold_asset else 400.0)
+            sl_dist = abs(entry_price - stop_loss) if (entry_price > 0 and stop_loss > 0) else (2.80 if is_gold_asset else 150.0)
             tp_dist = abs(take_profit - entry_price) if (entry_price > 0 and take_profit > 0) else (sl_dist * 1.20)
 
             # SL/TP Side Validation for Paper
@@ -582,7 +582,7 @@ class MT5LiveBroker:
             return {"success": False, "error": msg, "mode": current_mode}
 
         # Calculate exact SL and TP distances from entry and anchor to live fill_price
-        sl_dist = abs(entry_price - stop_loss) if (entry_price > 0 and stop_loss > 0) else (5.0 if is_gold_asset else 400.0)
+        sl_dist = abs(entry_price - stop_loss) if (entry_price > 0 and stop_loss > 0) else (2.80 if is_gold_asset else 150.0)
         tp_dist = abs(take_profit - entry_price) if (entry_price > 0 and take_profit > 0) else (sl_dist * 1.20)
 
         # Min Distance Guard Gate (trade_stops_level)
@@ -826,7 +826,7 @@ class MT5LiveBroker:
     TRAIL_PROFILES = {
         "SCALP": {
             "name": "SCALP",
-            "breakeven_r": 0.35,
+            "breakeven_r": 0.30,
             "trail_start_r": 0.65,
             "trail_step_r": 0.20,
         },
@@ -980,7 +980,7 @@ class MT5LiveBroker:
                 if curr_sl > 0 and ((is_buy and curr_sl < entry) or (not is_buy and curr_sl > entry)):
                     risk_dist = abs(entry - curr_sl)
                 else:
-                    risk_dist = 3.0 if ("XAU" in symbol.upper() or "GOLD" in symbol.upper()) else 250.0
+                    risk_dist = 2.50 if ("XAU" in symbol.upper() or "GOLD" in symbol.upper()) else 150.0
                 self.position_initial_risks[ticket] = risk_dist
 
             if risk_dist <= 0:

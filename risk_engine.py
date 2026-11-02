@@ -383,7 +383,7 @@ class SafetyManager:
             max_spread = float(MAX_ALLOWED_SPREAD.get(asset_key, 0.60 if asset_key == "GOLD" else 40.00))
             if spread_val > max_spread:
                 return False, f"⚠️ Excessive Broker Spread: Current spread ${spread_val:.2f} exceeds institutional threshold (${max_spread:.2f})."
-            max_spread_ratio = 0.20 if asset_key == "BTC" else 0.15
+            max_spread_ratio = 0.35 if asset_key == "BTC" else 0.20
             if sl_dist and sl_dist > 0 and (spread_val / sl_dist) > max_spread_ratio:
                 return False, f"⚠️ High Spread-to-Risk: Spread ${spread_val:.2f} consumes {(spread_val/sl_dist*100):.1f}% of SL distance (${sl_dist:.2f}) > {int(max_spread_ratio*100)}% limit."
 
@@ -1010,19 +1010,19 @@ safety_manager = SafetyManager()
 STRATEGIES = {
     "SCALP": {
         "code": "SCALP",
-        "name": "Institutional Key-Level Scalp",
-        "description": "Small, low practical SL/TP on institutional key trade levels. Focus: ~75-85% practical scalp win rate.",
-        "sl_mult": 0.22,
-        "rr_tp1": 1.20,
-        "rr_tp2": 1.75,
-        "breakeven_r": 0.35,       # Fast breakeven lock at +0.35R (eliminates drawdown risk immediately)
-        "trail_start_r": 0.65,     # Dynamic trail starts at +0.65R
-        "trail_step_r": 0.20,      # Tight 0.20R trailing buffer
-        "risk_pct": 0.50,          # Conservative 0.50% risk per scalp
-        "target_win_rate": "~75-85% (Key Level Practical Scalp)",
-        "accuracy_tip": "Key level (Golden Pocket, S/R, EMA), wick <28%, body >=28%, RSI 35-70",
-        "regime_filter": "Key Level Reaction / Momentum",
-        "holding_time": "5 - 30 minutes",
+        "name": "Institutional Micro Scalp",
+        "description": "Ultra-fast micro SL/TP on 1M/5M candles. Quick momentum capture with early risk-free breakeven.",
+        "sl_mult": float(os.getenv("BTC_SCALP_SL_MULT", "0.16")),
+        "rr_tp1": float(os.getenv("BTC_SCALP_RR_TP1", "1.15")),
+        "rr_tp2": float(os.getenv("BTC_SCALP_RR_TP2", "1.60")),
+        "breakeven_r": float(os.getenv("BTC_SCALP_BE_R", "0.30")),   # Ultra-fast breakeven lock at +0.30R
+        "trail_start_r": 0.65,                                        # Dynamic trail starts at +0.65R
+        "trail_step_r": 0.20,                                         # Tight 0.15R trailing step
+        "risk_pct": 0.50,                                             # Conservative 0.50% risk per micro scalp
+        "target_win_rate": "~75-85% (1M/5M Micro Scalp)",
+        "accuracy_tip": "1M/5M Key level reaction, rejection wick <25%, momentum body >=30%, RSI 35-70",
+        "regime_filter": "1M/5M Key Level Reaction / Micro Momentum",
+        "holding_time": "1 - 15 minutes",
         "lot_cap_gold": 0.20,
         "lot_cap_btc": 0.10
     },
@@ -1565,18 +1565,19 @@ def calculate_strategy_levels(asset: str, current_price: float, atr: float = 0.0
 
     sl_mult = strat["sl_mult"] + dynamic_buffer
 
-    # 1. Strategy-Specific Stop-Loss Distance (Tight, Low Practical Scalping Bounds)
+    # 1. Strategy-Specific Stop-Loss Distance (Ultra-Tight Micro-Scalp Bounds for 1M/5M)
     raw_sl_dist = base_atr * sl_mult
     if asset_key == "GOLD":
-        min_bound = 2.40 if strat_key == "SCALP" else 6.00 if strat_key == "SWING" else 3.50
-        max_bound = 3.50 if strat_key == "SCALP" else 35.00 if strat_key == "SWING" else 15.00
-        if dynamic_buffer > 0:
+        min_bound = float(os.getenv("GOLD_SCALP_MIN_SL", "1.80")) if strat_key == "SCALP" else 6.00 if strat_key == "SWING" else 3.50
+        max_bound = float(os.getenv("GOLD_SCALP_MAX_SL", "2.80")) if strat_key == "SCALP" else 35.00 if strat_key == "SWING" else 15.00
+        if dynamic_buffer > 0 and strat_key != "SCALP":
             max_bound += round(base_atr * dynamic_buffer, 2)
         sl_dist = max(min_bound, min(raw_sl_dist, max_bound))
     else:
-        min_bound = 190.0 if strat_key == "SCALP" else 800.0 if strat_key == "SWING" else 400.0
-        max_bound = 300.0 if strat_key == "SCALP" else 3500.0 if strat_key == "SWING" else 1800.0
-        if dynamic_buffer > 0:
+        # Bitcoin Micro-Scalp: $100 - $180 SL distance for micro trades (Never blown up on scalps)
+        min_bound = float(os.getenv("BTC_SCALP_MIN_SL", "100.0")) if strat_key == "SCALP" else 800.0 if strat_key == "SWING" else 400.0
+        max_bound = float(os.getenv("BTC_SCALP_MAX_SL", "180.0")) if strat_key == "SCALP" else 3500.0 if strat_key == "SWING" else 1800.0
+        if dynamic_buffer > 0 and strat_key != "SCALP":
             max_bound += round(base_atr * dynamic_buffer, 2)
         sl_dist = max(min_bound, min(raw_sl_dist, max_bound))
 
