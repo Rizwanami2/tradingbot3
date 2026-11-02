@@ -3324,7 +3324,200 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
                 send_telegram_chart(token, sender_id, g_buf, f"📊 MT5 Chart Scan: Gold (${data['gold']['price']:,.2f}) | {data['gold']['verdict']}")
         return
 
-    # ── 2B. PREDICTIVE SIGNAL COMMANDS (/signal_gold | /signal_btc | /signalgold | /signalbtc) ──
+    # ── 2B. MT5 LIVE TRADING COMMANDS ──
+    if cmd == "/mt5_connect":
+        if not (MT5_EXECUTOR_AVAILABLE and live_broker):
+            send_message(token, sender_id, "⚠️ MT5 Executor module not available.")
+            return
+        ok, msg = live_broker.connect()
+        if ok:
+            msg_text = (
+                f"🟢 *MT5 CONNECTED SUCCESSFULLY*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"{msg}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"💡 Use /mt5_status to check account details.\n"
+                f"💡 Use /mt5_positions to view open positions."
+            )
+            send_message(token, sender_id, msg_text)
+        else:
+            send_message(token, sender_id, f"❌ *MT5 CONNECTION FAILED*\n\n{msg}\n\n💡 Make sure MetaTrader 5 terminal is running and you're logged in.")
+        return
+
+    if cmd == "/mt5_status":
+        if not (MT5_EXECUTOR_AVAILABLE and live_broker):
+            send_message(token, sender_id, "⚠️ MT5 Executor module not available.")
+            return
+        if not live_broker.is_connected:
+            send_message(token, sender_id, "🔴 *MT5 NOT CONNECTED*\n\nUse /mt5_connect to connect to your MT5 terminal.\n\nSetup steps:\n1. Open MetaTrader 5 on your VPS\n2. Log in with your broker account\n3. Enable Algo Trading (Tools → Options → Expert Advisors)\n4. Run /mt5_connect again")
+            return
+        acc_data = live_broker.get_live_account_data()
+        if not acc_data:
+            send_message(token, sender_id, "❌ Failed to retrieve account data from MT5.")
+            return
+        status_msg = (
+            f"🟢 *MT5 CONNECTED - LIVE ACCOUNT*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"• Broker: {acc_data.get('broker', 'N/A')}\n"
+            f"• Account: #{acc_data.get('login', 'N/A')} ({acc_data.get('server', 'N/A')})\n"
+            f"• Currency: {acc_data.get('currency', 'USD')}\n"
+            f"• Leverage: 1:{acc_data.get('leverage', 'N/A')}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"💰 Balance: ${acc_data.get('balance', 0):,.2f}\n"
+            f"💰 Equity:  ${acc_data.get('equity', 0):,.2f}\n"
+            f"💵 Free Margin: ${acc_data.get('margin_free', 0):,.2f}\n"
+            f"📊 Margin Level: {acc_data.get('margin_level', 0):.1f}%\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 Open Positions: {acc_data.get('open_positions_count', 0)}\n"
+            f"🔌 Algo Trading: {'✅ Enabled' if acc_data.get('trade_allowed') else '❌ Disabled'}\n"
+        )
+        status_markup = {
+            "inline_keyboard": [
+                [{"text": "📊 View Positions", "callback_data": "mt5_positions"}],
+                [{"text": "🔄 Refresh Status", "callback_data": "mt5_status"}],
+                [{"text": "🔴 Disconnect", "callback_data": "mt5_disconnect"}]
+            ]
+        }
+        send_message(token, sender_id, status_msg, reply_markup=safety_markup if False else status_markup)
+        return
+
+    if cmd == "/mt5_positions":
+        if not (MT5_EXECUTOR_AVAILABLE and live_broker):
+            send_message(token, sender_id, "⚠️ MT5 Executor module not available.")
+            return
+        if not live_broker.is_connected:
+            send_message(token, sender_id, "❌ MT5 not connected. Use /mt5_connect first.")
+            return
+        positions = live_broker.get_open_positions()
+        if not positions:
+            send_message(token, sender_id, "📭 No open positions on MT5.")
+            return
+        pos_msg = "📋 *MT5 OPEN POSITIONS*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        tot_pnl = 0.0
+        for p in positions:
+            sym = p.get("symbol", "Unknown")
+            side = p.get("type", "BUY")
+            lots = p.get("lots", p.get("volume", 0))
+            entry = p.get("open_price", p.get("entry", 0))
+            curr = p.get("current_price", p.get("price", 0))
+            sl = p.get("sl", 0)
+            tp = p.get("tp", 0)
+            pnl = p.get("profit", 0)
+            tot_pnl += pnl
+            icon = "🟢" if pnl >= 0 else "🔴"
+            pos_side = "BUY 🟢" if side in (0, "BUY", "buy") else "SELL 🔴"
+            levels_msg = (
+                f"• `{sym}` {pos_side} `{lots}` lots (Ticket `#{p.get('ticket', p.get('ticket', '?'))}`)\n"
+                f"  Entry: `${entry:,.2f}` | SL: `${sl:,.2f}` | TP: `${tp:,.2f}`\n"
+                f"  Current: `${curr:,.2f}` | PnL: {icon} `${pnl:+,.2f}`\n"
+            )
+            pos_msg += levels_msg + "\n"
+        pos_msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n💰 *Total Floating PnL: ${tot_pnl:+,.2f}*\n"
+        pos_msg += "\n💡 Use `/close_all` to close all positions."
+        send_message(token, sender_id, pos_msg)
+        return
+
+    if cmd == "/mt5_disconnect":
+        if not (MT5_EXECUTOR_AVAILABLE and live_broker):
+            send_message(token, sender_id, "⚠️ MT5 Executor module not available.")
+            return
+        if not live_broker.is_connected:
+            send_message(token, sender_id, "ℹ️ MT5 is not connected.")
+            return
+        try:
+            mt5.shutdown()
+            live_broker.broker_connected = False
+            live_broker.is_connected = False
+            send_message(token, sender_id, "🔴 *MT5 DISCONNECTED*\nMT5 terminal connection closed.\nUse /mt5_connect to reconnect.")
+        except Exception as e:
+            send_message(token, sender_id, f"❌ Error disconnecting MT5: {e}")
+        return
+
+    # ── 2C. DIRECT MT5 TRADE COMMANDS ──
+    if cmd in ("/buy_gold", "/sell_gold", "/buy_btc", "/sellbtc", "/sell_btc"):
+        if not (MT5_EXECUTOR_AVAILABLE and live_broker):
+            send_message(token, sender_id, "⚠️ MT5 Executor module not available.")
+            return
+        if not live_broker.is_connected:
+            send_message(token, sender_id, "❌ MT5 not connected. Use /mt5_connect first.")
+            return
+        # Parse command: /buy_gold, /sell_gold, /buy_btc, /sell_btc
+        parts = cmd.replace("/", "").split("_")
+        action = parts[0].upper()  # BUY or SELL
+        asset_raw = parts[1] if len(parts) > 1 else ""
+        asset_type = "GOLD" if asset_raw in ("gold", "g", "xau", "xauusd") else "BTC"
+        symbol = "GC=F" if asset_type == "GOLD" else "BTC-USD"
+
+        # Get current price from market data
+        try:
+            from market_data import market_data_feed
+            if MARKET_DATA_AVAILABLE and market_data_feed:
+                hist = market_data_feed.get_historical_bars(asset_type, period="5d")
+                if hist is not None and len(hist) > 0:
+                    curr_price = float(hist["Close"].iloc[-1])
+                else:
+                    curr_price = None
+            else:
+                curr_price = None
+        except Exception:
+            curr_price = None
+
+        if not curr_price:
+            send_message(token, sender_id, "⚠️ Could not fetch current market price. Try again in a moment.")
+            return
+
+        # Default lot size - 0.01 for safety
+        lot_size = 0.01
+        # Calculate SL/TP based on ATR or fixed distance
+        import numpy as np
+        if "GC=F" in symbol or "GOLD" in symbol.upper():
+            sl_dist = 3.0  # $3.50 for Gold
+            tp_dist = sl_dist * 1.25
+        else:
+            sl_dist = 200.0  # $200 for BTC
+            tp_dist = sl_dist * 1.25
+
+        if action == "BUY":
+            entry = curr_price
+            sl = round(entry - sl_dist, 2)
+            tp1 = round(entry + tp_dist, 2)
+        else:
+            entry = curr_price
+            sl = round(entry + sl_dist, 2)
+            tp1 = round(entry - tp_dist, 2)
+
+        # Execute via MT5 executor
+        result = mt5_executor.execute_live_sniper_order(
+            asset=asset_type,
+            action=action,
+            entry_price=entry,
+            stop_loss=sl,
+            take_profit=tp1,
+            lot_size=lot_size,
+            comment=f"Telegram {action} {asset_type}"
+        )
+
+        if result.get("success"):
+            exec_msg = (
+                f"✅ *ORDER EXECUTED ON MT5*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"• Asset: {asset_type} ({symbol})\n"
+                f"• Action: {action}\n"
+                f"• Entry: ${result.get('entry', entry):,.2f}\n"
+                f"• Stop-Loss: ${result.get('stop_loss', sl):,.2f}\n"
+                f"• Take-Profit: ${result.get('tp1', tp1):,.2f}\n"
+                f"• Lot Size: {lot_size}\n"
+                f"• Ticket: #{result.get('ticket', 'N/A')}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📊 Monitor with /mt5_positions\n"
+                f"🛑 Close all with /close_all"
+            )
+            send_message(token, sender_id, exec_msg)
+        else:
+            send_message(token, sender_id, f"❌ *ORDER REJECTED*\n\n{result.get('error', 'Unknown error')}\n\nCheck MT5 terminal and try again.")
+        return
+
+    # ── 3. MODERN TRADE HUB (/trade [buy|sell|close|auto]) ──
     # Dedicated signal commands - returns only the signal setup (no macro/news)
     if cmd in ("/signal_gold", "/signalgold"):
         if not (MARKET_DATA_AVAILABLE and market_data_feed):

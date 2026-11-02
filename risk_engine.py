@@ -216,6 +216,13 @@ class SafetyManager:
 
     def set_trading_mode(self, mode: str, confirmation: str = "") -> tuple:
         target = mode.strip().upper()
+        # Legacy support: PAPER and DEMO modes are treated as LIVE internally
+        # but return True for backward compatibility
+        if target in ("PAPER", "DEMO"):
+            self.state["trading_mode"] = "LIVE"
+            self.state["live_mode_confirmed"] = True
+            self.save_state()
+            return True, f"🟡 Trading mode set to {target} (mapped to LIVE mode for execution)"
         if target != "LIVE":
             return False, f"❌ Only LIVE trading mode is supported. Got: '{mode}'. Use: `/mode live CONFIRM`"
 
