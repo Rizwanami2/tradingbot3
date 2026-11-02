@@ -543,8 +543,8 @@ class TestHardAssetProject(unittest.TestCase):
         safe, msg = sm.check_trade_safety("GOLD", proposed_risk_pct=0.5, open_positions=[], data_timestamp=fresh_time)
         self.assertTrue(safe)
 
-        # 2. Spread Guard: excessive spread (e.g. $1.50 for Gold > $0.60 limit)
-        safe, msg = sm.check_trade_safety("GOLD", proposed_risk_pct=0.5, open_positions=[], spread_val=1.50, sl_dist=4.0)
+        # 2. Spread Guard: excessive spread (e.g. $3.50 for Gold > $3.00 / 30 pips limit)
+        safe, msg = sm.check_trade_safety("GOLD", proposed_risk_pct=0.5, open_positions=[], spread_val=3.50, sl_dist=4.0)
         self.assertFalse(safe)
         self.assertIn("Excessive Broker Spread", msg)
 

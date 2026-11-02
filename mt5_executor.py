@@ -350,7 +350,9 @@ class MT5LiveBroker:
         if not self.ensure_connected():
             return "XAUUSD" if asset_key == "GOLD" else "BTCUSD"
 
-        candidates = GOLD_SYMBOL_CANDIDATES if asset_key == "GOLD" else BTC_SYMBOL_CANDIDATES
+        env_sym = os.getenv("MT5_GOLD_SYMBOL" if asset_key == "GOLD" else "MT5_BTC_SYMBOL", "").strip()
+        base_candidates = GOLD_SYMBOL_CANDIDATES if asset_key == "GOLD" else BTC_SYMBOL_CANDIDATES
+        candidates = ([env_sym] if env_sym else []) + [c for c in base_candidates if c != env_sym]
 
         def _is_valid_tradable(sym_name: str) -> bool:
             info = mt5.symbol_info(sym_name)
@@ -656,6 +658,17 @@ class MT5LiveBroker:
 
         asset_deviation = 40 if is_gold_asset else 650  # 40 pts Gold ($0.40), 650 pts BTC ($6.50)
 
+        # Determine preferred broker filling mode
+        preferred_filling = mt5.ORDER_FILLING_IOC
+        if hasattr(sym_info, "filling_mode"):
+            fm = getattr(sym_info, "filling_mode", 0)
+            if fm & 2:
+                preferred_filling = mt5.ORDER_FILLING_IOC
+            elif fm & 1:
+                preferred_filling = mt5.ORDER_FILLING_FOK
+            else:
+                preferred_filling = mt5.ORDER_FILLING_RETURN
+
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": symbol,
@@ -668,21 +681,18 @@ class MT5LiveBroker:
             "magic": 999888,
             "comment": comment,
             "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_filling": preferred_filling,
         }
 
-        # First attempt with IOC, fallback to FOK or RETURN if broker requires
+        # Send with preferred filling mode, then gracefully cycle alternates if rejected
         res = mt5.order_send(request)
-        if res is None:
-            err = mt5.last_error()
-            return {"success": False, "error": f"MT5 order_send returned None: {err}"}
-
-        if res.retcode != mt5.TRADE_RETCODE_DONE:
-            for filling in [mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN]:
-                request["type_filling"] = filling
-                res = mt5.order_send(request)
-                if res is not None and res.retcode == mt5.TRADE_RETCODE_DONE:
-                    break
+        if res is None or res.retcode != mt5.TRADE_RETCODE_DONE:
+            for filling in [mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN]:
+                if filling != preferred_filling:
+                    request["type_filling"] = filling
+                    res = mt5.order_send(request)
+                    if res is not None and res.retcode == mt5.TRADE_RETCODE_DONE:
+                        break
 
         if res is None or res.retcode != mt5.TRADE_RETCODE_DONE:
             comment_str = res.comment if res else str(mt5.last_error())

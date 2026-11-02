@@ -464,18 +464,23 @@ def verify_live_candle_direction(asset: str, action: str) -> tuple[bool, str]:
     c_low = float(latest["low"] if "low" in latest else latest["Low"])
     c_range = max(c_high - c_low, 0.001)
 
+    abs_body = abs(c_close - c_open)
+    is_noise_candle = (abs_body < 0.40 if asset_norm == "GOLD" else abs_body < 40.0) or (abs_body / c_range <= 0.25)
+
     if act_upper in ("BUY", "LONG"):
-        if c_close < c_open:
-            return False, f"Live candle is RED / DUMPING (Close ${c_close:,.2f} < Open ${c_open:,.2f}). Entry blocked to avoid catching falling knife."
+        if c_close < c_open and not is_noise_candle:
+            if (abs_body / c_range) >= 0.45:
+                return False, f"Live candle is RED / DUMPING (Close ${c_close:,.2f} < Open ${c_open:,.2f}). Entry blocked to avoid catching falling knife."
         upper_wick = c_high - max(c_open, c_close)
-        if (upper_wick / c_range) >= 0.40:
-            return False, "Live candle rejected with >=40% upper wick (Bull Trap resistance). Buy blocked."
+        if (upper_wick / c_range) >= 0.50 and not is_noise_candle:
+            return False, "Live candle rejected with >=50% upper wick (Bull Trap resistance). Buy blocked."
     elif act_upper in ("SELL", "SHORT"):
-        if c_close > c_open:
-            return False, f"Live candle is GREEN / PUMPING (Close ${c_close:,.2f} > Open ${c_open:,.2f}). Entry blocked to avoid shorting momentum."
+        if c_close > c_open and not is_noise_candle:
+            if (abs_body / c_range) >= 0.45:
+                return False, f"Live candle is GREEN / PUMPING (Close ${c_close:,.2f} > Open ${c_open:,.2f}). Entry blocked to avoid shorting momentum."
         lower_wick = min(c_open, c_close) - c_low
-        if (lower_wick / c_range) >= 0.40:
-            return False, "Live candle bounced with >=40% lower wick (Bear Trap support). Sell blocked."
+        if (lower_wick / c_range) >= 0.50 and not is_noise_candle:
+            return False, "Live candle bounced with >=50% lower wick (Bear Trap support). Sell blocked."
 
     return True, "Live candle aligned with order momentum."
 
@@ -1523,28 +1528,32 @@ def _analyze_single_side(symbol: str, asset_type: str, macro: dict, hist, levels
         feat_res = ((sw_h - curr) / curr <= 0.05) if curr > 0 else False
         is_bull_trap = (trap_type in ("BULL_TRAP", "UPTHRUST"))
         feat_no_bear_trap = (trap_type not in ("BEAR_TRAP", "SPRING"))
+        feat_gp = levels.get("in_golden_pocket", False) or feat_res
 
         if asset_type == "BTC":
             feat_dxy = macro["dxy_chg"] >= -0.15
             feat_yield = macro["tnx_chg"] >= -0.2
-            feat_trend200 = curr < ma200
-            feat_trend50 = curr < ma50
-            feat_mayer = mayer >= 1.50 or mayer < 0.85
-            feat_rsi = 42 <= rsi <= 72
+            is_extended_200 = (ma200 > 0 and (curr - ma200) / ma200 >= 0.12)
+            feat_trend200 = (curr < ma200) or is_extended_200 or (levels.get("ma20_ema") and curr < levels["ma20_ema"])
+            feat_trend50 = (curr < ma50) or (levels.get("ma20_ema") and curr < levels["ma20_ema"]) or (plus_di < minus_di)
+            feat_mayer = mayer >= 1.25 or mayer < 0.85
+            feat_rsi = (40 <= rsi <= 68) or (rsi >= 65)
             feat_vol = vol30 < 75
 
             if feat_dxy: factors_hit.append("Macro: USD stability/strength (Short tailwind)")
             if feat_yield: factors_hit.append("Yields: 10Y real yields supportive for Short")
-            if feat_trend200: factors_hit.append(f"Trend: Below 200 SMA (${ma200:,.0f})")
-            if feat_trend50: factors_hit.append("Trend: Below 50 SMA")
+            if feat_trend200: factors_hit.append(f"Trend: {'Below 200 SMA' if curr < ma200 else 'Overextended 200 SMA / Bearish Shift'}")
+            if feat_trend50: factors_hit.append("Trend: Below 50 SMA / Intraday Bearish Alignment")
             if feat_mayer: factors_hit.append(f"Valuation: Mayer Multiple overbought/exhausted ({mayer:.2f}x)")
             if feat_rsi: factors_hit.append(f"Momentum: RSI short sweet spot ({rsi:.1f})")
+            if feat_gp: factors_hit.append("Key Level: Bearish Golden Pocket / Resistance Ceiling")
             if is_bull_trap: factors_hit.append("Microstructure: Bull Trap at Resistance (Prime Fade Opportunity)")
+            elif feat_no_bear_trap: factors_hit.append("Microstructure: Clean bear auction (Zero Bear Trap)")
             if feat_res: factors_hit.append(f"Structure: Near major swing resistance ceiling (${sw_h:,.0f})")
             if feat_vol: factors_hit.append(f"Volatility: Orderly ({vol30:.1f}%)")
 
             active_features = {
-                "in_golden_pocket": False,
+                "in_golden_pocket": bool(feat_gp),
                 "no_trap": bool(feat_no_bear_trap),
                 "macro_dxy_tailwind": bool(feat_dxy),
                 "macro_yield_tailwind": bool(feat_yield),
@@ -1559,23 +1568,29 @@ def _analyze_single_side(symbol: str, asset_type: str, macro: dict, hist, levels
         else:  # GOLD SELL
             feat_dxy = macro["dxy_chg"] >= -0.10
             feat_yield = macro["tnx_chg"] >= -0.10
-            feat_trend200 = curr < ma200
-            feat_trend50 = curr < ma50
-            feat_rsi = 45 <= rsi <= 70
-            feat_gsr = macro["gsr"] <= 75
-            feat_vol = vol30 < 25
+            # Institutional Trend for Short: Below 200 SMA OR overextended above 200 SMA (stretch >=10%) OR below 20 EMA / 50 SMA intraday
+            is_extended_200 = (ma200 > 0 and (curr - ma200) / ma200 >= 0.10)
+            feat_trend200 = (curr < ma200) or is_extended_200 or (levels.get("ma20_ema") and curr < levels["ma20_ema"])
+            feat_trend50 = (curr < ma50) or (levels.get("ma20_ema") and curr < levels["ma20_ema"]) or (plus_di < minus_di)
+            feat_rsi = (42 <= rsi <= 68) or (rsi >= 62)
+            # Valuation: GSR softening / silver leading OR extreme GSR extension >= 84 (metals mean reversion) OR GSR <= 80
+            feat_gsr = macro.get("gsr", 85) >= 84 or macro.get("gsr", 85) <= 80 or macro.get("gsr_chg", 0) <= 0.05
+            feat_vol = vol30 < 28
 
             if feat_dxy: factors_hit.append("Macro: DXY firming (Short tailwind)")
-            if feat_yield: factors_hit.append("Yields: 10Y real yields firm")
-            if feat_trend200: factors_hit.append(f"Trend: Below 200 SMA (${ma200:,.0f})")
-            if feat_trend50: factors_hit.append("Trend: Below 50 SMA")
-            if feat_rsi: factors_hit.append(f"Momentum: RSI overextended ({rsi:.1f})")
+            if feat_yield: factors_hit.append("Yields: 10Y real yields firm (Opportunity cost)")
+            if feat_trend200: factors_hit.append(f"Trend: {'Below 200 SMA' if curr < ma200 else 'Overextended 200 SMA / Bearish Shift'}")
+            if feat_trend50: factors_hit.append("Trend: Below 50 SMA / Intraday Bearish Alignment")
+            if feat_rsi: factors_hit.append(f"Momentum: RSI short sweet spot ({rsi:.1f})")
+            if feat_gp: factors_hit.append("Key Level: Bearish Golden Pocket / Resistance Ceiling")
+            if feat_gsr: factors_hit.append(f"Metals Value: GSR setup ({macro.get('gsr', 85):.1f}x)")
             if is_bull_trap: factors_hit.append("Microstructure: Bull Trap rejection at ceiling (Fade Opportunity)")
+            elif feat_no_bear_trap: factors_hit.append("Microstructure: Clean bear auction (Zero Bear Trap)")
             if feat_res: factors_hit.append(f"Structure: Near major swing resistance ceiling (${sw_h:,.0f})")
             if feat_vol: factors_hit.append(f"Volatility: Orderly ({vol30:.1f}%)")
 
             active_features = {
-                "in_golden_pocket": False,
+                "in_golden_pocket": bool(feat_gp),
                 "no_trap": bool(feat_no_bear_trap),
                 "macro_dxy_tailwind": bool(feat_dxy),
                 "macro_yield_tailwind": bool(feat_yield),
@@ -1947,15 +1962,28 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
         buy_setup["adapted_strat"] = adapted_strat
         sell_setup["adapted_strat"] = adapted_strat
 
-    # Select dominant institutional side
+    # Select dominant institutional side (With Microstructure & Reversal Tie-Breaking)
     if sell_setup["is_a_plus"] and not buy_setup["is_a_plus"]:
         dominant_side = "SELL"
     elif buy_setup["is_a_plus"] and not sell_setup["is_a_plus"]:
         dominant_side = "BUY"
     elif sell_setup["final_score"] > buy_setup["final_score"]:
         dominant_side = "SELL"
-    else:
+    elif buy_setup["final_score"] > sell_setup["final_score"]:
         dominant_side = "BUY"
+    else:
+        # Tie-break based on MTF reversal / ChoCH
+        rev_audit = mtf_trend.get("reversal_audit", {}) if mtf_trend else {}
+        if rev_audit.get("reversal_type") == "CONFIRMED_BEARISH_REVERSAL" or (mtf_trend and mtf_trend.get("market_movement") == "EARLY_BEARISH_REVERSAL"):
+            dominant_side = "SELL"
+        elif rev_audit.get("reversal_type") == "CONFIRMED_BULLISH_REVERSAL" or (mtf_trend and mtf_trend.get("market_movement") == "EARLY_BULLISH_REVERSAL"):
+            dominant_side = "BUY"
+        elif mtf_trend and mtf_trend.get("normalized_score", 0.0) < -0.15:
+            dominant_side = "SELL"
+        elif mtf_trend and mtf_trend.get("normalized_score", 0.0) > 0.15:
+            dominant_side = "BUY"
+        else:
+            dominant_side = "SELL" if rsi > 55 else "BUY"
 
     dom = buy_setup if dominant_side == "BUY" else sell_setup
 
@@ -2968,9 +2996,28 @@ def auto_scanner_worker(token: str, chat_id_getter):
             current_time = time.time()
 
             # ── 1. Bitcoin (BTC/USD) Continuous Scanner (Dual-Sided: BUY & SELL) ──
-            b_target = b.get("buy") if b.get("dominant_side") == "BUY" else b.get("sell")
-            if not b_target: b_target = b
-            b_act = b_target.get("action", b.get("dominant_side", "BUY"))
+            b_buy = b.get("buy", b)
+            b_sell = b.get("sell", b)
+            b_dom = b.get("dominant_side", "BUY")
+
+            # Dual-side qualification: evaluate both sides and select highest qualified side
+            is_qual_b_buy = not b_buy.get('verdict', '').startswith("🔴") and (
+                b_buy.get('is_a_plus') or b_buy.get('verdict', '').startswith("🟢") or b_buy.get('final_score', 0) >= 7
+            )
+            is_qual_b_sell = not b_sell.get('verdict', '').startswith("🔴") and (
+                b_sell.get('is_a_plus') or b_sell.get('verdict', '').startswith("🟢") or b_sell.get('final_score', 0) >= 7
+            )
+
+            if is_qual_b_sell and not is_qual_b_buy:
+                b_target = b_sell
+            elif is_qual_b_buy and not is_qual_b_sell:
+                b_target = b_buy
+            elif is_qual_b_sell and is_qual_b_buy:
+                b_target = b_sell if b_sell.get('final_score', 0) > b_buy.get('final_score', 0) else (b_buy if b_buy.get('final_score', 0) > b_sell.get('final_score', 0) else (b_sell if b_dom == "SELL" else b_buy))
+            else:
+                b_target = b_buy if b_dom == "BUY" else b_sell
+
+            b_act = b_target.get("action", b_dom)
             is_qualified_b = not b_target['verdict'].startswith("🔴") and (
                 b_target.get('is_a_plus') or
                 b_target.get('verdict', '').startswith("🟢") or
@@ -3008,6 +3055,11 @@ def auto_scanner_worker(token: str, chat_id_getter):
                             setup_data["ticket"] = exec_result.get("ticket")
                             setup_data["status"] = "EXECUTED"
                             set_pending_setup("BTC", setup_data)
+                        else:
+                            # If auto-execution failed on temporary gate, permit retry on next candle
+                            with DEDUP_LOCK:
+                                if "BTC" in LAST_ALERTED:
+                                    LAST_ALERTED["BTC"]["time"] = current_time - ALERT_COOLDOWN_SECONDS + 60
 
                     print(f"🎯 [{datetime.now().strftime('%H:%M:%S')}] BTC SIGNAL DETECTED: ${b['price']:,.2f} (Score {b['final_score']}/10)! AutoPush={is_auto}")
                     alert_text, reply_markup = format_elite_alert("BTC", data, setup_data, exec_result, is_auto)
@@ -3022,9 +3074,28 @@ def auto_scanner_worker(token: str, chat_id_getter):
 
 
             # ── 2. Gold (XAU/USD) Continuous Scanner (Dual-Sided: BUY & SELL) ──
-            g_target = g.get("buy") if g.get("dominant_side") == "BUY" else g.get("sell")
-            if not g_target: g_target = g
-            g_act = g_target.get("action", g.get("dominant_side", "BUY"))
+            g_buy = g.get("buy", g)
+            g_sell = g.get("sell", g)
+            g_dom = g.get("dominant_side", "BUY")
+
+            # Dual-side qualification: evaluate both sides and select highest qualified side
+            is_qual_g_buy = not g_buy.get('verdict', '').startswith("🔴") and (
+                g_buy.get('is_a_plus') or g_buy.get('verdict', '').startswith("🟢") or g_buy.get('final_score', 0) >= 7
+            )
+            is_qual_g_sell = not g_sell.get('verdict', '').startswith("🔴") and (
+                g_sell.get('is_a_plus') or g_sell.get('verdict', '').startswith("🟢") or g_sell.get('final_score', 0) >= 7
+            )
+
+            if is_qual_g_sell and not is_qual_g_buy:
+                g_target = g_sell
+            elif is_qual_g_buy and not is_qual_g_sell:
+                g_target = g_buy
+            elif is_qual_g_sell and is_qual_g_buy:
+                g_target = g_sell if g_sell.get('final_score', 0) > g_buy.get('final_score', 0) else (g_buy if g_buy.get('final_score', 0) > g_sell.get('final_score', 0) else (g_sell if g_dom == "SELL" else g_buy))
+            else:
+                g_target = g_buy if g_dom == "BUY" else g_sell
+
+            g_act = g_target.get("action", g_dom)
             is_qualified_g = not g_target['verdict'].startswith("🔴") and (
                 g_target.get('is_a_plus') or
                 g_target.get('verdict', '').startswith("🟢") or
@@ -3062,6 +3133,11 @@ def auto_scanner_worker(token: str, chat_id_getter):
                             setup_data["ticket"] = exec_result.get("ticket")
                             setup_data["status"] = "EXECUTED"
                             set_pending_setup("GOLD", setup_data)
+                        else:
+                            # If auto-execution failed on temporary gate, permit retry on next candle
+                            with DEDUP_LOCK:
+                                if "GOLD" in LAST_ALERTED:
+                                    LAST_ALERTED["GOLD"]["time"] = current_time - ALERT_COOLDOWN_SECONDS + 60
 
                     print(f"🎯 [{datetime.now().strftime('%H:%M:%S')}] GOLD SIGNAL DETECTED: ${g['price']:,.2f} (Score {g['final_score']}/10)! AutoPush={is_auto}")
                     alert_text, reply_markup = format_elite_alert("GOLD", data, setup_data, exec_result, is_auto)

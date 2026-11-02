@@ -85,7 +85,7 @@ MAX_ALLOWED_SLIPPAGE = {
     "BTC": 50.00                     # Max $50.00 fill slippage for Bitcoin
 }
 MAX_ALLOWED_SPREAD = {
-    "GOLD": float(os.getenv("MAX_ALLOWED_SPREAD_GOLD", "0.60")),
+    "GOLD": float(os.getenv("MAX_ALLOWED_SPREAD_GOLD", str(float(os.getenv("MAX_SPREAD_GOLD_PIPS", "30.0")) * 0.10))),  # 30 pips ($3.00) max limit
     "BTC": float(os.getenv("MAX_SPREAD_BTC_PIPS", os.getenv("MAX_ALLOWED_SPREAD_BTC", "40.00")))  # Reworked: 40 pips ($40.00) max limit
 }
 SAFETY_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "safety_state.json")
@@ -378,12 +378,12 @@ class SafetyManager:
             if age_sec > MAX_DATA_STALENESS_SECONDS:
                 return False, f"⏱️ Stale Market Data: Quote is {age_sec/60.0:.1f} minutes old (limit: {MAX_DATA_STALENESS_SECONDS/60:.0f}m). Order blocked to prevent trading on expired ticks."
 
-        # Check 6: Pre-Order Spread Guard (Reworked: 40 pips limit max on BTC)
+        # Check 6: Pre-Order Spread Guard (Reworked: 40 pips max on BTC, 30 pips max on Gold)
         if spread_val is not None and spread_val > 0:
-            max_spread = float(MAX_ALLOWED_SPREAD.get(asset_key, 0.60 if asset_key == "GOLD" else 40.00))
+            max_spread = float(MAX_ALLOWED_SPREAD.get(asset_key, 3.00 if asset_key == "GOLD" else 40.00))
             if spread_val > max_spread:
                 return False, f"⚠️ Excessive Broker Spread: Current spread ${spread_val:.2f} exceeds institutional threshold (${max_spread:.2f})."
-            max_spread_ratio = 0.35 if asset_key == "BTC" else 0.20
+            max_spread_ratio = 0.35  # Both BTC and Gold allow up to 35% of tight micro-scalp SL
             if sl_dist and sl_dist > 0 and (spread_val / sl_dist) > max_spread_ratio:
                 return False, f"⚠️ High Spread-to-Risk: Spread ${spread_val:.2f} consumes {(spread_val/sl_dist*100):.1f}% of SL distance (${sl_dist:.2f}) > {int(max_spread_ratio*100)}% limit."
 

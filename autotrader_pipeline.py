@@ -563,24 +563,26 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
             score_buy += 1
             factors_buy.append(f"MTF Alignment: Multi-timeframe bullish ({mtf_result.get('market_movement', 'aligned')})")
 
-        # Symmetrical Sell Factors
+        # Symmetrical Sell Factors (GOLD)
         sell_dxy = dxy_chg >= -0.05
         sell_yield = tnx_chg >= -0.2
-        sell_ma200 = curr < ma200
-        sell_ma50 = curr < ma50
+        is_extended_200_g = (ma200 > 0 and (curr - ma200) / ma200 >= 0.10)
+        sell_ma200 = (curr < ma200) or is_extended_200_g or (mtf_result and mtf_result.get("dominant_direction") == "SELL")
+        sell_ma50 = (curr < ma50) or (mtf_result and mtf_result.get("dominant_direction") == "SELL")
         sell_rsi = (rsi_sell_min <= rsi <= rsi_sell_max) or (rsi >= rsi_sell_overbought)
-        sell_gsr = gsr < 75
-        sell_vol = vol30 < 22
+        sell_gsr = (gsr >= 84) or (gsr <= 80) or (macro.get("gsr_chg", 0) <= 0.05 if "macro" in locals() and isinstance(macro, dict) else True)
+        sell_vol = vol30 < 25
         sell_no_trap = trap_state != "BEAR_TRAP"
         sell_near_res = (sw_high - curr) / curr <= 0.05
+        sell_gp = in_golden_pocket or sell_near_res
 
         if sell_dxy: score_sell += 1; factors_sell.append("Macro: DXY firm (Gold headwind)")
         if sell_yield: score_sell += 1; factors_sell.append("Macro: 10Y Yields firming")
-        if sell_ma200: score_sell += 1; factors_sell.append(f"Trend: Below 200 SMA (${ma200:,.0f})")
-        if sell_ma50: score_sell += 1; factors_sell.append("Trend: Below 50 SMA")
+        if sell_ma200: score_sell += 1; factors_sell.append(f"Trend: {'Below 200 SMA' if curr < ma200 else 'Overextended 200 SMA / Bearish Shift'}")
+        if sell_ma50: score_sell += 1; factors_sell.append("Trend: Below 50 SMA / Bearish Alignment")
         if sell_rsi: score_sell += 1; factors_sell.append(f"Momentum: RSI bearish or overbought ({rsi:.1f})")
-        if sell_near_res: score_sell += 1; factors_sell.append("Level: Near major swing resistance ceiling")
-        if sell_gsr: score_sell += 1; factors_sell.append(f"Metals Value: GSR compressed ({gsr:.1f}x)")
+        if sell_gp: score_sell += 1; factors_sell.append("Level: Resting in Bearish Golden Pocket / Resistance")
+        if sell_gsr: score_sell += 1; factors_sell.append(f"Metals Value: GSR setup ({gsr:.1f}x)")
         if sell_vol: score_sell += 1; factors_sell.append(f"Risk: Volatility tradeable ({vol30:.1f}%)")
         if sell_no_trap: score_sell += 1; factors_sell.append("Microstructure: Clean auction; no Bear Trap")
         if sell_near_res: score_sell += 1; factors_sell.append("Structure: Distribution near resistance")
@@ -593,8 +595,24 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
             score_sell += 1
             factors_sell.append(f"MTF Alignment: Multi-timeframe bearish ({mtf_result.get('market_movement', 'aligned')})")
 
-    # Select Dominant Direction
-    is_short = score_sell > score_buy
+    # Select Dominant Direction (With Microstructure & Reversal Tie-Breaking)
+    if score_sell > score_buy:
+        is_short = True
+    elif score_buy > score_sell:
+        is_short = False
+    else:
+        # Tie-breaker: Use Small Timeframe / MTF Reversal Signal
+        if (is_bear_rev_g if asset_type == 'GOLD' else is_bear_rev):
+            is_short = True
+        elif (is_bull_rev_g if asset_type == 'GOLD' else is_bull_rev):
+            is_short = False
+        elif mtf_result and mtf_result.get("dominant_direction") == "SELL":
+            is_short = True
+        elif mtf_result and mtf_result.get("dominant_direction") == "BUY":
+            is_short = False
+        else:
+            is_short = (rsi > 55)  # If RSI is elevated in a tie, lean short; if low, lean long
+
     score = score_sell if is_short else score_buy
     factors = factors_sell if is_short else factors_buy
     side_action = "SELL" if is_short else "BUY"
@@ -606,7 +624,7 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
         {"factor": "Trend: 200 SMA Structure", "status": "PASS" if (sell_ma200 if is_short else feat_ma200) else "FAIL", "weight": 1.0, "earned": 1.0 if (sell_ma200 if is_short else feat_ma200) else 0.0},
         {"factor": "Trend: 50 SMA Stack", "status": "PASS" if (sell_ma50 if is_short else feat_ma50) else "FAIL", "weight": 1.0, "earned": 1.0 if (sell_ma50 if is_short else feat_ma50) else 0.0},
         {"factor": f"Momentum: RSI ({rsi:.1f})", "status": "PASS" if (sell_rsi if is_short else feat_rsi) else "FAIL", "weight": 1.0, "earned": 1.0 if (sell_rsi if is_short else feat_rsi) else 0.0},
-        {"factor": "Structure: Golden Pocket (0.618 Fib)", "status": "PASS" if (sell_near_res if is_short else in_golden_pocket) else "FAIL", "weight": 1.0, "earned": 1.0 if (sell_near_res if is_short else in_golden_pocket) else 0.0},
+        {"factor": "Structure: Golden Pocket (0.618 Fib)", "status": "PASS" if ((sell_gp if asset_type == 'GOLD' else sell_near_res) if is_short else in_golden_pocket) else "FAIL", "weight": 1.0, "earned": 1.0 if ((sell_gp if asset_type == 'GOLD' else sell_near_res) if is_short else in_golden_pocket) else 0.0},
         {"factor": "Microstructure: Anti-Trap", "status": "PASS" if (sell_no_trap if is_short else feat_no_trap) else "FAIL", "weight": 1.0, "earned": 1.0 if (sell_no_trap if is_short else feat_no_trap) else 0.0},
         {"factor": f"Valuation: {'Mayer Multiple' if asset_type == 'BTC' else 'Gold/Silver Ratio'}", "status": "PASS" if ((sell_mayer if is_short else feat_mayer) if asset_type == 'BTC' else (sell_gsr if is_short else feat_gsr)) else "FAIL", "weight": 1.0, "earned": 1.0 if ((sell_mayer if is_short else feat_mayer) if asset_type == 'BTC' else (sell_gsr if is_short else feat_gsr)) else 0.0},
         {"factor": f"Risk: Volatility ({vol30:.1f}%)", "status": "PASS" if (sell_vol if is_short else feat_vol) else "FAIL", "weight": 1.0, "earned": 1.0 if (sell_vol if is_short else feat_vol) else 0.0},
@@ -614,16 +632,16 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
     ]
 
     active_features = {
-        "in_golden_pocket": bool(in_golden_pocket),
+        "in_golden_pocket": bool((sell_gp if asset_type == 'GOLD' else sell_near_res) if is_short else in_golden_pocket),
         "no_trap": bool(sell_no_trap if is_short else feat_no_trap),
         "macro_dxy_tailwind": bool(sell_dxy if is_short else feat_dxy),
         "macro_yield_tailwind": bool(sell_yield if is_short else feat_yield),
         "trend_ma200": bool(sell_ma200 if is_short else feat_ma200),
         "trend_ma50": bool(sell_ma50 if is_short else feat_ma50),
         "rsi_sweet_spot": bool(sell_rsi if is_short else feat_rsi),
-        "mayer_sweet_spot": bool(mayer >= 0.85 and mayer <= 1.50) if asset_type == "BTC" else False,
-        "gsr_undervalued": bool(gsr >= 75) if asset_type == "GOLD" else False,
-        "volatility_orderly": bool(vol30 < 22 if asset_type == "GOLD" else vol30 < 75),
+        "mayer_sweet_spot": bool(sell_mayer if is_short else (mayer >= 0.85 and mayer <= 1.50)) if asset_type == "BTC" else False,
+        "gsr_undervalued": bool(sell_gsr if is_short else (gsr >= 75)) if asset_type == "GOLD" else False,
+        "volatility_orderly": bool(sell_vol if is_short else (vol30 < 22 if asset_type == "GOLD" else vol30 < 75)),
         "near_swing_support": bool(sell_near_res if is_short else feat_near_support)
     }
 
