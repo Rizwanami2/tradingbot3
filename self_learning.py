@@ -1104,7 +1104,17 @@ class SelfLearningEngine:
 
     def get_dynamic_sl_buffer(self, asset: str) -> float:
         asset_norm = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
-        return self.memory.get("dynamic_sl_buffers", {}).get(asset_norm, 0.0)
+        buf = self.memory.get("dynamic_sl_buffers", {}).get(asset_norm, 0.0)
+        try:
+            fresh = self.memory_mgr.load_safe()
+            if fresh and "dynamic_sl_buffers" in fresh:
+                disk_buf = fresh["dynamic_sl_buffers"].get(asset_norm, 0.0)
+                if disk_buf > buf:
+                    self.memory["dynamic_sl_buffers"] = fresh["dynamic_sl_buffers"]
+                    buf = disk_buf
+        except Exception:
+            pass
+        return buf
 
     def get_post_mortem_history(self, limit: int = 5) -> list:
         journal = self.memory.get("post_mortem_journal", [])
