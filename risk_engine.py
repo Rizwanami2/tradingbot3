@@ -112,6 +112,8 @@ class SafetyManager:
         self.bak_file = state_file + ".bak"
         self.audit_file = audit_file
         self.state = self._load_state()
+        self._last_save_time = 0.0
+        self._save_debounce_sec = 5.0  # Minimum seconds between disk writes
 
         # Register state persistence on clean shutdown
         atexit.register(self.save_state)
@@ -207,13 +209,18 @@ class SafetyManager:
 
         return default_state
 
-    def save_state(self):
+    def save_state(self, force: bool = False):
+        import time as _time
+        now = _time.time()
+        if not force and (now - self._last_save_time) < self._save_debounce_sec:
+            return  # Skip redundant disk write
         try:
             # Atomic backup write first
             with open(self.bak_file, "w", encoding="utf-8") as bf:
                 json.dump(self.state, bf, indent=2)
             with open(self.state_file, "w", encoding="utf-8") as f:
                 json.dump(self.state, f, indent=2)
+            self._last_save_time = now
         except Exception as e:
             logger.warning(f"Could not save safety state: {e}")
 
@@ -226,7 +233,7 @@ class SafetyManager:
         if target in ("PAPER", "DEMO"):
             self.state["trading_mode"] = target
             self.state["live_mode_confirmed"] = False
-            self.save_state()
+            self.save_state(force=True)
             return True, f"🟡 Trading mode set to {target}"
         if target != "LIVE":
             return False, f"❌ Only LIVE, DEMO, or PAPER trading modes are supported. Got: '{mode}'. Use: `/mode live CONFIRM`"
@@ -307,7 +314,7 @@ class SafetyManager:
                 f"• Set KILL_SWITCH_ACTIVE=true."
             )
 
-        self.save_state()
+        self.save_state(force=True)
 
     def record_strategy_loss(self, strategy: str, asset: str):
         """Track a loss for a specific strategy+asset combo for per-strategy risk decay."""

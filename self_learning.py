@@ -47,8 +47,8 @@ try:
 except Exception:
     import logging
     logger = logging.getLogger("self_learning")
-from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional, Tuple
+from datetime import datetime
+from typing import Dict, Any, Optional, Tuple
 import numpy as np
 
 try:
