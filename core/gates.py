@@ -76,12 +76,27 @@ def check_stale_data(data_timestamp: Optional[float], max_age_seconds: int = MAX
     return True, f"Data fresh ({age:.0f}s old)"
 
 
-def check_spread(spread_val: float, asset: str) -> Tuple[bool, str]:
-    """Gate 6: Spread must not exceed threshold."""
+def check_spread(spread_val: float, asset: str, sl_dist: float = 0.0) -> Tuple[bool, str]:
+    """Gate 6: Spread must not exceed threshold AND spread-to-risk ratio.
+
+    - GOLD: spread < max pips AND spread < 20% of SL distance
+    - BTC: spread < max pips AND spread < 15% of SL distance
+    """
     asset_key = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
     max_spread = MAX_ALLOWED_SPREAD.get(asset_key, 0.60)
     if spread_val > max_spread:
         return False, f"Excessive spread: {spread_val:.2f} > {max_spread:.2f}"
+
+    # Spread-to-Risk Guard: spread must not consume too much of SL distance
+    if sl_dist and sl_dist > 0:
+        spread_ratio = spread_val / sl_dist
+        max_ratio = 0.20 if asset_key == "GOLD" else 0.15
+        if spread_ratio > max_ratio:
+            return False, (
+                f"⚠️ High Spread-to-Risk: Spread ${spread_val:.2f} consumes "
+                f"{spread_ratio*100:.1f}% of SL distance (${sl_dist:.2f}) > {int(max_ratio*100)}% limit."
+            )
+
     return True, f"Spread OK ({spread_val:.2f})"
 
 
@@ -266,3 +281,147 @@ def check_strategy_health(strategy: str, min_trades: int = 20, min_win_rate: flo
         )
 
     return True, f"{strategy} healthy: {win_rate:.1f}% WR ({total} trades)"
+
+
+def check_htf_bias_alignment(htf_bias: dict, action: str, confluence_score: float = 0.0,
+                             min_confluence_for_counter: float = 9.0) -> Tuple[bool, str]:
+    """Gate: No trade counter to HTF (D1/H1) bias unless confluence >= 9.0.
+
+    Args:
+        htf_bias: dict from compute_htf_bias() with "bias" key (BULLISH/BEARISH/NEUTRAL/etc.)
+        action: "BUY" or "SELL"
+        confluence_score: current confluence score (0-10)
+        min_confluence_for_counter: minimum score to override HTF bias (default 9.0)
+
+    Returns (pass: bool, reason: str).
+    """
+    if not htf_bias:
+        return True, "No HTF bias data — alignment check skipped"
+
+    bias = str(htf_bias.get("bias", "NEUTRAL")).upper()
+    action_upper = action.upper()
+
+    if bias in ("NEUTRAL", ""):
+        return True, f"HTF bias NEUTRAL — {action_upper} allowed"
+
+    # Same direction as HTF bias — always allowed
+    if (bias in ("BULLISH", "STRONG_BULLISH") and action_upper == "BUY") or \
+       (bias in ("BEARISH", "STRONG_BEARISH") and action_upper == "SELL"):
+        return True, f"HTF {bias} aligned with {action_upper}"
+
+    # Counter-trend — only allowed if confluence >= threshold
+    if confluence_score >= min_confluence_for_counter:
+        return True, f"Counter-trend {action_upper} vs HTF {bias} — confluence {confluence_score:.1f} >= {min_confluence_for_counter}"
+
+    return False, (
+        f"No-trade-on-reversal: HTF bias is {bias} but action is {action_upper}. "
+        f"Confluence {confluence_score:.1f} < {min_confluence_for_counter}. Trade vetoed."
+    )
+
+
+def check_mtf_alignment(asset: str, action: str, htf_bias: dict,
+                        tf5_bias: str = "NEUTRAL", tf15_bias: str = "NEUTRAL",
+                        confluence_score: float = 0.0) -> Tuple[bool, str]:
+    """Gate: Multi-timeframe alignment for scalp entries.
+
+    1m = analysis only (micro-structure, wicks, entry timing)
+    5m = final decision timeframe (entry trigger, SL/TP, structure)
+    15m = bias/trend direction
+
+    No scalp trade unless 15m bias, 5m structure, and 1m entry trigger agree.
+    """
+    if not htf_bias:
+        return True, "No HTF bias — MTF alignment skipped"
+
+    htf = str(htf_bias.get("bias", "NEUTRAL")).upper()
+    action_upper = action.upper()
+
+    # Determine required direction from 15m bias (HTF)
+    if htf in ("BULLISH", "STRONG_BULLISH"):
+        required_dir = "BUY"
+    elif htf in ("BEARISH", "STRONG_BEARISH"):
+        required_dir = "SELL"
+    else:
+        required_dir = "NEUTRAL"
+
+    # 15m neutral — defer to 5m structure
+    if required_dir == "NEUTRAL":
+        if tf15_bias in ("BULLISH", "STRONG_BULLISH"):
+            required_dir = "BUY"
+        elif tf15_bias in ("BEARISH", "STRONG_BEARISH"):
+            required_dir = "SELL"
+
+    # If required direction conflicts with action, veto (unless very high confluence)
+    if required_dir != "NEUTRAL" and required_dir != action_upper:
+        if confluence_score >= 9.0:
+            return True, f"Counter-MTF {action_upper} vs 15m {required_dir} — confluence {confluence_score:.1f} >= 9.0"
+        return False, (
+            f"MTF misalignment: 15m bias is {required_dir} but action is {action_upper}. "
+            f"Confluence {confluence_score:.1f} < 9.0. Trade vetoed."
+        )
+
+    # Check 5m agreement
+    if tf5_bias not in ("NEUTRAL", "") and tf5_bias.upper() != required_dir and tf5_bias.upper() != action_upper:
+        if confluence_score >= 9.0:
+            return True, f"Counter-5m {action_upper} vs 5m {tf5_bias} — confluence {confluence_score:.1f} >= 9.0"
+        return False, (
+            f"MTF misalignment: 5m structure is {tf5_bias} but action is {action_upper}. "
+            f"Confluence {confluence_score:.1f} < 9.0. Trade vetoed."
+        )
+
+    return True, f"MTF aligned: 15m={htf}, 5m={tf5_bias}, action={action_upper}"
+
+
+def check_strategy_risk_decay(strategy: str, asset: str, sle=None,
+                              safety_manager=None) -> Tuple[bool, str, float]:
+    """Gate: Per-strategy risk decay based on daily losses.
+
+    0 losses: 1.0x risk (pass)
+    1 loss:   0.75x risk (pass, reduced)
+    2 losses: 0.50x risk (FAIL, cooldown active)
+    3+ losses: 0.25x risk (FAIL, cooldown active)
+
+    Returns (pass: bool, reason: str, risk_multiplier: float).
+    """
+    mult = 1.0
+    reason = f"{strategy} {asset}: full risk"
+
+    if safety_manager:
+        try:
+            mult, reason = safety_manager.get_strategy_risk_multiplier(strategy, asset)
+        except Exception:
+            pass
+
+    # Also check self-learning consecutive loss cooldown
+    if sle:
+        try:
+            is_cd, cd_reason, _ = sle.is_in_loss_cooldown()
+            if is_cd:
+                return False, cd_reason, 0.0
+        except Exception:
+            pass
+
+    if mult < 1.0 and mult > 0:
+        return True, reason, mult
+    elif mult == 0.0:
+        return False, reason, 0.0
+    return True, reason, mult
+
+
+def check_equity_risk_decay(safety_manager=None) -> Tuple[bool, str, float]:
+    """Gate: Equity-based risk decay from daily drawdown.
+
+    0% to -1% DD:  1.0x risk (pass)
+    -1% to -2% DD: 0.5x risk (pass, reduced)
+    -2% DD+:       blocked (circuit breaker handles this)
+
+    Returns (pass: bool, reason: str, risk_multiplier: float).
+    """
+    if safety_manager:
+        try:
+            mult, reason = safety_manager.get_equity_risk_multiplier()
+            if mult < 1.0:
+                return True, reason, mult
+        except Exception:
+            pass
+    return True, "Equity risk: full risk", 1.0

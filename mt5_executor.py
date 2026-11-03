@@ -837,25 +837,25 @@ class MT5LiveBroker:
         "SCALP": {
             "name": "SCALP",
             "breakeven_r": 0.30,
-            "trail_start_r": 0.65,
+            "trail_start_r": 0.50,
             "trail_step_r": 0.20,
         },
         "SWING": {
             "name": "SWING",
-            "breakeven_r": 0.45,
+            "breakeven_r": 0.50,
             "trail_start_r": 0.90,
             "trail_step_r": 0.40,
         },
         "BALANCE": {
             "name": "BALANCE",
-            "breakeven_r": 0.50,
-            "trail_start_r": 0.85,
+            "breakeven_r": 0.40,
+            "trail_start_r": 0.80,
             "trail_step_r": 0.30,
         },
         "SWAP": {
             "name": "SWAP",
-            "breakeven_r": 0.50,
-            "trail_start_r": 1.00,
+            "breakeven_r": 0.60,
+            "trail_start_r": 1.20,
             "trail_step_r": 0.45,
         }
     }
@@ -1739,6 +1739,103 @@ class MT5LiveBroker:
                     "pnl_usd": p.profit,
                     "reason": reason
                 })
+
+            # ── Phase 2: Closed-Trade Analysis & Self-Learning Integration ──
+            try:
+                from self_learning import self_learning_engine as _sle
+                if _sle:
+                    asset_key = "GOLD" if ("XAU" in symbol.upper() or "GOLD" in symbol.upper()) else "BTC"
+                    action = "BUY" if p.type == mt5.ORDER_TYPE_BUY else "SELL"
+                    entry = float(p.price_open)
+                    exit_px = float(price)
+                    lots = float(p.volume)
+                    mult = 100.0 if asset_key == "GOLD" else 1.0
+                    pnl_usd = round((exit_px - entry) * lots * mult if action == "BUY" else (entry - exit_px) * lots * mult, 2)
+                    initial_risk = self.position_initial_risks.get(p.ticket, abs(entry - float(p.sl)) if float(p.sl) > 0 else abs(entry * 0.01))
+                    r_mult = round(pnl_usd / (initial_risk * lots * mult), 2) if initial_risk > 0 else (1.2 if pnl_usd > 0 else -1.0)
+                    outcome = "WIN" if pnl_usd > 0 else "LOSS"
+
+                    win_reasons = ("TAKE_PROFIT_HIT", "PARTIAL_TP", "PROFIT_LOCK", "REVERSAL_EXIT")
+                    loss_reasons = ("STOP_LOSS_HIT", "TRAILING_STOP_OUT", "BREAKEVEN_TRAILED_OUT", "TIME_EXIT", "REVERSAL_AGAINST_TRADE", "NEWS_SPIKE")
+                    win_reason = reason if reason in win_reasons else None
+                    loss_reason = reason if reason in loss_reasons else None
+
+                    pm_record = {
+                        "ticket": str(p.ticket),
+                        "asset": asset_key,
+                        "action": action,
+                        "entry_price": entry,
+                        "exit_price": exit_px,
+                        "pnl_usd": pnl_usd,
+                        "pnl_r": r_mult,
+                        "outcome": outcome,
+                        "strategy": "SCALP",
+                        "score": 8,
+                        "regime_at_entry": "",
+                        "regime_at_exit": "",
+                        "active_features": {},
+                        "slippage_entry": 0.0,
+                        "spread_at_entry": 0.0,
+                        "spread_at_exit": 0.0,
+                        "root_cause": loss_reason or win_reason or reason,
+                        "win_reason": win_reason,
+                        "loss_reason": loss_reason,
+                        "close_time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                        "source": "MT5"
+                    }
+                    _sle.memory.setdefault("post_mortem_journal", []).append(pm_record)
+                    if len(_sle.memory["post_mortem_journal"]) > 500:
+                        _sle.memory["post_mortem_journal"] = _sle.memory["post_mortem_journal"][-500:]
+
+                    trade_id = f"MT5_{p.ticket}"
+                    matched = None
+                    for t in _sle.memory.get("trade_journal", []):
+                        if str(t.get("ticket")) == str(p.ticket) or t.get("trade_id") == trade_id:
+                            matched = t
+                            break
+                    if matched:
+                        matched["status"] = "CLOSED"
+                        matched["exit_price"] = exit_px
+                        matched["outcome"] = outcome
+                        matched["r_multiple"] = r_mult
+                        _sle.update_from_outcome(
+                            matched.get("trade_id", trade_id),
+                            exit_px,
+                            outcome,
+                            r_mult,
+                            regime=matched.get("regime")
+                        )
+                    else:
+                        features = {
+                            "in_golden_pocket": False, "no_trap": False,
+                            "macro_dxy_tailwind": False, "macro_yield_tailwind": False,
+                            "trend_ma200": False, "trend_ma50": False, "rsi_sweet_spot": False,
+                            "mayer_sweet_spot": False, "gsr_undervalued": False,
+                            "volatility_orderly": False, "near_swing_support": False
+                        }
+                        new_id = _sle.log_signal(
+                            asset_key, symbol, entry, float(p.sl), exit_px, exit_px,
+                            8, features, action=action, strategy="SCALP", regime=""
+                        )
+                        _sle.update_from_outcome(new_id, exit_px, outcome, r_mult, regime="")
+
+                    _sle.save_memory()
+            except Exception as _e:
+                logger.warning(f"Self-learning integration failed for MT5 close #{p.ticket}: {_e}")
+
+            # ── Phase 4.1: Per-Strategy Risk Decay ── Record strategy win/loss
+            try:
+                if safety_manager:
+                    meta = self.tracked_live_tickets.get(p.ticket, {})
+                    strat = meta.get("strategy", "SCALP")
+                    asset_n = meta.get("asset", asset_key)
+                    if outcome == "WIN":
+                        safety_manager.record_strategy_win(strat, asset_n)
+                    else:
+                        safety_manager.record_strategy_loss(strat, asset_n)
+            except Exception:
+                pass
+
             return {"success": True, "ticket": p.ticket, "closed_pnl": p.profit, "symbol": symbol}
         return {"success": False, "error": f"MT5 close error code {getattr(res, 'retcode', 'UNKNOWN')}"}
 

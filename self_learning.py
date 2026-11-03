@@ -145,8 +145,8 @@ DEFAULT_DISCOVERED_STRATEGIES = [
         "sl_mult": 0.40,
         "rr_tp1": 1.40,
         "rr_tp2": 2.20,
-        "breakeven_r": 0.35,
-        "trail_start_r": 0.65,
+        "breakeven_r": 0.30,
+        "trail_start_r": 0.50,
         "trail_step_r": 0.20,
         "regime_filter": "Rejection wick >=38% at Key S/R",
         "active": True
@@ -163,9 +163,9 @@ DEFAULT_DISCOVERED_STRATEGIES = [
         "sl_mult": 0.65,
         "rr_tp1": 1.80,
         "rr_tp2": 2.80,
-        "breakeven_r": 0.50,
-        "trail_start_r": 0.85,
-        "trail_step_r": 0.35,
+        "breakeven_r": 0.40,
+        "trail_start_r": 0.80,
+        "trail_step_r": 0.30,
         "regime_filter": "Price inside 0.618-0.650 Fib & RSI 38-65",
         "active": True
     },
@@ -181,9 +181,9 @@ DEFAULT_DISCOVERED_STRATEGIES = [
         "sl_mult": 0.90,
         "rr_tp1": 2.20,
         "rr_tp2": 3.40,
-        "breakeven_r": 0.70,
-        "trail_start_r": 1.10,
-        "trail_step_r": 0.45,
+        "breakeven_r": 0.50,
+        "trail_start_r": 0.90,
+        "trail_step_r": 0.40,
         "regime_filter": "ADX > 25, Candle body >=55%, 50/200 Stack",
         "active": True
     }
@@ -537,6 +537,69 @@ class SelfLearningEngine:
         self.synthesize_and_evolve_strategies()
         self.refine_semantic_knowledge_graph()
         self.mine_negative_memory_bank()
+
+        # Phase 6.3: Auto-downweight losing features (win_rate < 40% over last 20 activations)
+        self._downweight_losing_features()
+
+        # Phase 6.4: Strategy rotation — promote best, demote worst for current regime
+        self._rotate_strategies()
+
+    def _downweight_losing_features(self):
+        """Phase 6.3: Reduce weights of features that correlate with losses.
+
+        For each asset, check feature_stats. If a feature has >= 20 activations
+        and win_rate < 40%, reduce its base weight and regime-conditioned weights by 0.10.
+        """
+        for asset in ("GOLD", "BTC"):
+            f_stats = self.memory.get("feature_stats", {}).get(asset, {})
+            weights = self.memory.get("weights", {}).get(asset, {})
+            regime_brains = self.memory.get("regime_brains", {}).get(asset, {})
+
+            for feat, st in f_stats.items():
+                activations = st.get("activations", 0)
+                if activations < 20:
+                    continue
+                wins = st.get("wins", 0)
+                win_rate = (wins / activations * 100.0) if activations > 0 else 50.0
+                if win_rate < 40.0:
+                    # Downweight base weight
+                    if feat in weights:
+                        weights[feat] = max(weights.get(feat, 1.0) - 0.10, 0.35)
+                    # Downweight regime-conditioned weights
+                    for reg in regime_brains:
+                        if feat in regime_brains[reg]:
+                            regime_brains[reg][feat] = max(
+                                regime_brains[reg].get(feat, 1.0) - 0.10, 0.35
+                            )
+
+            # Persist
+            self.memory.setdefault("weights", {})[asset] = weights
+            self.memory.setdefault("regime_brains", {})[asset] = regime_brains
+
+    def _rotate_strategies(self):
+        """Phase 6.4: Rotate strategies based on recent performance.
+
+        Promote strategies with win_rate > 55% over last 20 trades.
+        Demote strategies with win_rate < 40% over last 20 trades (set active=False).
+        Does not block other strategies or the whole bot.
+        """
+        strat_stats = self.memory.get("strategy_performance", {})
+        discovered = self.memory.get("discovered_strategies", [])
+
+        for ds in discovered:
+            code = ds.get("code", "").upper()
+            st = strat_stats.get(code, {})
+            total = st.get("total_trades", 0)
+            if total < 20:
+                continue
+            win_rate = st.get("win_rate_pct", 0.0)
+
+            if win_rate < 40.0:
+                ds["active"] = False
+                logger.info(f"Strategy {code} auto-demoted: WR {win_rate:.1f}% ({total} trades)")
+            elif win_rate > 55.0:
+                ds["active"] = True
+                logger.info(f"Strategy {code} auto-promoted: WR {win_rate:.1f}% ({total} trades)")
 
     # ──────────────────────────────────────────────────────────────────────────
     # MARKOV REGIME-CONDITIONED CONFLUENCE SCORING

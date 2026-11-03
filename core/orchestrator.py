@@ -256,6 +256,19 @@ class Orchestrator:
                 except Exception as re:
                     logger.warning(f"Position reconciliation error: {re}")
 
+                # Phase 7.3: Auto-sync closed MT5 trades to learning journal
+                try:
+                    if self_learning_engine and (self.broker or safety_manager):
+                        synced = self_learning_engine.sync_all_closed_trades(
+                            live_broker=self.broker,
+                            safety_manager=safety_manager
+                        )
+                        if synced:
+                            cycle_record["synced_closed_trades"] = len(synced)
+                            logger.info(f"Synced {len(synced)} closed trades to learning journal")
+                except Exception as se:
+                    logger.warning(f"Closed-trade sync error: {se}")
+
                 # Step 2: Check kill switch / daily loss / circuit breaker
                 gates_results = self._run_safety_gates()
                 cycle_record["gates"] = gates_results
@@ -270,6 +283,8 @@ class Orchestrator:
 
                 # Step 3: Get candidate setups from pipeline
                 candidates = self._get_candidates()
+                # Phase 4.5: Correlation guard — filter same-direction cross-asset duplicates
+                candidates = self._filter_correlation_duplicates(candidates)
                 cycle_record["candidates"] = candidates
                 if not candidates:
                     logger.info(f"Cycle {self.cycle_count}: No actionable candidates")
@@ -347,6 +362,22 @@ class Orchestrator:
                 _refresh_and_gates(),
                 _get_candidates_async()
             )
+
+            # Phase 4.5: Correlation guard — filter same-direction cross-asset duplicates
+            candidates = self._filter_correlation_duplicates(candidates)
+
+            # Phase 7.3: Auto-sync closed MT5 trades to learning journal
+            try:
+                if self_learning_engine and (self.broker or safety_manager):
+                    synced = self_learning_engine.sync_all_closed_trades(
+                        live_broker=self.broker,
+                        safety_manager=safety_manager
+                    )
+                    if synced:
+                        cycle_record["synced_closed_trades"] = len(synced)
+                        logger.info(f"Synced {len(synced)} closed trades to learning journal")
+            except Exception as se:
+                logger.warning(f"Closed-trade sync error: {se}")
 
             cycle_record["state_snapshot"] = snapshot
             cycle_record["gates"] = gates_results
@@ -478,6 +509,51 @@ class Orchestrator:
         pass_n, reason_n = gates.check_news_window(asset, is_news_blocked, news_msg)
         results.append({"gate": "news_window", "pass": pass_n, "reason": reason_n})
 
+        # Gate: HTF Bias Alignment (No-Trade-on-Reversal)
+        htf_bias = candidate.get("htf_bias", {"bias": "NEUTRAL", "asset": asset})
+        confluence = max(score, adaptive_score)
+        pass_h, reason_h = gates.check_htf_bias_alignment(htf_bias, side, confluence_score=confluence)
+        results.append({"gate": "htf_bias_alignment", "pass": pass_h, "reason": reason_h})
+
+        # Gate: Multi-Timeframe Alignment (1m analysis -> 5m decision -> 15m bias)
+        pass_m, reason_m = gates.check_mtf_alignment(
+            asset=asset, action=side, htf_bias=htf_bias,
+            tf5_bias=candidate.get("tf5_bias", "NEUTRAL"),
+            tf15_bias=candidate.get("tf15_bias", "NEUTRAL"),
+            confluence_score=confluence
+        )
+        results.append({"gate": "mtf_alignment", "pass": pass_m, "reason": reason_m})
+
+        # Gate: Spread-to-Risk Guard
+        spread_val = float(candidate.get("spread", 0.0))
+        sl_dist_val = float(candidate.get("order_ticket", {}).get("sl_dist", 0) or 0)
+        if sl_dist_val <= 0:
+            entry = float(candidate.get("order_ticket", {}).get("entry", 0))
+            sl = float(candidate.get("order_ticket", {}).get("stop_loss", 0))
+            if entry > 0 and sl > 0:
+                sl_dist_val = abs(entry - sl)
+        pass_sp, reason_sp = gates.check_spread(spread_val, asset, sl_dist=sl_dist_val)
+        results.append({"gate": "spread_to_risk", "pass": pass_sp, "reason": reason_sp})
+
+        # Gate: Per-Strategy Risk Decay
+        strategy = candidate.get("strategy", "SCALP")
+        pass_sr, reason_sr, sr_mult = gates.check_strategy_risk_decay(
+            strategy, asset, sle=self_learning_engine, safety_manager=safety_manager
+        )
+        results.append({"gate": "strategy_risk_decay", "pass": pass_sr, "reason": reason_sr})
+        if sr_mult < 1.0 and sr_mult > 0:
+            current_risk = candidate.get("order_ticket", {}).get("risk_pct", 0.5)
+            candidate["order_ticket"]["risk_pct"] = round(current_risk * sr_mult, 2)
+            candidate["strategy_risk_reduction"] = sr_mult
+
+        # Gate: Equity-Based Risk Decay (Daily Drawdown)
+        pass_eq, reason_eq, eq_mult = gates.check_equity_risk_decay(safety_manager=safety_manager)
+        results.append({"gate": "equity_risk_decay", "pass": pass_eq, "reason": reason_eq})
+        if eq_mult < 1.0 and eq_mult > 0:
+            current_risk = candidate.get("order_ticket", {}).get("risk_pct", 0.5)
+            candidate["order_ticket"]["risk_pct"] = round(current_risk * eq_mult, 2)
+            candidate["equity_risk_reduction"] = eq_mult
+
         return results
 
     def _get_candidates(self) -> List[Dict[str, Any]]:
@@ -486,7 +562,48 @@ class Orchestrator:
 
         if analyze_asset_pipeline is None:
             logger.warning("autotrader_pipeline.analyze_asset_pipeline not available")
+        return candidates
+
+    def _filter_correlation_duplicates(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Phase 4.5: Correlation Guard — block concurrent GOLD+BTC same-direction entries.
+
+        If both assets have candidates in the same direction, keep only the
+        higher-scoring one to avoid double USD exposure.
+        """
+        if len(candidates) < 2:
             return candidates
+
+        # Group by direction
+        buys = [c for c in candidates if c.get("action", "").upper() == "BUY"]
+        sells = [c for c in candidates if c.get("action", "").upper() == "SELL"]
+
+        filtered = list(candidates)  # start with all
+
+        for direction, group in (("BUY", buys), ("SELL", sells)):
+            assets_in_group = [c.get("asset", "UNKNOWN") for c in group]
+            if "GOLD" in assets_in_group and "BTC" in assets_in_group:
+                # Both assets same direction — keep higher score, mark other for skip
+                gold_c = [c for c in group if c.get("asset") == "GOLD"]
+                btc_c = [c for c in group if c.get("asset") == "BTC"]
+                if gold_c and btc_c:
+                    g_score = max(gold_c[0].get("score", 0), gold_c[0].get("adaptive_score", 0))
+                    b_score = max(btc_c[0].get("score", 0), btc_c[0].get("adaptive_score", 0))
+                    if g_score >= b_score:
+                        # Remove BTC candidate
+                        for c in btc_c:
+                            if c in filtered:
+                                filtered.remove(c)
+                                c["_correlation_blocked"] = True
+                                c["_skip_reason"] = f"Correlation guard: GOLD {direction} has higher score ({g_score:.1f} vs {b_score:.1f})"
+                    else:
+                        # Remove GOLD candidate
+                        for c in gold_c:
+                            if c in filtered:
+                                filtered.remove(c)
+                                c["_correlation_blocked"] = True
+                                c["_skip_reason"] = f"Correlation guard: BTC {direction} has higher score ({b_score:.1f} vs {g_score:.1f})"
+
+        return filtered
 
         # Get macro data
         dxy_chg = 0.0
@@ -534,11 +651,36 @@ class Orchestrator:
 
         # Analyze both assets across all strategies (SCALP, SWING, BALANCE, SWAP)
         STRATEGIES = ["SCALP", "SWING", "BALANCE", "SWAP"]
+
+        # Pre-compute HTF bias per asset (D1/H1) for reversal veto
+        htf_bias_cache: Dict[str, Dict[str, Any]] = {}
+        if compute_htf_bias is not None:
+            try:
+                import yfinance as yf
+                import pandas as pd
+                for symbol, asset_type in [("BTC-USD", "BTC"), ("GC=F", "GOLD")]:
+                    try:
+                        # Fetch D1 candles for HTF bias
+                        df_d1 = yf.Ticker(symbol).history(period="6mo", interval="1d")
+                        if not df_d1.empty and len(df_d1) >= 30:
+                            df_d1.columns = [c.title() for c in df_d1.columns]
+                            htf_bias_cache[asset_type] = compute_htf_bias(df_d1, asset_type)
+                        else:
+                            htf_bias_cache[asset_type] = {"bias": "NEUTRAL", "asset": asset_type}
+                    except Exception as e:
+                        logger.warning(f"HTF bias fetch failed for {asset_type}: {e}")
+                        htf_bias_cache[asset_type] = {"bias": "NEUTRAL", "asset": asset_type}
+            except Exception as e:
+                logger.warning(f"HTF bias pre-computation failed: {e}")
+
         for symbol, asset_type in [("BTC-USD", "BTC"), ("GC=F", "GOLD")]:
+            htf_bias = htf_bias_cache.get(asset_type, {"bias": "NEUTRAL", "asset": asset_type})
             for strategy in STRATEGIES:
                 try:
                     res = analyze_asset_pipeline(symbol, asset_type, dxy_chg, tnx_chg, gsr, fg_val, strategy=strategy)
                     if res and res.get("action") not in ("STAND_ASIDE", None):
+                        # Attach HTF bias to candidate for reversal veto gates
+                        res["htf_bias"] = htf_bias
                         candidates.append(res)
                 except Exception as e:
                     logger.warning(f"Pipeline analysis failed for {asset_type} {strategy}: {e}")
@@ -698,16 +840,65 @@ class Orchestrator:
             logger.error(f"Execution error for {asset} {side}: {exc}")
             return {"success": False, "error": str(exc)}
 
-    def manage_positions(self) -> List[Dict[str, Any]]:
-        """Manage existing positions: trailing stops, breakeven, partial TP."""
-        if self.broker is None:
-            return []
+    def _get_current_prices(self) -> Dict[str, float]:
+        """Fetch live prices for GOLD and BTC from market data feed or yfinance fallback."""
+        prices: Dict[str, float] = {}
+        try:
+            if market_data_feed:
+                try:
+                    g = market_data_feed.get_live_price("GOLD")
+                    if g and g.get("price", 0) > 0:
+                        prices["GOLD"] = float(g["price"])
+                except Exception:
+                    pass
+                try:
+                    b = market_data_feed.get_live_price("BTC")
+                    if b and b.get("price", 0) > 0:
+                        prices["BTC"] = float(b["price"])
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
+        # yfinance fallback
+        if not prices:
+            try:
+                import yfinance as yf
+                if "GOLD" not in prices:
+                    g = yf.Ticker("GC=F").history(period="1d", interval="1m")
+                    if not g.empty:
+                        prices["GOLD"] = float(g["Close"].iloc[-1])
+                if "BTC" not in prices:
+                    b = yf.Ticker("BTC-USD").history(period="1d", interval="1m")
+                    if not b.empty:
+                        prices["BTC"] = float(b["Close"].iloc[-1])
+            except Exception:
+                pass
+
+        return prices
+
+    def manage_positions(self) -> List[Dict[str, Any]]:
+        """Manage existing positions: trailing stops, breakeven, partial TP.
+
+        Runs for BOTH live MT5 and Paper modes. When MT5 is disconnected,
+        paper positions are still managed via safety_manager so trailing/BE/TP
+        never stop working.
+        """
         self.state = self.MANAGING
         try:
-            events = self.broker.trail_positions(default_strategy="SCALP")
+            if self.broker is not None and self.broker.is_connected:
+                events = self.broker.trail_positions(default_strategy="SCALP")
+            else:
+                # MT5 not connected — manage paper positions only
+                current_prices = self._get_current_prices()
+                if safety_manager and current_prices:
+                    events = safety_manager.trail_paper_positions(
+                        current_prices, default_strategy="SCALP"
+                    ) or []
+                else:
+                    events = []
             self.state = self.IDLE
-            return events
+            return events or []
         except Exception as exc:
             logger.error(f"Position management error: {exc}")
             self.state = self.IDLE
