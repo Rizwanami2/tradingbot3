@@ -649,7 +649,7 @@ class SafetyManager:
                     initial_risk_dist = 3.0 if asset == "GOLD" else 250.0
                 p["initial_risk_dist"] = initial_risk_dist
 
-            strat_code = p.get("strategy", default_strategy).upper()
+            strat_code = (p.get("strategy") or default_strategy).upper()
             strat = STRATEGIES.get(strat_code, STRATEGIES["SCALP"])
             active_be_r = strat.get("breakeven_r", 0.35)
             active_trail_start_r = strat.get("trail_start_r", 0.65)
@@ -963,7 +963,7 @@ class SafetyManager:
         return history[-limit:] if history else []
 
     def close_paper_position(self, ticket: str, exit_price: float, reason: str = "MANUAL_CLOSE") -> dict:
-        positions = self.state["paper_account"]["positions"]
+        positions = self.state.get("paper_account", {}).get("positions", [])
         target = None
         idx = -1
         for i, p in enumerate(positions):

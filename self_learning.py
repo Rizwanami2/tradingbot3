@@ -490,7 +490,7 @@ class SelfLearningEngine:
         strat_stats = {}
 
         for t in closed_trades:
-            act = t.get("action", "BUY").upper()
+            act = (t.get("action") or "BUY").upper()
             if act not in dir_stats: act = "BUY"
             t["action"] = act
             ds = dir_stats[act]
@@ -504,7 +504,7 @@ class SelfLearningEngine:
                 ds["losses"] += 1
             ds["total_r_multiple"] += r_mult
 
-            sc = t.get("strategy", "SCALP").upper()
+            sc = (t.get("strategy") or "SCALP").upper()
             t["strategy"] = sc
             if sc not in strat_stats:
                 strat_stats[sc] = {"total_trades": 0, "wins": 0, "losses": 0, "win_rate_pct": 0.0, "total_r": 0.0, "avg_r": 0.0}
@@ -1103,7 +1103,7 @@ class SelfLearningEngine:
             for idx, t in enumerate(closed, 1):
                 out = t.get("outcome", "WIN")
                 icon = "🟢 WIN" if out == "WIN" else "🔴 LOSS"
-                action = t.get("action", "BUY").upper()
+                action = (t.get("action") or "BUY").upper()
                 act_icon = "🟢 BUY" if action == "BUY" else "🔴 SELL"
                 r = t.get("r_multiple", 0.0)
                 asset = t.get("asset", "GOLD")

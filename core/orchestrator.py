@@ -562,7 +562,7 @@ class Orchestrator:
 
         if analyze_asset_pipeline is None:
             logger.warning("autotrader_pipeline.analyze_asset_pipeline not available")
-        return candidates
+            return candidates
 
     def _filter_correlation_duplicates(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Phase 4.5: Correlation Guard — block concurrent GOLD+BTC same-direction entries.
