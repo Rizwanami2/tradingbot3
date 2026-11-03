@@ -429,20 +429,25 @@ def _select_best_entry_zone(predictive_zones: Dict, side: str, curr_price: float
     }
 
 
-def verify_live_candle_direction(asset: str, action: str) -> tuple[bool, str]:
+def verify_live_candle_direction(asset: str, action: str, timeframe: str = "5m") -> tuple[bool, str]:
     """
     Microstructure Live Candle Momentum Gate.
+    In SCALP mode (timeframe='5m'), verifies the active 5-Minute candle direction & geometry.
     Institutional Rules:
-      - BUY: Live 1M/5M candle MUST be Green (Close >= Open). Upper wick < 40%.
-      - SELL: Live 1M/5M candle MUST be Red (Close <= Open). Lower wick < 40%.
+      - BUY: Live candle MUST NOT be heavily dumping (Close < Open with >=45% body). Upper wick < 50%.
+      - SELL: Live candle MUST NOT be heavily pumping (Close > Open with >=45% body). Lower wick < 50%.
     """
     asset_norm = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
     act_upper = action.upper()
     bars = None
+    tf_req = (timeframe or "5m").lower()
 
     if MT5_EXECUTOR_AVAILABLE and live_broker and getattr(live_broker, "is_connected", False):
         try:
-            bars = live_broker.get_live_1m_rates(asset_norm, count=5)
+            if tf_req == "5m" and hasattr(live_broker, "get_live_5m_rates"):
+                bars = live_broker.get_live_5m_rates(asset_norm, count=5)
+            if bars is None or (hasattr(bars, "empty") and bars.empty):
+                bars = live_broker.get_live_1m_rates(asset_norm, count=5)
         except Exception:
             bars = None
 
@@ -450,7 +455,12 @@ def verify_live_candle_direction(asset: str, action: str) -> tuple[bool, str]:
         if MARKET_DATA_AVAILABLE and market_data_feed:
             try:
                 mtf = market_data_feed.get_multitimeframe_bars(asset_norm)
-                bars = mtf.get("m1") if (mtf and "m1" in mtf) else (mtf.get("m5") if mtf else None)
+                if tf_req == "5m" and mtf and "m5" in mtf and not mtf["m5"].empty:
+                    bars = mtf["m5"]
+                elif mtf and "m1" in mtf and not mtf["m1"].empty:
+                    bars = mtf["m1"]
+                elif mtf and "m5" in mtf and not mtf["m5"].empty:
+                    bars = mtf["m5"]
             except Exception:
                 bars = None
 
@@ -466,23 +476,24 @@ def verify_live_candle_direction(asset: str, action: str) -> tuple[bool, str]:
 
     abs_body = abs(c_close - c_open)
     is_noise_candle = (abs_body < 0.40 if asset_norm == "GOLD" else abs_body < 40.0) or (abs_body / c_range <= 0.25)
+    tf_label = "5M" if tf_req == "5m" else "1M"
 
     if act_upper in ("BUY", "LONG"):
         if c_close < c_open and not is_noise_candle:
             if (abs_body / c_range) >= 0.45:
-                return False, f"Live candle is RED / DUMPING (Close ${c_close:,.2f} < Open ${c_open:,.2f}). Entry blocked to avoid catching falling knife."
+                return False, f"Live {tf_label} candle is RED / DUMPING (Close ${c_close:,.2f} < Open ${c_open:,.2f}). Entry blocked to avoid catching falling knife."
         upper_wick = c_high - max(c_open, c_close)
         if (upper_wick / c_range) >= 0.50 and not is_noise_candle:
-            return False, "Live candle rejected with >=50% upper wick (Bull Trap resistance). Buy blocked."
+            return False, f"Live {tf_label} candle rejected with >=50% upper wick (Bull Trap resistance). Buy blocked."
     elif act_upper in ("SELL", "SHORT"):
         if c_close > c_open and not is_noise_candle:
             if (abs_body / c_range) >= 0.45:
-                return False, f"Live candle is GREEN / PUMPING (Close ${c_close:,.2f} > Open ${c_open:,.2f}). Entry blocked to avoid shorting momentum."
+                return False, f"Live {tf_label} candle is GREEN / PUMPING (Close ${c_close:,.2f} > Open ${c_open:,.2f}). Entry blocked to avoid shorting momentum."
         lower_wick = min(c_open, c_close) - c_low
         if (lower_wick / c_range) >= 0.50 and not is_noise_candle:
-            return False, "Live candle bounced with >=50% lower wick (Bear Trap support). Sell blocked."
+            return False, f"Live {tf_label} candle bounced with >=50% lower wick (Bear Trap support). Sell blocked."
 
-    return True, "Live candle aligned with order momentum."
+    return True, f"Live {tf_label} candle aligned with order momentum."
 
 def is_auto_push_active(asset: str) -> bool:
     """Returns True if automated order push is active for the specified asset."""
@@ -1255,16 +1266,21 @@ def compute_adx(df, period: int = 14) -> tuple:
 # SKILL 2 & 3: KEY LEVELS, FIBONACCI & ORDERFLOW IMBALANCE (FVG)
 # ==============================================================================
 
-def compute_key_levels(hist):
-    curr = hist["Close"].iloc[-1]
-    ma20_ema = hist["Close"].ewm(span=20, adjust=False).mean().iloc[-1]
-    ma50 = hist["Close"].rolling(50).mean().iloc[-1] if len(hist) >= 50 else np.nan
-    ma200 = hist["Close"].rolling(200).mean().iloc[-1] if len(hist) >= 200 else np.nan
+def compute_key_levels(hist, d1_hist=None):
+    curr = float(hist["Close"].iloc[-1])
+    ma20_ema = float(hist["Close"].ewm(span=20, adjust=False).mean().iloc[-1])
 
-    recent_60 = hist.tail(60)
-    sw_high = recent_60["High"].max()
-    sw_low = recent_60["Low"].min()
-    sw_range = sw_high - sw_low
+    # Macro 50 & 200 SMA and daily pivots are anchored to Daily (D1) bars if provided
+    macro_df = d1_hist if (d1_hist is not None and not d1_hist.empty) else hist
+    ma50 = float(macro_df["Close"].rolling(50).mean().iloc[-1]) if len(macro_df) >= 50 else np.nan
+    ma200 = float(macro_df["Close"].rolling(200).mean().iloc[-1]) if len(macro_df) >= 200 else np.nan
+
+    # Tactical Swing Structure (Last 60 bars = 5 hours on 5M)
+    lookback = min(60, len(hist))
+    recent_sw = hist.tail(lookback)
+    sw_high = float(recent_sw["High"].max())
+    sw_low = float(recent_sw["Low"].min())
+    sw_range = max(sw_high - sw_low, 0.01)
 
     fib_382 = sw_high - 0.382 * sw_range
     fib_500 = sw_high - 0.500 * sw_range
@@ -1272,20 +1288,27 @@ def compute_key_levels(hist):
     fib_650 = sw_high - 0.650 * sw_range
     fib_786 = sw_high - 0.786 * sw_range
 
-    in_golden_pocket = (curr >= fib_650 * 0.985) and (curr <= fib_618 * 1.02)
+    # Golden Pocket confluence: In 5M scalping, tolerance is tighter (~0.3% or within pocket)
+    is_intraday = (d1_hist is not None and len(hist) < 300)
+    gp_tolerance = 0.003 if is_intraday else 0.015
+    in_golden_pocket = (curr >= min(fib_650, fib_618) * (1.0 - gp_tolerance)) and (curr <= max(fib_650, fib_618) * (1.0 + gp_tolerance))
 
-    # Classical daily pivot
-    yesterday = hist.iloc[-2] if len(hist) >= 2 else hist.iloc[-1]
-    pp = (yesterday["High"] + yesterday["Low"] + yesterday["Close"]) / 3
-    r1 = 2 * pp - yesterday["Low"]
-    s1 = 2 * pp - yesterday["High"]
+    # Classical daily pivot from prior completed daily bar
+    yesterday = macro_df.iloc[-2] if len(macro_df) >= 2 else macro_df.iloc[-1]
+    y_high = float(yesterday["High"])
+    y_low = float(yesterday["Low"])
+    y_close = float(yesterday["Close"])
+    pp = (y_high + y_low + y_close) / 3.0
+    r1 = 2.0 * pp - y_low
+    s1 = 2.0 * pp - y_high
 
     return {
         "curr": curr, "ma20_ema": ma20_ema, "ma50": ma50, "ma200": ma200,
         "sw_high": sw_high, "sw_low": sw_low, "sw_range": sw_range,
         "fib_382": fib_382, "fib_500": fib_500, "fib_618": fib_618,
         "fib_650": fib_650, "fib_786": fib_786, "in_golden_pocket": in_golden_pocket,
-        "pivot": pp, "r1": r1, "s1": s1
+        "pivot": pp, "r1": r1, "s1": s1,
+        "tactical_timeframe": "5M" if is_intraday else "D1"
     }
 
 
@@ -1402,45 +1425,35 @@ def fetch_macro_context():
 # SKILL 7, 8 & 9: MULTI-FACTOR AUDIT, CONFLUENCE SCORING & RISK SIZING
 # ==============================================================================
 
-def _analyze_single_side(symbol: str, asset_type: str, macro: dict, hist, levels: dict, action: str = "BUY", mtf_trend: dict = None, adapted_strat: dict = None) -> dict:
+def _analyze_single_side(symbol: str, asset_type: str, macro: dict, hist, levels: dict, action: str = "BUY", mtf_trend: dict = None, adapted_strat: dict = None, d1_hist=None) -> dict:
     curr = levels["curr"]
     ma50 = levels["ma50"]
     ma200 = levels["ma200"]
 
-    # Technical indicators
+    # Technical indicators (Computed directly on the tactical candle, which is 5M in Scalp mode)
     rsi = compute_rsi(hist["Close"], 14)
     atr = compute_atr(hist, 14)
     adx, regime, plus_di, minus_di = compute_adx(hist, 14)
 
-    # Imbalance & Trap analysis
+    # Imbalance & Trap analysis on tactical horizon
     fvg = detect_fvg(hist)
     trap_type, trap_detail = detect_traps(hist, levels)
 
-    # Volatility
-    daily_rets = hist["Close"].pct_change().dropna()
+    # Volatility (Measured on Daily macro bars if provided)
+    vol_df = d1_hist if (d1_hist is not None and not d1_hist.empty) else hist
+    daily_rets = vol_df["Close"].pct_change().dropna()
     vol30 = float(daily_rets.tail(30).std() * np.sqrt(365) * 100) if len(daily_rets) >= 30 else 30.0
 
-    # Valuation
+    # Valuation (Mayer Multiple uses Daily 200 SMA)
     mayer = (curr / ma200) if not np.isnan(ma200) and ma200 > 0 else 1.0
 
-    # Candle wicks (Timeframe-Adaptive: In Scalp mode, evaluates active 5M candle for real-time wick precision)
+    # Candle wicks (Directly from tactical candle, which is 5M in Scalp mode)
     curr_bar = hist.iloc[-1]
-    c_open, c_high, c_low, c_close = curr_bar["Open"], curr_bar["High"], curr_bar["Low"], curr_bar["Close"]
-    c_range = c_high - c_low
-
-    strat_chk = get_active_strategy()["code"] if RISK_ENGINE_AVAILABLE else "SCALP"
-    if strat_chk == "SCALP" and MARKET_DATA_AVAILABLE and market_data_feed:
-        try:
-            micro_bars = market_data_feed.get_multitimeframe_bars(asset_type)
-            if micro_bars and "m5" in micro_bars and not micro_bars["m5"].empty:
-                mb = micro_bars["m5"].iloc[-1]
-                c_open = float(mb["open"] if "open" in mb else mb["Open"])
-                c_high = float(mb["high"] if "high" in mb else mb["High"])
-                c_low = float(mb["low"] if "low" in mb else mb["Low"])
-                c_close = float(mb["close"] if "close" in mb else mb["Close"])
-                c_range = max(c_high - c_low, 0.001)
-        except Exception:
-            pass
+    c_open = float(curr_bar["Open"] if "Open" in curr_bar else curr_bar["open"])
+    c_high = float(curr_bar["High"] if "High" in curr_bar else curr_bar["high"])
+    c_low = float(curr_bar["Low"] if "Low" in curr_bar else curr_bar["low"])
+    c_close = float(curr_bar["Close"] if "Close" in curr_bar else curr_bar["close"])
+    c_range = max(c_high - c_low, 0.001)
 
     up_wick_pct = ((c_high - max(c_open, c_close)) / c_range * 100) if c_range > 0 else 0.0
     low_wick_pct = ((min(c_open, c_close) - c_low) / c_range * 100) if c_range > 0 else 0.0
@@ -1640,6 +1653,9 @@ def _analyze_single_side(symbol: str, asset_type: str, macro: dict, hist, levels
         rev_audit = mtf_trend.get("reversal_audit", {})
         is_bull_rev = (rev_audit.get("reversal_type") == "CONFIRMED_BULLISH_REVERSAL") or (mov == "EARLY_BULLISH_REVERSAL")
         is_bear_rev = (rev_audit.get("reversal_type") == "CONFIRMED_BEARISH_REVERSAL") or (mov == "EARLY_BEARISH_REVERSAL")
+        tf_info = mtf_trend.get("timeframes", {}) if mtf_trend else {}
+        m5_trend_info = tf_info.get("m5", {})
+        m5_dir = m5_trend_info.get("trend", "NEUTRAL")
 
         if is_buy:
             if is_bull_rev:
@@ -1651,10 +1667,13 @@ def _analyze_single_side(symbol: str, asset_type: str, macro: dict, hist, levels
             elif is_bear_rev:
                 factors_hit = [f for f in factors_hit if not f.startswith("Trend:") and not f.startswith("Momentum:")]
                 factors_hit.append("⚠️ Vetoed: Microstructure flipped Bearish (M1/M5 ChoCH Breakdown)")
-            elif norm_sc >= 0.25:
-                factors_hit.append(f"MTF Alignment: Small-to-High TF Bullish Expansion (+{norm_sc*100:.0f}%)")
-            elif mtf_trend.get("shift_detected"):
-                factors_hit.append(f"Market Movement: {mtf_trend.get('movement_badge')}")
+            else:
+                if m5_dir in ("BULLISH", "STRONGLY_BULLISH"):
+                    factors_hit.append(f"5M Scalp Anchor: 5-Minute candle bullish momentum ({m5_trend_info.get('badge', '🟢')})")
+                if norm_sc >= 0.25:
+                    factors_hit.append(f"MTF Alignment: Small-to-High TF Bullish Expansion (+{norm_sc*100:.0f}%)")
+                elif mtf_trend.get("shift_detected"):
+                    factors_hit.append(f"Market Movement: {mtf_trend.get('movement_badge')}")
         else: # is_sell
             if is_bear_rev:
                 factors_hit.append(f"Microstructure Reversal: {rev_audit.get('summary', 'M1/M5 Bearish ChoCH & 9/21 EMA Flip')}")
@@ -1665,10 +1684,13 @@ def _analyze_single_side(symbol: str, asset_type: str, macro: dict, hist, levels
             elif is_bull_rev:
                 factors_hit = [f for f in factors_hit if not f.startswith("Trend:") and not f.startswith("Momentum:")]
                 factors_hit.append("⚠️ Vetoed: Microstructure flipped Bullish (M1/M5 ChoCH Breakout Up)")
-            elif norm_sc <= -0.25:
-                factors_hit.append(f"MTF Alignment: Small-to-High TF Bearish Expansion ({norm_sc*100:.0f}%)")
-            elif mtf_trend.get("shift_detected"):
-                factors_hit.append(f"Market Movement: {mtf_trend.get('movement_badge')}")
+            else:
+                if m5_dir in ("BEARISH", "STRONGLY_BEARISH"):
+                    factors_hit.append(f"5M Scalp Anchor: 5-Minute candle bearish momentum ({m5_trend_info.get('badge', '🔴')})")
+                if norm_sc <= -0.25:
+                    factors_hit.append(f"MTF Alignment: Small-to-High TF Bearish Expansion ({norm_sc*100:.0f}%)")
+                elif mtf_trend.get("shift_detected"):
+                    factors_hit.append(f"Market Movement: {mtf_trend.get('movement_badge')}")
 
     # Profile-Specific Strategy Accuracy Verification
     strat_accuracy = {"passed": True, "veto_reasons": []}
@@ -1946,15 +1968,30 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
     if hist.empty or len(hist) < 30:
         return None
 
-    levels = compute_key_levels(hist)
-
-    # Multi-Timeframe Trend Change & Adaptive Strategy Detection
+    # Multi-Timeframe Trend Change & Adaptive Strategy Detection across ALL timeframes (D1, H1, M15, M5, M1)
     mtf_bars = market_data_feed.get_multitimeframe_bars(asset_type) if (MARKET_DATA_AVAILABLE and market_data_feed) else {}
     mtf_trend = mtf_trend_engine.analyze_multitimeframe_trend(asset_type, mtf_bars) if (INSTITUTIONAL_AVAILABLE and mtf_trend_engine) else {}
-    adapted_strat = adaptive_strategy_orchestrator.adapt_strategy_to_movement(asset_type, mtf_trend, levels["curr"]) if (INSTITUTIONAL_AVAILABLE and adaptive_strategy_orchestrator) else {}
 
-    buy_setup = _analyze_single_side(symbol, asset_type, macro, hist, levels, action="BUY", mtf_trend=mtf_trend, adapted_strat=adapted_strat)
-    sell_setup = _analyze_single_side(symbol, asset_type, macro, hist, levels, action="SELL", mtf_trend=mtf_trend, adapted_strat=adapted_strat)
+    curr_p = float(hist["Close"].iloc[-1])
+    adapted_strat = adaptive_strategy_orchestrator.adapt_strategy_to_movement(asset_type, mtf_trend, curr_p) if (INSTITUTIONAL_AVAILABLE and adaptive_strategy_orchestrator) else {}
+    effective_strat = (adapted_strat.get("strategy_code") if adapted_strat else None) or (get_active_strategy()["code"] if RISK_ENGINE_AVAILABLE else "SCALP")
+
+    # PRIMARY EXECUTION ANCHOR:
+    # In SCALP mode, the 5-Minute (5M) candle is the tactical execution candle for swing levels,
+    # Fibonacci Golden Pocket, RSI, ATR, and Wyckoff traps.
+    # Macro trend (50/200 SMA) and classical daily pivots are anchored to Daily (D1) bars.
+    d1_hist = hist
+    is_scalp_exec = (effective_strat == "SCALP")
+    m5_bars = mtf_bars.get("m5") if mtf_bars else None
+    if is_scalp_exec and m5_bars is not None and not m5_bars.empty and len(m5_bars) >= 15:
+        tactical_hist = m5_bars
+    else:
+        tactical_hist = hist
+
+    levels = compute_key_levels(tactical_hist, d1_hist=d1_hist)
+
+    buy_setup = _analyze_single_side(symbol, asset_type, macro, tactical_hist, levels, action="BUY", mtf_trend=mtf_trend, adapted_strat=adapted_strat, d1_hist=d1_hist)
+    sell_setup = _analyze_single_side(symbol, asset_type, macro, tactical_hist, levels, action="SELL", mtf_trend=mtf_trend, adapted_strat=adapted_strat, d1_hist=d1_hist)
 
     if mtf_trend:
         buy_setup["mtf_trend"] = mtf_trend
@@ -1983,7 +2020,7 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
         elif mtf_trend and mtf_trend.get("normalized_score", 0.0) > 0.15:
             dominant_side = "BUY"
         else:
-            dominant_side = "SELL" if rsi > 55 else "BUY"
+            dominant_side = "SELL" if buy_setup.get("rsi", 50) > 55 else "BUY"
 
     dom = buy_setup if dominant_side == "BUY" else sell_setup
 
@@ -1994,6 +2031,8 @@ def analyze_asset_complete(symbol: str, asset_type: str, macro: dict):
     res["action"] = dominant_side
     res["mtf_trend"] = mtf_trend
     res["adapted_strat"] = adapted_strat
+    res["mtf_bars"] = mtf_bars
+    res["tactical_timeframe"] = "5M" if tactical_hist is not hist else "D1"
     return res
 
 
@@ -2131,6 +2170,7 @@ def format_scan_summary(data: dict) -> str:
         f"📊 *HARD-ASSET DUAL-SIDED MARKET SCAN* ({session_badge})",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         f"🌐 *Macro:* DXY `{m.get('dxy', 101.8):.2f}` | 10Y Yield `{m.get('tnx', 4.5):.2f}%` | Gold/Silver `{m.get('gsr', 80.0):.1f}x` | VIX `{m.get('vix', 16.0):.1f}`",
+        f"⏱️ *Execution Anchor:* `5-Minute (M5) Candle` | MTF Scope: `D1, H1, M15, M5, M1`",
         "",
         "🥇 *SLOT 1: GOLD (XAU/USD)*",
         f"• Live Price: `${g['price']:,.2f}` | HTF Bias: *{g_bias}*",
@@ -2159,8 +2199,8 @@ def format_welcome_menu(sender_name: str) -> str:
 
     b_pend = get_pending_setup("BTC")
     g_pend = get_pending_setup("GOLD")
-    g_state = f"💼 In Trade (#{g_pend.get('ticket')})" if (g_pend and g_pend.get("status") == "EXECUTED") else ("⏳ Pending Approval" if (g_pend and g_pend.get("status") == "PENDING") else ("🟢 Scanning 1M" if is_asset_enabled("GOLD") else "⚪ Muted (BTC Only)"))
-    b_state = f"💼 In Trade (#{b_pend.get('ticket')})" if (b_pend and b_pend.get("status") == "EXECUTED") else ("⏳ Pending Approval" if (b_pend and b_pend.get("status") == "PENDING") else ("🟢 Scanning 1M" if is_asset_enabled("BTC") else "⚪ Muted (Gold Only)"))
+    g_state = f"💼 In Trade (#{g_pend.get('ticket')})" if (g_pend and g_pend.get("status") == "EXECUTED") else ("⏳ Pending Approval" if (g_pend and g_pend.get("status") == "PENDING") else ("🟢 Scanning 5M (MTF)" if is_asset_enabled("GOLD") else "⚪ Muted (BTC Only)"))
+    b_state = f"💼 In Trade (#{b_pend.get('ticket')})" if (b_pend and b_pend.get("status") == "EXECUTED") else ("⏳ Pending Approval" if (b_pend and b_pend.get("status") == "PENDING") else ("🟢 Scanning 5M (MTF)" if is_asset_enabled("BTC") else "⚪ Muted (Gold Only)"))
     asset_focus_label = "₿ Bitcoin Only (Gold Muted)" if ACTIVE_ASSET == "BTC" else ("🥇 Gold Only (BTC Muted)" if ACTIVE_ASSET == "GOLD" else "⚡ Both Assets (Gold & BTC)")
 
     return (
@@ -2482,9 +2522,11 @@ def execute_setup_order(asset: str, setup_data: dict, token: str, chat_id: str, 
         # Validate live candle if order entry is live market (not synthetic test mock)
         cur_p = market_data_feed.get_live_price(asset_norm).get("price", entry) if (MARKET_DATA_AVAILABLE and market_data_feed) else entry
         if cur_p and abs(entry - cur_p) / cur_p <= 0.08 and not setup_data.get("bypass_candle_gate"):
-            candle_ok, candle_msg = verify_live_candle_direction(asset_norm, action_to_check)
+            strat_code = setup_data.get("strategy", "SCALP").upper()
+            gate_tf = "5m" if strat_code == "SCALP" else "1m"
+            candle_ok, candle_msg = verify_live_candle_direction(asset_norm, action_to_check, timeframe=gate_tf)
             if not candle_ok:
-                return {"success": False, "error": f"Live Candle Gate: {candle_msg}"}
+                return {"success": False, "error": f"Live Candle Gate ({gate_tf.upper()}): {candle_msg}"}
 
     # News Avoidance Gate: Block new entries around high-impact events
     if MARKET_DATA_AVAILABLE and market_data_feed:
@@ -2895,8 +2937,22 @@ def format_elite_alert(asset: str, data: dict, setup_data: dict = None, exec_res
         f"📊 *Asset:* {icon} `{sym_name}` ({slot_label})",
         f"⚡ *Signal:* *{act_badge}*",
         f"🎯 *Confluence Score:* `{score_val}/10` (Edge: High Probability)",
+        f"⏱️ *Execution:* `5-Minute (5M) Candle Anchor` | Strategy: `{lot_info.get('strategy', 'SCALP')}`",
         f"🌐 *Session:* `{get_market_session_badge()}`",
         f"💵 *Live Market Price:* `${item['price']:,.2f}`",
+    ]
+
+    mtf_trend_obj = item.get("mtf_trend", {})
+    if mtf_trend_obj:
+        tfs = mtf_trend_obj.get("timeframes", {})
+        m1_b = tfs.get("m1", {}).get("badge", "-")[:2]
+        m5_b = tfs.get("m5", {}).get("badge", "-")[:2]
+        m15_b = tfs.get("m15", {}).get("badge", "-")[:2]
+        h1_b = tfs.get("h1", {}).get("badge", "-")[:2]
+        d1_b = tfs.get("d1", {}).get("badge", "-")[:2]
+        lines.append(f"🧭 *MTF Analysis:* M1:{m1_b} | M5:{m5_b} | M15:{m15_b} | H1:{h1_b} | D1:{d1_b}")
+
+    lines.extend([
         "",
         "📋 *Sniper Order Ticket:*",
         f"• Entry Zone:    `${entry_val:,.2f}`",
@@ -2904,7 +2960,7 @@ def format_elite_alert(asset: str, data: dict, setup_data: dict = None, exec_res
         f"• Take-Profit 1: `${tp1_val:,.2f}`",
         f"• Take-Profit 2: `${tp2_val:,.2f}`",
         f"• Position Size: `{lots_val}` Lots (${risk_val:,.0f} risk | 1.0% max)"
-    ]
+    ])
 
     # Setup Confluence Breakdown section
     bdown = item.get("score_breakdown", [])

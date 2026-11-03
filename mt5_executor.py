@@ -2192,5 +2192,19 @@ class MT5LiveBroker:
         df = pd.DataFrame(rates)
         df["time"] = pd.to_datetime(df["time"], unit="s")
         return df
+
+    def get_live_5m_rates(self, asset: str, count: int = 60):
+        """Fetches the latest N 5-minute candles directly from the live broker."""
+        if not self.ensure_connected():
+            return None
+        symbol = self.resolve_symbol(asset)
+        rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, count)
+        if rates is None or len(rates) == 0:
+            return None
+        import pandas as pd
+        df = pd.DataFrame(rates)
+        df["time"] = pd.to_datetime(df["time"], unit="s")
+        return df
+
 # Global Singleton Instance
 live_broker = MT5LiveBroker()

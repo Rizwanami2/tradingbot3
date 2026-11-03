@@ -1248,7 +1248,7 @@ def validate_strategy_accuracy(strat_code: str, asset: str, current_price: float
     # ── A. SCALP ACCURACY RULES (Target: ~68-78% Practical Key-Level Scalp) ──
     at_good_level = False
     if strat["code"] == "SCALP":
-        min_atr = 1.50 if asset_key == "GOLD" else 150.0
+        min_atr = 1.00 if asset_key == "GOLD" else 50.0
         if atr < min_atr:
             passed = False
             veto_reasons.append(f"Low Volatility (ATR ${atr:.1f} < ${min_atr:.1f}). Spread risk too high for scalping.")

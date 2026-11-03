@@ -296,9 +296,9 @@ class MarketDataFeed:
                 sym = self.broker.resolve_symbol(asset_norm)
                 tf_map = {
                     "m1": (mt5.TIMEFRAME_M1, 60),
-                    "m5": (mt5.TIMEFRAME_M5, 60),
-                    "m15": (mt5.TIMEFRAME_M15, 60),
-                    "h1": (mt5.TIMEFRAME_H1, 60),
+                    "m5": (mt5.TIMEFRAME_M5, 100),
+                    "m15": (mt5.TIMEFRAME_M15, 80),
+                    "h1": (mt5.TIMEFRAME_H1, 80),
                     "d1": (mt5.TIMEFRAME_D1, 100),
                 }
                 for tf_name, (mt5_tf, count) in tf_map.items():
