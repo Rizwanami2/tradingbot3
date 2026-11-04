@@ -127,8 +127,10 @@ try:
         get_market_session, safety_manager, SafetyManager
     )
     RISK_ENGINE_AVAILABLE = True
-except Exception:
+except Exception as e:
     RISK_ENGINE_AVAILABLE = False
+    safety_manager = None
+    logger.warning(f"Could not load risk_engine: {e}")
 
 # Import Live MT5 Broker Execution Engine
 try:
