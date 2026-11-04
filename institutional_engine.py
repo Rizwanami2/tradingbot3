@@ -170,8 +170,295 @@ class InstitutionalEngine:
         return "RANGE", 0, "Consolidation / Range"
 
     # ==========================================================================
-    # DIRECTIONAL ALIGNMENT & RISK GUARDRAIL
+    # ENHANCED CANDLE PATTERN DETECTION (SMC CONCEPTS)
     # ==========================================================================
+
+    def detect_fair_value_gaps(self, df: pd.DataFrame, lookback: int = 20) -> List[Dict[str, Any]]:
+        """
+        Detects Fair Value Gaps (FVG) - price imbalances where price moved so fast
+        it left a gap in the order flow. These often act as magnets for price return.
+        
+        Returns list of FVG dicts with: type, top, bottom, index, age, filled
+        """
+        if len(df) < 5:
+            return []
+        
+        fvgs = []
+        recent = df.tail(lookback)
+        
+        for i in range(2, len(recent) - 1):
+            # Bullish FVG: Gap between candle i-2 high and candle i low
+            if recent.iloc[i-2]["Low"] > recent.iloc[i]["High"]:
+                fvg_top = recent.iloc[i-2]["Low"]
+                fvg_bottom = recent.iloc[i]["High"]
+                fvgs.append({
+                    "type": "BULLISH_FVG",
+                    "top": fvg_top,
+                    "bottom": fvg_bottom,
+                    "index": len(df) - lookback + i,
+                    "age": len(df) - (len(df) - lookback + i),
+                    "filled": False,
+                    "mitigation_pct": 0.0
+                })
+            # Bearish FVG: Gap between candle i-2 low and candle i high
+            elif recent.iloc[i-2]["High"] < recent.iloc[i]["Low"]:
+                fvg_top = recent.iloc[i]["Low"]
+                fvg_bottom = recent.iloc[i-2]["High"]
+                fvgs.append({
+                    "type": "BEARISH_FVG",
+                    "top": fvg_top,
+                    "bottom": fvg_bottom,
+                    "index": len(df) - lookback + i,
+                    "age": len(df) - (len(df) - lookback + i),
+                    "filled": False,
+                    "mitigation_pct": 0.0
+                })
+        
+        # Check for filled FVGs with current price
+        curr_price = df["Close"].iloc[-1]
+        for fvg in fvgs:
+            if fvg["type"] == "BULLISH_FVG" and curr_price <= fvg["top"]:
+                fvg["filled"] = True
+                fvg["mitigation_pct"] = 100.0
+            elif fvg["type"] == "BEARISH_FVG" and curr_price >= fvg["bottom"]:
+                fvg["filled"] = True
+                fvg["mitigation_pct"] = 100.0
+        
+        return fvgs
+
+    def detect_order_blocks(self, df: pd.DataFrame, lookback: int = 30, swing_lookback: int = 5) -> List[Dict[str, Any]]:
+        """
+        Detects Order Blocks (OB) - the last opposing candle before a strong 
+        directional move that breaks structure. These are institutional footprints.
+        """
+        if len(df) < lookback:
+            return []
+        
+        order_blocks = []
+        recent = df.tail(lookback)
+        
+        # Find strong momentum candles (body > 60% of range, volume confirmation)
+        for i in range(2, len(recent) - 2):
+            candle = recent.iloc[i]
+            body = abs(candle["Close"] - candle["Open"])
+            range_val = candle["High"] - candle["Low"]
+            
+            if range_val == 0:
+                continue
+            
+            body_ratio = body / range_val
+            if body_ratio < 0.6:  # Need strong body
+                continue
+            
+            # Check if this candle led to a breakout (next 2 candles continue direction)
+            next_1 = recent.iloc[i+1]
+            next_2 = recent.iloc[i+2]
+            
+            is_bullish_ob = (
+                candle["Close"] > candle["Open"] and  # Green candle
+                next_1["Close"] > next_1["Open"] and  # Follow-through
+                next_2["Close"] > next_2["Open"] and
+                next_2["Close"] > candle["High"]  # Breakout above
+            )
+            
+            is_bearish_ob = (
+                candle["Close"] < candle["Open"] and  # Red candle
+                next_1["Close"] < next_1["Open"] and
+                next_2["Close"] < next_2["Open"] and
+                next_2["Close"] < candle["Low"]  # Breakdown below
+            )
+            
+            if is_bullish_ob:
+                ob_low = min(candle["Open"], candle["Close"])
+                ob_high = max(candle["Open"], candle["Close"])
+                return [{
+                    "type": "BULLISH_OB",
+                    "top": ob_high,
+                    "bottom": ob_low,
+                    "index": len(df) - lookback + i,
+                    "age": len(df) - (len(df) - lookback + i),
+                    "tested": False,
+                    "strength": "HIGH" if body_ratio > 0.8 else "MEDIUM"
+                }]
+            elif is_bearish_ob:
+                ob_low = min(candle["Open"], candle["Close"])
+                ob_high = max(candle["Open"], candle["Close"])
+                return [{
+                    "type": "BEARISH_OB",
+                    "top": ob_high,
+                    "bottom": ob_low,
+                    "index": len(df) - lookback + i,
+                    "age": len(df) - (len(df) - lookback + i),
+                    "tested": False,
+                    "strength": "HIGH" if body_ratio > 0.8 else "MEDIUM"
+                }]
+        
+        return []
+
+    def detect_liquidity_sweeps(self, df: pd.DataFrame, lookback: int = 20, 
+                                 sweep_threshold: float = 0.3) -> List[Dict[str, Any]]:
+        """
+        Detects Liquidity Sweeps - price piercing a key level (swing high/low)
+        only to reverse, indicating stop hunts / liquidity grabs.
+        
+        sweep_threshold: Max wick penetration as % of range to qualify as sweep
+        """
+        if len(df) < lookback + 5:
+            return []
+        
+        sweeps = []
+        recent = df.tail(lookback + 5)
+        
+        highs = recent["High"].values
+        lows = recent["Low"].values
+        opens = recent["Open"].values
+        closes = recent["Close"].values
+        
+        # Find swing highs/lows in the first part
+        swing_highs = []
+        swing_lows = []
+        for i in range(2, len(recent) - 3):
+            if highs[i] > highs[i-1] and highs[i] > highs[i-2] and highs[i] > highs[i+1] and highs[i] > highs[i+2]:
+                swing_highs.append((i, highs[i]))
+            if lows[i] < lows[i-1] and lows[i] < lows[i-2] and lows[i] < lows[i+1] and lows[i] < lows[i+2]:
+                swing_lows.append((i, lows[i]))
+        
+        # Check recent candles (last 3) for sweeps of these levels
+        for idx in range(len(recent) - 3, len(recent)):
+            curr_high = highs[idx]
+            curr_low = lows[idx]
+            curr_open = opens[idx]
+            curr_close = closes[idx]
+            body = abs(curr_close - curr_open)
+            range_val = highs[idx] - lows[idx]
+            
+            if range_val == 0:
+                continue
+            
+            # Check bullish sweep (sweep of swing low)
+            for swing_idx, swing_low in swing_lows:
+                if curr_low < swing_low and curr_close > swing_low:
+                    penetration = (swing_low - curr_low) / (highs[idx] - lows[idx]) if highs[idx] != lows[idx] else 0
+                    if penetration <= sweep_threshold:
+                        sweeps.append({
+                            "type": "BULLISH_SWEEP",
+                            "swept_level": swing_low,
+                            "penetration_pct": penetration * 100,
+                            "reversal_candle": idx,
+                            "strength": "HIGH" if closes[idx] > opens[idx] else "MEDIUM"
+                        })
+            
+            # Check bearish sweep (sweep of swing high)
+            for swing_idx, swing_high in swing_highs:
+                if curr_high > swing_high and curr_close < swing_high:
+                    penetration = (curr_high - swing_high) / (highs[idx] - lows[idx]) if highs[idx] != lows[idx] else 0
+                    if penetration <= sweep_threshold:
+                        sweeps.append({
+                            "type": "BEARISH_SWEEP",
+                            "swept_level": swing_high,
+                            "penetration_pct": penetration * 100,
+                            "reversal_candle": idx,
+                            "strength": "HIGH" if closes[idx] < opens[idx] else "MEDIUM"
+                        })
+        
+        return sweeps
+
+    def analyze_candle_anatomy(self, df: pd.DataFrame, lookback: int = 1) -> Dict[str, Any]:
+        """
+        Comprehensive candle anatomy analysis for the most recent candle(s).
+        Returns detailed metrics for decision making.
+        """
+        if len(df) < lookback:
+            return {}
+        
+        results = []
+        for i in range(-lookback, 0):
+            candle = df.iloc[i]
+            o, h, l, c = candle["Open"], candle["High"], candle["Low"], candle["Close"]
+            
+            body = abs(c - o)
+            range_val = h - l
+            upper_wick = h - max(o, c)
+            lower_wick = min(o, c) - l
+            body_ratio = body / (h - l) if h != l else 0
+            upper_wick_ratio = upper_wick / (h - l) if h != l else 0
+            lower_wick_ratio = lower_wick / (h - l) if h != l else 0
+            
+            # Candle classification
+            is_bullish = c > o
+            is_doji = body / (h - l) < 0.1 if h != l else True
+            
+            if is_doji:
+                ctype = "DOJI"
+            elif is_bullish and lower_wick_ratio > 0.4 and upper_wick_ratio < 0.2:
+                ctype = "HAMMER"
+            elif not is_bullish and upper_wick_ratio > 0.4 and lower_wick_ratio < 0.2:
+                ctype = "SHOOTING_STAR"
+            elif is_bullish and body_ratio > 0.7:
+                ctype = "MARUBOZU_BULL"
+            elif not is_bullish and body_ratio > 0.7:
+                ctype = "MARUBOZU_BEAR"
+            elif is_bullish and lower_wick_ratio > 0.3:
+                ctype = "BULLISH_REJECTION"
+            elif not is_bullish and upper_wick_ratio > 0.3:
+                ctype = "BEARISH_REJECTION"
+            else:
+                ctype = "NORMAL"
+            
+            # Volume analysis (if available)
+            vol_ratio = 1.0
+            if "Volume" in df.columns and len(df) > 10:
+                avg_vol = df["Volume"].tail(20).mean()
+                curr_vol = candle.get("Volume", avg_vol)
+                vol_ratio = curr_vol / avg_vol if avg_vol > 0 else 1.0
+            
+            results.append({
+                "index": len(df) - lookback + i if i < 0 else i,
+                "type": ctype,
+                "is_bullish": is_bullish,
+                "body_ratio": round(body_ratio, 3),
+                "upper_wick_ratio": round(upper_wick_ratio, 3),
+                "lower_wick_ratio": round(lower_wick_ratio, 3),
+                "upper_wick": upper_wick,
+                "lower_wick": lower_wick,
+                "body": body,
+                "range": range_val,
+                "volume_ratio": round(vol_ratio, 2),
+                "is_doji": is_doji
+            })
+        
+        return {"candles": results, "summary": self._summarize_candle_sequence(results)}
+
+    def _summarize_candle_sequence(self, candles: List[Dict]) -> Dict[str, Any]:
+        """Summarizes a sequence of candles for quick regime assessment."""
+        if not candles:
+            return {}
+        
+        bullish_count = sum(1 for c in candles if c["is_bullish"])
+        bearish_count = len(candles) - bullish_count
+        avg_body_ratio = sum(c["body_ratio"] for c in candles) / len(candles)
+        doji_count = sum(1 for c in candles if c["is_doji"])
+        
+        return {
+            "dominant_direction": "BULLISH" if bullish_count > bearish_count else "BEARISH" if bearish_count > bullish_count else "NEUTRAL",
+            "bullish_candles": bullish_count,
+            "bearish_candles": bearish_count,
+            "avg_body_ratio": round(avg_body_ratio, 3),
+            "doji_count": doji_count,
+            "consecutive_bullish": self._max_consecutive([c["is_bullish"] for c in candles], True),
+            "consecutive_bearish": self._max_consecutive([c["is_bullish"] for c in candles], False)
+        }
+
+    def _max_consecutive(self, bools: List[bool], target: bool) -> int:
+        max_seq = 0
+        curr = 0
+        for b in bools:
+            if b == target:
+                curr += 1
+                max_seq = max(max_seq, curr)
+            else:
+                curr = 0
+        return max_seq
 
     def evaluate_htf_alignment(self, htf_bias: Dict[str, Any], action: str,
                                strategy: str = "SCALP") -> Dict[str, Any]:

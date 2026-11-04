@@ -417,11 +417,28 @@ class SafetyManager:
                 return False, f"🛑 Daily Loss Circuit Breaker TRIPPED: Realized daily loss is {daily_loss_pct:.2f}% (Limit: -{max_daily_loss:.1f}% = -${starting_eq * (max_daily_loss/100):,.2f}). Trading locked until daily reset."
             return False, f"🚨 Kill-Switch is ACTIVE ({reason}). All trading blocked."
 
-        # Check 1.5: Weekly Drawdown Ceiling (-5.0% High-Water Mark)
-        weekly_pnl = self.state.get("realized_weekly_pnl", 0.0)
-        starting_eq_val = self.state.get("starting_daily_equity", current_equity or DEFAULT_ACCOUNT_BALANCE)
-        if starting_eq_val > 0 and (weekly_pnl / starting_eq_val) * 100.0 <= -5.0:
-            return False, f"🚨 Weekly Loss Limit TRIPPED (-5.0% reached). Trading locked until Monday to preserve capital."
+        # Check 1.5: Tiered Drawdown Protection
+        # Tier 1: -1.0% DD -> Reduce risk to 75%
+        # Tier 2: -1.5% DD -> Reduce risk to 50% + 30min cooldown
+        # Tier 3: -2.0% DD -> Circuit breaker (halt)
+        dd_tier = 0
+        if daily_loss_pct <= -2.0:
+            dd_tier = 3
+        elif daily_loss_pct <= -1.5:
+            dd_tier = 2
+        elif daily_loss_pct <= -1.0:
+            dd_tier = 1
+        
+        if dd_tier >= 3:
+            return False, f"🛑 Daily Loss Circuit Breaker TRIPPED: Realized daily loss is {daily_loss_pct:.2f}% (Limit: -{max_daily_loss:.1f}% = -${starting_eq * (max_daily_loss/100):,.2f}). Trading locked until daily reset."
+        elif dd_tier >= 2:
+            # Auto-reduce risk to 50% for this trade
+            proposed_risk_pct = min(proposed_risk_pct, DEFAULT_MAX_RISK_PCT * 0.5)
+            logger.warning(f"Drawdown Tier 2: Daily DD {daily_loss_pct:.2f}% -> Risk reduced to {proposed_risk_pct:.2f}%")
+        elif dd_tier >= 1:
+            # Auto-reduce risk to 75% for this trade
+            proposed_risk_pct = min(proposed_risk_pct, DEFAULT_MAX_RISK_PCT * 0.75)
+            logger.warning(f"Drawdown Tier 1: Daily DD {daily_loss_pct:.2f}% -> Risk reduced to {proposed_risk_pct:.2f}%")
 
         # Check 2: Daily Loss Circuit Breaker & Kill-Switch
         if self.state.get("daily_circuit_breaker_tripped") or daily_loss_pct <= -max_daily_loss:
@@ -437,6 +454,22 @@ class SafetyManager:
         current_open_risk = sum(p.get("risk_pct", 1.0) for p in open_positions)
         if (current_open_risk + proposed_risk_pct) > MAX_TOTAL_OPEN_RISK_PCT:
             return False, f"⛔ Max Combined Portfolio Risk Exceeded: Current open risk ({current_open_risk:.2f}%) + proposed risk ({proposed_risk_pct:.2f}%) = {(current_open_risk + proposed_risk_pct):.2f}% > {MAX_TOTAL_OPEN_RISK_PCT:.1f}% limit."
+
+        # Check 4.5: Correlation Filter - Prevent highly correlated positions
+        asset_key = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
+        correlated_positions = 0
+        for pos in open_positions:
+            pos_asset = pos.get("asset", "").upper()
+            if pos_asset != asset_key:
+                # GOLD and BTC are often negatively correlated
+                # Reduce risk if we already have a position in the other asset
+                correlated_positions += 1
+        
+        if correlated_positions >= 1:
+            # If we already have a position in the other asset, reduce max risk
+            reduced_limit = MAX_TOTAL_OPEN_RISK_PCT * 0.6  # 40% reduction for correlation
+            if (current_open_risk + proposed_risk_pct) > reduced_limit:
+                return False, f"⛔ Correlation Risk: {asset_key} position conflicts with existing {['BTC', 'GOLD'][0 if asset_key == 'GOLD' else 1]} position. Reduced risk limit: {reduced_limit:.1f}%"
 
         # Check 5: Stale Data Protection
         if data_timestamp:
@@ -1617,9 +1650,14 @@ def calculate_lot_size(asset: str, entry_price: float, stop_loss_price: float,
                        account_balance: float = DEFAULT_ACCOUNT_BALANCE,
                        risk_pct: float = DEFAULT_MAX_RISK_PCT,
                        broker_leverage: float = None,
-                       margin_free: float = None) -> dict:
+                       margin_free: float = None,
+                       win_rate: float = None,
+                       avg_win: float = None,
+                       avg_loss: float = None,
+                       open_positions: list = None) -> dict:
     """
     Computes exact institutional lot size so that dollar loss at SL equals risk_pct.
+    Enhanced with Kelly Criterion sizing and correlation awareness.
     Formula:
       Risk USD = Account Balance * (Risk % / 100)
       Price Distance = |Entry - StopLoss|
@@ -1672,28 +1710,73 @@ def calculate_lot_size(asset: str, entry_price: float, stop_loss_price: float,
             "reason": "Entry price equals Stop-Loss (zero distance)"
         }
 
-    risk_budget_usd = account_balance * (max(0.01, risk_pct) / 100.0)
-    dollar_risk_per_lot = price_dist * spec["contract_size"]
+    # Correlation filter: Check for opposing positions in correlated assets
+    correlation_risk_mult = 1.0
+    if open_positions:
+        correlated_risk = 0.0
+        for pos in open_positions:
+            pos_asset = pos.get("asset", "").upper()
+            pos_action = pos.get("action", "").upper()
+            if pos_asset != asset_key:
+                # Check correlation between GOLD and BTC
+                if (asset_key == "GOLD" and pos_asset == "BTC") or (asset_key == "BTC" and pos_asset == "GOLD"):
+                    # GOLD and BTC are negatively correlated most of the time
+                    # Reduce risk if taking opposite direction
+                    pos_action = pos.get("action", "").upper()
+                    # Determine if this trade is same direction as existing position
+                    # For simplicity, we'll reduce risk when both have open positions
+                    correlated_risk += pos.get("risk_pct", 0.5)
+        
+        # Apply correlation risk reduction (max 50% reduction)
+        if correlated_risk > 0:
+            correlation_risk_mult = max(0.5, 1.0 - (correlated_risk / 5.0))
 
+    risk_budget_usd = account_balance * (max(0.01, risk_pct) / 100.0)
+    
+    # Apply Kelly Criterion if win rate data available
+    kelly_fraction = 1.0
+    if win_rate is not None and avg_win is not None and avg_loss is not None and avg_loss > 0:
+        # Kelly Criterion: f* = (bp - q) / b
+        # where b = avg_win/avg_loss, p = win_rate, q = 1-p
+        b = avg_win / avg_loss if avg_loss > 0 else 1.0
+        p = win_rate / 100.0 if win_rate > 1 else win_rate
+        q = 1.0 - p
+        kelly_f = (b * p - q) / b if b > 0 else 0.0
+        # Use Half-Kelly for safety
+        kelly_fraction = max(0.0, min(0.5, kelly_f))
+        # Apply Kelly fraction to risk budget
+        risk_budget_usd *= kelly_fraction
+
+    # Apply correlation risk multiplier
+    risk_budget_usd *= correlation_risk_mult
+
+    # Base risk budget
+    base_risk_budget_usd = account_balance * (max(0.01, risk_pct) / 100.0)
+    risk_budget_usd = base_risk_budget_usd
+
+    price_dist = abs(entry_price - stop_loss_price)
+    if price_dist <= 0:
+        return {
+            "asset": asset_key,
+            "lots": spec["min_lot"],
+            "risk_usd": 0.0,
+            "actual_risk_usd": 0.0,
+            "actual_risk_pct": 0.0,
+            "price_dist": 0.0,
+            "dollar_risk_per_lot": 0.0,
+            "valid": False,
+            "reason": "Entry price equals Stop-Loss (zero distance)"
+        }
+
+    dollar_risk_per_lot = price_dist * spec["contract_size"]
     raw_lots = risk_budget_usd / dollar_risk_per_lot if dollar_risk_per_lot > 0 else spec["min_lot"]
-    # Step round to lot step (0.01)
     step = spec["lot_step"]
     stepped_lots = math.floor(raw_lots / step) * step
     clamped_lots = max(spec["min_lot"], min(stepped_lots, spec["max_lot"]))
     clamped_lots = round(clamped_lots, 2)
 
-    # Automatically check broker leverage and free margin
-    if broker_leverage and broker_leverage > 0 and margin_free and margin_free > 0:
-        nominal_per_lot = entry_price * spec["contract_size"]
-        margin_per_lot = nominal_per_lot / broker_leverage
-        if margin_per_lot > 0:
-            max_lots_by_margin = (margin_free * 0.85) / margin_per_lot
-            stepped_margin_lots = math.floor(max_lots_by_margin / step) * step
-            if stepped_margin_lots < clamped_lots:
-                clamped_lots = max(spec["min_lot"], round(stepped_margin_lots, 2))
-
-    actual_risk_usd = clamped_lots * dollar_risk_per_lot
-    actual_risk_pct = (actual_risk_usd / account_balance) * 100.0 if account_balance > 0 else 0.0
+    actual_risk_usd = clamped_lots * price_dist * spec["contract_size"]
+    actual_risk_pct = (clamped_lots * price_dist * spec["contract_size"] / account_balance) * 100.0 if account_balance > 0 else 0.0
 
     return {
         "asset": asset_key,

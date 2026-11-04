@@ -602,6 +602,63 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
         else:
             is_short = (rsi > 55)  # If RSI is elevated in a tie, lean short; if low, lean long
 
+    # Compute base score before regime adjustments
+    score = score_sell if is_short else score_buy
+    side_action = "SELL" if is_short else "BUY"
+
+    # Market Regime Detection (moved earlier for regime-aware scoring)
+    market_regime = "TREND_EXPANSION"
+    if LEARNING_AVAILABLE and learning_engine:
+        try:
+            market_regime = learning_engine.detect_market_regime(adx=adx_val, vix=vix_val)
+        except Exception:
+            market_regime = "TREND_EXPANSION"
+
+    # Dynamic thresholds per strategy and regime
+    STRATEGY_THRESHOLDS = {
+        "SCALP": {"execute": 7, "strong": 8, "veto": 6, "base_weight": 1.0},
+        "SWING": {"execute": 8, "strong": 9, "veto": 7, "base_weight": 1.2},
+        "BALANCE": {"execute": 7, "strong": 8, "veto": 6, "base_weight": 1.0},
+        "SWAP": {"execute": 8, "strong": 9, "veto": 7, "base_weight": 1.1},
+    }
+    
+    REGIME_WEIGHTS = {
+        "TREND_EXPANSION": {"trend": 1.5, "momentum": 1.3, "structure": 1.0, "macro": 1.0, "micro": 0.8},
+        "RANGE": {"trend": 0.5, "momentum": 1.0, "structure": 1.5, "macro": 0.8, "micro": 1.3},
+        "VOLATILITY_SHOCK": {"trend": 0.8, "momentum": 1.5, "structure": 0.8, "macro": 1.5, "micro": 1.2},
+        "CHOPPY": {"trend": 0.5, "momentum": 0.8, "structure": 1.3, "macro": 0.8, "micro": 1.0},
+        "NEUTRAL": {"trend": 1.0, "momentum": 1.0, "structure": 1.0, "macro": 1.0, "micro": 1.0},
+    }
+    
+    # Dynamic thresholds based on strategy
+    thresholds = STRATEGY_THRESHOLDS.get(strategy.upper(), STRATEGY_THRESHOLDS["SCALP"])
+    execute_threshold = thresholds["execute"]
+    strong_threshold = thresholds["strong"]
+    veto_threshold = thresholds["veto"]
+    base_weight = thresholds["base_weight"]
+    
+    # Regime-based weight adjustments
+    regime_weights = REGIME_WEIGHTS.get(market_regime, REGIME_WEIGHTS["NEUTRAL"])
+    
+    # Apply regime weights to scoring
+    # This adjusts the raw score based on regime appropriateness
+    regime_adjustment = 0
+    if market_regime == "TREND_EXPANSION" and (feat_ma200 if not is_short else sell_ma200):
+        regime_adjustment += 0.5  # Bonus for trend alignment
+    elif market_regime == "RANGE" and not (feat_ma200 if not is_short else sell_ma200):
+        regime_adjustment += 0.5  # Bonus for mean reversion setup
+    elif market_regime == "VOLATILITY_SHOCK":
+        regime_adjustment -= 0.5  # Penalty in high volatility
+    
+    # Apply regime adjustment
+    adjusted_score = score + regime_adjustment
+    
+    # Dynamic threshold based on regime
+    if market_regime == "VOLATILITY_SHOCK":
+        execute_threshold = max(execute_threshold, thresholds["execute"] + 1)
+    elif market_regime == "TREND_EXPANSION":
+        execute_threshold = max(execute_threshold - 1, thresholds["veto"])
+
     score = score_sell if is_short else score_buy
     factors = factors_sell if is_short else factors_buy
     side_action = "SELL" if is_short else "BUY"
@@ -642,13 +699,13 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
         breakdown = []
 
     final_score = max(score, int(round(adaptive_score)))
-    if final_score >= 9:
+    if final_score >= strong_threshold:
         verdict = f"🟢 A+ {side_action} SETUP (EXECUTE ORDER)"
         action = side_action
-    elif final_score >= 8:
+    elif final_score >= execute_threshold:
         verdict = f"🟢 A {side_action} SETUP (EXECUTE ORDER)"
         action = side_action
-    elif final_score >= 7:
+    elif final_score >= veto_threshold:
         verdict = f"🟢 SCALP {side_action} @ KEY LEVEL (EXECUTE ORDER)"
         action = side_action
     else:
