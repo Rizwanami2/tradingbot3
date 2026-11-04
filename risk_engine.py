@@ -378,12 +378,12 @@ class SafetyManager:
             if age_sec > MAX_DATA_STALENESS_SECONDS:
                 return False, f"⏱️ Stale Market Data: Quote is {age_sec/60.0:.1f} minutes old (limit: {MAX_DATA_STALENESS_SECONDS/60:.0f}m). Order blocked to prevent trading on expired ticks."
 
-        # Check 6: Pre-Order Spread Guard (Reworked: 40 pips max on BTC, 30 pips max on Gold)
+        # Check 6: Pre-Order Spread Guard (Phase 4.2: Gold < 20% of SL, BTC < 15% of SL)
         if spread_val is not None and spread_val > 0:
             max_spread = float(MAX_ALLOWED_SPREAD.get(asset_key, 3.00 if asset_key == "GOLD" else 40.00))
             if spread_val > max_spread:
                 return False, f"⚠️ Excessive Broker Spread: Current spread ${spread_val:.2f} exceeds institutional threshold (${max_spread:.2f})."
-            max_spread_ratio = 0.35  # Both BTC and Gold allow up to 35% of tight micro-scalp SL
+            max_spread_ratio = 0.20 if asset_key == "GOLD" else 0.15
             if sl_dist and sl_dist > 0 and (spread_val / sl_dist) > max_spread_ratio:
                 return False, f"⚠️ High Spread-to-Risk: Spread ${spread_val:.2f} consumes {(spread_val/sl_dist*100):.1f}% of SL distance (${sl_dist:.2f}) > {int(max_spread_ratio*100)}% limit."
 
@@ -409,6 +409,60 @@ class SafetyManager:
         is_acceptable = slippage <= max_slip
         msg = f"Slippage ${slippage:.2f} within limit (${max_slip:.2f})" if is_acceptable else f"Slippage ${slippage:.2f} EXCEEDS limit (${max_slip:.2f})!"
         return is_acceptable, slippage, msg
+
+    # ── 5B. Per-Strategy & Equity-Based Risk Decay (Phase 4.1 & 4.4) ──
+    def record_strategy_loss(self, strategy: str):
+        """Phase 4.1: Track consecutive daily losses per strategy and apply decay/cooldown."""
+        strat = (strategy or "SCALP").upper()
+        if "strategy_risk_decay" not in self.state:
+            self.state["strategy_risk_decay"] = {}
+        s_data = self.state["strategy_risk_decay"].setdefault(strat, {"losses": 0, "cooldown_until": 0.0})
+        s_data["losses"] += 1
+        now_ts = time.time()
+        if s_data["losses"] == 2:
+            s_data["cooldown_until"] = now_ts + 1800  # 30-min cooldown
+            logger.warning(f"Strategy {strat} has 2 consecutive losses: 0.50x risk + 30m cooldown applied.")
+        elif s_data["losses"] >= 3:
+            s_data["cooldown_until"] = now_ts + 7200  # 2-hour cooldown
+            logger.warning(f"Strategy {strat} has {s_data['losses']} consecutive losses: 0.25x risk + 2h cooldown applied.")
+        self.save_state()
+
+    def record_strategy_win(self, strategy: str):
+        """Phase 4.1: Reset strategy loss counter on profitable trade."""
+        strat = (strategy or "SCALP").upper()
+        if "strategy_risk_decay" in self.state and strat in self.state["strategy_risk_decay"]:
+            self.state["strategy_risk_decay"][strat] = {"losses": 0, "cooldown_until": 0.0}
+            self.save_state()
+
+    def get_strategy_risk_multiplier(self, strategy: str) -> Tuple[float, bool, str]:
+        """Returns (multiplier, is_cooldown_active, reason)."""
+        strat = (strategy or "SCALP").upper()
+        s_data = self.state.get("strategy_risk_decay", {}).get(strat, {"losses": 0, "cooldown_until": 0.0})
+        now_ts = time.time()
+        if s_data.get("cooldown_until", 0.0) > now_ts:
+            rem = s_data["cooldown_until"] - now_ts
+            return 0.0, True, f"Strategy {strat} in cooldown for {rem/60:.1f}m due to {s_data['losses']} consecutive losses"
+
+        losses = s_data.get("losses", 0)
+        if losses == 1:
+            return 0.75, False, f"Strategy {strat} 1 loss: 0.75x risk"
+        elif losses == 2:
+            return 0.50, False, f"Strategy {strat} 2 losses: 0.50x risk"
+        elif losses >= 3:
+            return 0.25, False, f"Strategy {strat} 3+ losses: 0.25x risk"
+        return 1.0, False, f"Strategy {strat} normal risk"
+
+    def get_equity_risk_decay_multiplier(self, current_equity: float = None) -> float:
+        """Phase 4.4: Reduce risk percentage as intraday drawdown progresses."""
+        starting = self.state.get("starting_daily_equity", current_equity or DEFAULT_ACCOUNT_BALANCE)
+        if starting <= 0:
+            return 1.0
+        daily_loss_pct = (self.state.get("realized_daily_pnl", 0.0) / starting) * 100.0
+        if daily_loss_pct <= -2.0:
+            return 0.0  # Halted by circuit breaker
+        elif daily_loss_pct <= -1.0:
+            return 0.50 # Half risk
+        return 1.0
 
     # ── 6. Institutional Order Audit Logger ───────────────────────
     def log_order_audit(self, order_data: dict):
@@ -585,8 +639,8 @@ class SafetyManager:
 
             strat_code = p.get("strategy", default_strategy).upper()
             strat = STRATEGIES.get(strat_code, STRATEGIES["SCALP"])
-            active_be_r = strat.get("breakeven_r", 0.35)
-            active_trail_start_r = strat.get("trail_start_r", 0.65)
+            active_be_r = strat.get("breakeven_r", 0.30)
+            active_trail_start_r = strat.get("trail_start_r", 0.50)
             active_trail_step_r = strat.get("trail_step_r", 0.20)
             spread_buffer = 0.15 if asset == "GOLD" else 8.0
 
@@ -605,22 +659,7 @@ class SafetyManager:
                 })
                 continue
 
-            # 3. Check Take-Profit Hit
-            tp_hit = (is_buy and curr_price >= curr_tp) or (not is_buy and curr_price <= curr_tp)
-            if tp_hit:
-                res = self.close_paper_position(ticket, curr_tp, reason="TAKE_PROFIT_HIT")
-                events.append({
-                    "ticket": ticket,
-                    "symbol": symbol,
-                    "asset": asset,
-                    "action": "TP_HIT",
-                    "price": curr_tp,
-                    "pnl": res.get("closed_pnl", 0.0),
-                    "msg": f"🎯 *[{strat_code} PAPER] TAKE-PROFIT ACHIEVED:* #{ticket} `{symbol}` reached Target at `${curr_tp:,.2f}`! (PnL: `${res.get('closed_pnl', 0.0):+,.2f}` 🎉)"
-                })
-                continue
-
-            # 4. Update Peak Favorable Price
+            # 4. Update Peak Favorable Price & Breakeven Buffer (Phase 5.2: Round-trip cost $0.25/0.01 lot)
             prev_peak = p.get("peak_price", entry)
             peak_price = max(prev_peak, curr_price) if is_buy else min(prev_peak, curr_price)
             p["peak_price"] = peak_price
@@ -631,14 +670,46 @@ class SafetyManager:
             peak_profit_dist = (peak_price - entry) if is_buy else (entry - peak_price)
             peak_r = peak_profit_dist / initial_risk_dist
 
-            # 5. Breakeven Trigger (BE+ Offset: Minimum Net Profit Guarantee, safely clamped)
-            spread_buffer = 0.15 if asset == "GOLD" else 8.0
+            # Breakeven Buffer (Phase 5.2): GOLD +$0.20 buffer, BTC +$10.00 buffer covering spread & cost basis
             if asset == "GOLD":
-                be_offset = max(0.15, min(0.35, spread_buffer + 0.10))
+                be_offset = max(0.20, min(0.40, spread_buffer + 0.15))
                 breakeven_sl = round(min(entry + be_offset, curr_price - 0.20) if is_buy else max(entry - be_offset, curr_price + 0.20), 2)
             else:
-                be_offset = max(5.0, min(15.0, spread_buffer + 3.0))
+                be_offset = max(10.0, min(25.0, spread_buffer + 5.0))
                 breakeven_sl = round(min(entry + be_offset, curr_price - 10.0) if is_buy else max(entry - be_offset, curr_price + 10.0), 2)
+
+            # 3. Check Take-Profit Hit (Phase 5.3: Partial TP Auto-Execution at TP1)
+            tp_hit = (is_buy and curr_price >= curr_tp) or (not is_buy and curr_price <= curr_tp)
+            if tp_hit:
+                if not p.get("partial_tp_done", False):
+                    part_res = self.close_paper_position_partial(ticket, fraction=0.50, exit_price=curr_tp, reason="PARTIAL_TP")
+                    p["partial_tp_done"] = True
+                    p["sl"] = breakeven_sl
+                    self.save_state()
+                    events.append({
+                        "ticket": ticket,
+                        "symbol": symbol,
+                        "asset": asset,
+                        "action": "PARTIAL_TP_HIT",
+                        "price": curr_tp,
+                        "pnl": part_res.get("pnl", 0.0),
+                        "msg": f"🎯 *[{strat_code} PAPER] PARTIAL TP1 HIT:* #{ticket} `{symbol}` 50% Closed @ `${curr_tp:,.2f}` (PnL: `${part_res.get('pnl', 0.0):+,.2f}`). Remaining SL locked to BE+ ${breakeven_sl:,.2f}."
+                    })
+                    continue
+                else:
+                    res = self.close_paper_position(ticket, curr_tp, reason="TAKE_PROFIT_HIT")
+                    events.append({
+                        "ticket": ticket,
+                        "symbol": symbol,
+                        "asset": asset,
+                        "action": "TP_HIT",
+                        "price": curr_tp,
+                        "pnl": res.get("closed_pnl", 0.0),
+                        "msg": f"🎯 *[{strat_code} PAPER] FINAL TARGET ACHIEVED:* #{ticket} `{symbol}` Full Exit @ `${curr_tp:,.2f}`! (PnL: `${res.get('closed_pnl', 0.0):+,.2f}` 🎉)"
+                    })
+                    continue
+
+            # 5. Breakeven Trigger
             needs_be = False
             if is_buy and current_r >= active_be_r and curr_sl < entry and breakeven_sl > curr_sl:
                 needs_be = True
@@ -663,8 +734,9 @@ class SafetyManager:
                 })
                 continue
 
-            # 6. Dynamic Trailing Step
-            if peak_r >= active_trail_start_r:
+            # 6. Dynamic Trailing Step (Phase 5.4: Trail only after BE locked!)
+            is_be_locked = (is_buy and curr_sl >= entry) or (not is_buy and curr_sl <= entry and curr_sl > 0)
+            if is_be_locked and peak_r >= active_trail_start_r:
                 desired_sl = round(peak_price - (initial_risk_dist * active_trail_step_r) if is_buy else peak_price + (initial_risk_dist * active_trail_step_r), 2)
                 if is_buy:
                     desired_sl = min(desired_sl, curr_price - (0.20 if asset == "GOLD" else 10.0))
@@ -919,6 +991,40 @@ class SafetyManager:
         r_mult = round(pnl / risk_usd, 2) if risk_usd > 0 else (1.2 if pnl > 0 else -1.0)
         outcome = "WIN" if pnl > 0 else "LOSS"
         close_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        strat_name = target.get("strategy", "SCALP")
+
+        # Phase 4.1: Update per-strategy win/loss decay tracker
+        if pnl > 0:
+            self.record_strategy_win(strat_name)
+        else:
+            self.record_strategy_loss(strat_name)
+
+        # Phase 2.1: Classify root_cause and win_reason / loss_reason
+        root_cause = reason
+        if reason == "STOP_LOSS_HIT":
+            root_cause = "STOP_LOSS_HIT"
+        elif reason == "TAKE_PROFIT_HIT":
+            root_cause = "TAKE_PROFIT_HIT"
+        elif reason == "BREAKEVEN":
+            root_cause = "BREAKEVEN_TRAILED_OUT"
+        elif reason == "TRAILED":
+            root_cause = "TRAILING_STOP_OUT"
+        elif reason == "PARTIAL_TP":
+            root_cause = "PARTIAL_TP"
+
+        win_reason = ""
+        loss_reason = ""
+        if outcome == "WIN":
+            if root_cause == "TAKE_PROFIT_HIT":
+                win_reason = "TP1_HIT"
+            elif root_cause == "TRAILING_STOP_OUT":
+                win_reason = "TRAIL_OUT_POSITIVE_R"
+            elif 0.0 <= r_mult <= 0.35:
+                win_reason = "BREAKEVEN_SCRATCH"
+            else:
+                win_reason = "RUNNER_TO_TARGET"
+        else:
+            loss_reason = root_cause
 
         closed_record = {
             "ticket": ticket,
@@ -931,15 +1037,49 @@ class SafetyManager:
             "sl": target.get("sl"),
             "tp1": target.get("tp1"),
             "pnl": pnl,
+            "pnl_usd": pnl,
+            "pnl_r": r_mult,
             "r_multiple": r_mult,
             "outcome": outcome,
-            "strategy": target.get("strategy", "SCALP"),
+            "strategy": strat_name,
             "score": target.get("score", 8),
             "open_time": target.get("open_time"),
             "close_time": close_time,
             "reason": reason,
+            "root_cause": root_cause,
+            "win_reason": win_reason,
+            "loss_reason": loss_reason,
             "source": "PAPER"
         }
+
+        # Phase 2.1: Persist Post-Mortem Journal in self-learning engine
+        try:
+            from self_learning import self_learning_engine
+            pm_report = {
+                "ticket": ticket,
+                "asset": asset_key,
+                "action": target.get("action", "BUY"),
+                "strategy": strat_name,
+                "score": target.get("score", 8),
+                "entry_price": target.get("open_price", exit_price),
+                "exit_price": exit_price,
+                "pnl_usd": pnl,
+                "pnl_r": r_mult,
+                "outcome": outcome,
+                "root_cause": root_cause,
+                "win_reason": win_reason,
+                "loss_reason": loss_reason,
+                "regime_at_entry": target.get("regime", "NORMAL"),
+                "regime_at_exit": "NORMAL",
+                "active_features": target.get("features", {}),
+                "slippage_entry": target.get("slippage", 0.0),
+                "spread_at_entry": target.get("spread", 0.0),
+                "spread_at_exit": 0.0,
+                "date": close_time
+            }
+            self_learning_engine.record_post_mortem(pm_report)
+        except Exception as pe:
+            logger.warning(f"Could not record paper post-mortem to self-learning: {pe}")
 
         if "closed_history" not in self.state["paper_account"]:
             self.state["paper_account"]["closed_history"] = []
@@ -1019,15 +1159,16 @@ STRATEGIES = {
         "code": "SCALP",
         "name": "Institutional Micro Scalp",
         "description": "Ultra-fast micro SL/TP on 1M/5M candles. Quick momentum capture with early risk-free breakeven.",
-        "sl_mult": float(os.getenv("BTC_SCALP_SL_MULT", "0.16")),
-        "rr_tp1": float(os.getenv("BTC_SCALP_RR_TP1", "1.85")),
-        "rr_tp2": float(os.getenv("BTC_SCALP_RR_TP2", "2.80")),
+        "sl_mult": float(os.getenv("BTC_SCALP_SL_MULT", "0.30")),
+        "rr_tp1": float(os.getenv("BTC_SCALP_RR_TP1", "2.00")),
+        "rr_tp2": float(os.getenv("BTC_SCALP_RR_TP2", "3.00")),
         "breakeven_r": float(os.getenv("BTC_SCALP_BE_R", "0.30")),   # Ultra-fast breakeven lock at +0.30R
-        "trail_start_r": 0.65,                                        # Dynamic trail starts at +0.65R
-        "trail_step_r": 0.20,                                         # Tight 0.15R trailing step
+        "trail_start_r": 0.50,                                        # Dynamic trail starts at +0.50R
+        "trail_step_r": 0.20,                                         # Tight 0.20R trailing step
         "risk_pct": 0.50,                                             # Conservative 0.50% risk per micro scalp
+        "min_rr": 2.0,                                                # Enforce minimum 1:2.0 Risk:Reward
         "target_win_rate": "~75-85% (1M/5M Micro Scalp)",
-        "accuracy_tip": "1M/5M Key level reaction, rejection wick <25%, momentum body >=30%, RSI 35-70",
+        "accuracy_tip": "1M/5M Key level reaction, rejection wick <25%, momentum body >=45%, ADX > 20",
         "regime_filter": "1M/5M Key Level Reaction / Micro Momentum",
         "holding_time": "1 - 15 minutes",
         "lot_cap_gold": 0.20,
@@ -1036,17 +1177,18 @@ STRATEGIES = {
     "SWING": {
         "code": "SWING",
         "name": "Macro Trend Swing",
-        "description": "Structural 1.10x ATR stop with 1.5R to 2.5R asymmetric targets across multi-day cycles.",
+        "description": "Structural 1.10x ATR stop with 2.0R to 3.0R asymmetric targets across multi-day cycles.",
         "sl_mult": 1.10,
-        "rr_tp1": 1.50,
-        "rr_tp2": 2.50,
-        "breakeven_r": 0.45,       # Agile breakeven lock at +0.45R (protects against wave pullbacks)
+        "rr_tp1": 2.00,
+        "rr_tp2": 3.00,
+        "breakeven_r": 0.50,       # Agile breakeven lock at +0.50R (protects against wave pullbacks)
         "trail_start_r": 0.90,     # Dynamic trail starts at +0.90R
         "trail_step_r": 0.40,      # Disciplined 0.40R trailing step
         "risk_pct": 1.00,          # Full 1.00% institutional risk
+        "min_rr": 2.0,             # Enforce minimum 1:2.0 Risk:Reward
         "target_win_rate": "~75-80% (Asymmetric Trend Runner)",
-        "accuracy_tip": "ADX >= 22 (+DI > -DI), Price > 50 & 200 SMA, DXY tailwind",
-        "regime_filter": "Trending Only (ADX >= 22 & MA Alignment)",
+        "accuracy_tip": "ADX 20-35 (+DI > -DI), Price > 50 & 200 SMA, DXY tailwind",
+        "regime_filter": "Trending Only (ADX 20-35 & MA Alignment)",
         "holding_time": "1 - 5 days",
         "lot_cap_gold": 0.10,
         "lot_cap_btc": 0.05
@@ -1056,15 +1198,16 @@ STRATEGIES = {
         "name": "Equilibrium Mean-Reversion",
         "description": "Fades Golden Pocket extremes back to 0.50 Fib Equilibrium / VPOC fair value.",
         "sl_mult": 0.75,
-        "rr_tp1": 1.40,
-        "rr_tp2": 2.20,
-        "breakeven_r": 0.50,       # Fast breakeven at +0.50R
-        "trail_start_r": 0.85,     # Trail starts at +0.85R
+        "rr_tp1": 2.00,
+        "rr_tp2": 2.80,
+        "breakeven_r": 0.40,       # Fast breakeven at +0.40R
+        "trail_start_r": 0.80,     # Trail starts at +0.80R
         "trail_step_r": 0.30,      # Dynamic tightening near 0.50 Fib
-        "risk_pct": 0.75,          # 0.75% balanced risk
+        "risk_pct": 0.50,          # 0.50% balanced risk max
+        "min_rr": 2.0,             # Enforce minimum 1:2.0 Risk:Reward
         "target_win_rate": "~80-85% (Equilibrium Magnet)",
-        "accuracy_tip": "ADX <= 25 (Chop/Range), Extreme Golden Pocket/S1, Wyckoff Spring",
-        "regime_filter": "Range / Chop Only (ADX <= 25, extreme location)",
+        "accuracy_tip": "ADX < 20 (Chop/Range), Extreme Golden Pocket/S1, Wyckoff Spring",
+        "regime_filter": "Range / Chop Only (ADX < 20, extreme location)",
         "holding_time": "1 - 8 hours",
         "lot_cap_gold": 0.15,
         "lot_cap_btc": 0.08
@@ -1073,13 +1216,14 @@ STRATEGIES = {
         "code": "SWAP",
         "name": "Positive Carry & Swap Aware",
         "description": "Carry-conscious positioning prioritizing positive overnight financing and avoiding rollover drag.",
-        "sl_mult": 0.90,
-        "rr_tp1": 1.80,
-        "rr_tp2": 2.60,
-        "breakeven_r": 0.50,       # Breakeven at +0.50R
-        "trail_start_r": 1.00,     # Trail starts at +1.00R
+        "sl_mult": 1.50,
+        "rr_tp1": 2.00,
+        "rr_tp2": 3.00,
+        "breakeven_r": 0.60,       # Breakeven at +0.60R
+        "trail_start_r": 1.20,     # Trail starts at +1.20R
         "trail_step_r": 0.45,      # Controlled 0.45R buffer against rollover spread spikes
         "risk_pct": 0.75,          # 0.75% risk with carry yield
+        "min_rr": 2.0,             # Enforce minimum 1:2.0 Risk:Reward
         "target_win_rate": "~75-82% (Financing Accretion)",
         "accuracy_tip": "Positive broker carry, Wednesday 3x rollover advantage, VIX <= 22",
         "regime_filter": "Positive Rollover Carry & Low VIX (<=22)",

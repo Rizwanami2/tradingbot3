@@ -162,7 +162,7 @@ def check_symbol_tradable(symbol: str, trade_mode: int = None, is_buy: bool = Tr
 
 
 def check_toxic_blacklist(asset: str, action: str, market_vector: dict,
-                          threshold: float = 0.85) -> Tuple[bool, str]:
+                          threshold: float = 0.80) -> Tuple[bool, str]:
     """Gate 15: Check proposed trade against Negative Memory Bank (toxic setups).
 
     Returns (pass: bool, reason: str). If a toxic signature matches with
@@ -266,3 +266,157 @@ def check_strategy_health(strategy: str, min_trades: int = 20, min_win_rate: flo
         )
 
     return True, f"{strategy} healthy: {win_rate:.1f}% WR ({total} trades)"
+
+
+def check_spread_to_risk(spread_val: float, sl_dist: float, asset: str) -> Tuple[bool, str]:
+    """Gate 18: Spread-to-Risk Guard (Phase 4.2).
+    - GOLD: spread must be < 20% of SL distance.
+    - BTC: spread must be < 15% of SL distance.
+    """
+    if sl_dist <= 0:
+        return False, "Invalid zero or negative stop loss distance"
+    asset_key = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
+    max_ratio = 0.20 if asset_key == "GOLD" else 0.15
+    ratio = spread_val / sl_dist
+    if ratio > max_ratio:
+        return False, f"Excessive spread-to-risk ratio: spread {spread_val:.2f} is {ratio:.1%} of SL ({sl_dist:.2f}), limit {max_ratio:.0%}"
+    return True, f"Spread-to-risk OK ({ratio:.1%} <= {max_ratio:.0%})"
+
+
+def check_trend_alignment(asset: str, action: str, adx: float, consecutive_extremes: int) -> Tuple[bool, str]:
+    """Gate 19: Falling Knife / Parabolic Guard (Phase 3.3).
+    - No BUY if: ADX > 30 and price made >= 3 consecutive lower lows (freefall).
+    - No SELL if: ADX > 30 and price made >= 3 consecutive higher highs (parabolic).
+    """
+    act = action.upper()
+    if act in ("BUY", "LONG") and adx > 30.0 and consecutive_extremes >= 3:
+        return False, f"Falling knife guard: ADX {adx:.1f} > 30 with {consecutive_extremes} consecutive lower lows (freefall)"
+    elif act in ("SELL", "SHORT") and adx > 30.0 and consecutive_extremes >= 3:
+        return False, f"Parabolic surge guard: ADX {adx:.1f} > 30 with {consecutive_extremes} consecutive higher highs (parabolic)"
+    return True, "Trend alignment OK (no falling knife or parabolic surge)"
+
+
+def check_htf_bias_alignment(asset: str, action: str, score: float = 8.0, strategy: str = "SCALP") -> Tuple[bool, str]:
+    """Gate 20: Higher Timeframe Bias Alignment (Phase 3.1).
+    - If HTF bias is BEARISH and action is BUY -> SKIP (unless confluence >= 9.0).
+    - If HTF bias is BULLISH and action is SELL -> SKIP (unless confluence >= 9.0).
+    - If HTF bias is NEUTRAL -> allow only SCALP strategy with score >= 8.0.
+    """
+    try:
+        from institutional_engine import compute_htf_bias
+        bias_res = compute_htf_bias(asset)
+        bias = bias_res.get("overall_bias", "NEUTRAL").upper() if isinstance(bias_res, dict) else str(bias_res).upper()
+    except Exception:
+        bias = "NEUTRAL"
+
+    act = action.upper()
+    is_buy = act in ("BUY", "LONG")
+
+    if bias == "BEARISH" and is_buy:
+        if score < 9.0:
+            return False, f"Counter-trend veto: HTF bias is BEARISH but action is BUY (confluence {score:.1f} < 9.0 required for counter-trend)"
+    elif bias == "BULLISH" and not is_buy:
+        if score < 9.0:
+            return False, f"Counter-trend veto: HTF bias is BULLISH but action is SELL (confluence {score:.1f} < 9.0 required for counter-trend)"
+    elif bias == "NEUTRAL":
+        if strategy.upper() != "SCALP" or score < 8.0:
+            return False, f"HTF bias is NEUTRAL — only SCALP strategy with score >= 8.0 allowed (got {strategy} @ {score:.1f})"
+
+    return True, f"HTF bias alignment verified ({bias} -> {act})"
+
+
+def check_mtf_alignment(asset: str, action: str, mtf_bars: dict = None) -> Tuple[bool, str]:
+    """Gate 21: Multi-Timeframe Decision Hierarchy (Phase 3.4).
+    Hierarchy: 1m Analysis -> 5m Decision -> 15m Bias.
+    - 15m candle establishes prevailing trend direction.
+    - 5m candle provides structure and entry trigger.
+    - 1m candle provides micro-structure and entry timing.
+    - If 15m bias, 5m structure, and 1m trigger conflict -> SKIP.
+    """
+    if not mtf_bars:
+        try:
+            from market_data import market_feed
+            mtf_bars = market_feed.get_multitimeframe_bars(asset)
+        except Exception:
+            return True, "MTF bars unavailable — hierarchy assumed valid"
+
+    if not mtf_bars:
+        return True, "No MTF data — hierarchy check skipped"
+
+    act = action.upper()
+    is_buy = act in ("BUY", "LONG")
+
+    # 1. 15m Trend Bias Check
+    bars_15m = mtf_bars.get("m15")
+    bias_15m = "NEUTRAL"
+    if bars_15m is not None and len(bars_15m) >= 20:
+        c15 = bars_15m["Close"].iloc[-1]
+        sma20_15m = bars_15m["Close"].rolling(20).mean().iloc[-1]
+        bias_15m = "BULLISH" if c15 > sma20_15m else "BEARISH"
+        if is_buy and bias_15m == "BEARISH":
+            return False, "15m trend bias is BEARISH — cannot open BUY scalp"
+        elif not is_buy and bias_15m == "BULLISH":
+            return False, "15m trend bias is BULLISH — cannot open SELL scalp"
+
+    # 2. 5m Structure & Decision Timeframe Check
+    bars_5m = mtf_bars.get("m5")
+    if bars_5m is not None and len(bars_5m) >= 10:
+        c5 = bars_5m["Close"].iloc[-1]
+        o5 = bars_5m["Open"].iloc[-1]
+        sma9_5m = bars_5m["Close"].rolling(9).mean().iloc[-1]
+        if is_buy and c5 < sma9_5m and c5 < o5:
+            return False, "5m candle structure is BEARISH (Close < Open and below 9 EMA) — BUY scalp invalid"
+        elif not is_buy and c5 > sma9_5m and c5 > o5:
+            return False, "5m candle structure is BULLISH (Close > Open and above 9 EMA) — SELL scalp invalid"
+
+    # 3. 1m Microstructure & Entry Timing Check
+    bars_1m = mtf_bars.get("m1")
+    if bars_1m is not None and len(bars_1m) >= 5:
+        c1 = bars_1m["Close"].iloc[-1]
+        o1 = bars_1m["Open"].iloc[-1]
+        h1 = bars_1m["High"].iloc[-1]
+        l1 = bars_1m["Low"].iloc[-1]
+        total_range = h1 - l1
+        if total_range > 0:
+            upper_wick = (h1 - max(c1, o1)) / total_range
+            lower_wick = (min(c1, o1) - l1) / total_range
+            if is_buy and upper_wick >= 0.40 and c1 < o1:
+                return False, f"1m microstructure has heavy upper wick rejection ({upper_wick:.0%}) — BUY entry blocked"
+            elif not is_buy and lower_wick >= 0.40 and c1 > o1:
+                return False, f"1m microstructure has heavy lower wick rejection ({lower_wick:.0%}) — SELL entry blocked"
+
+    return True, "MTF hierarchy alignment verified: 15m Bias, 5m Structure, and 1m Trigger all agree"
+
+
+def check_correlation_guard(proposed_asset: str, proposed_action: str, open_positions: list, score: float = 8.0) -> Tuple[bool, str]:
+    """Gate 22: Correlation Guard (Phase 4.5).
+    Block concurrent GOLD + BTC entries in the same direction if both have confluence >= 8.0 (avoids double USD exposure).
+    """
+    if not open_positions:
+        return True, "No open positions — correlation guard OK"
+
+    prop_asset = "GOLD" if proposed_asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
+    prop_act = proposed_action.upper()
+
+    for pos in open_positions:
+        other_asset = "GOLD" if pos.get("asset", "").upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
+        other_act = pos.get("action", "").upper()
+        if other_asset != prop_asset and other_act == prop_act:
+            if score >= 8.0:
+                return False, f"Correlation guard: concurrent {other_asset} and {prop_asset} in same direction ({prop_act}) blocked to avoid double USD exposure"
+
+    return True, "Correlation guard OK (no conflicting double USD exposure)"
+
+
+def check_min_rr_rule(entry: float, sl: float, tp1: float, min_rr: float = 2.0) -> Tuple[bool, str]:
+    """Gate 23: Universal RR Rule (Phase 8.5).
+    All profiles enforce minimum 1:2 risk-to-reward. If structure-based SL gives < 1:2 RR -> skip trade.
+    """
+    sl_dist = abs(entry - sl)
+    tp_dist = abs(tp1 - entry)
+    if sl_dist <= 0:
+        return False, "Invalid zero SL distance"
+    rr = round(tp_dist / sl_dist, 2)
+    if rr < min_rr:
+        return False, f"Risk-to-Reward ratio {rr:.2f}:1 is below minimum requirement {min_rr:.1f}:1"
+    return True, f"Risk-to-Reward ratio OK ({rr:.2f}:1 >= {min_rr:.1f}:1)"

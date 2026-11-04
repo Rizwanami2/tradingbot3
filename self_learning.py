@@ -533,6 +533,31 @@ class SelfLearningEngine:
         self.memory["directional_performance"] = dir_stats
         self.memory["strategy_performance"] = strat_stats
 
+        # Phase 6.3: Auto-downweight losing features (< 40% win rate over last 20 activations)
+        for a_k in ("GOLD", "BTC"):
+            weights = self.memory.get("weights", {}).get(a_k, {})
+            f_stats = self.memory.get("feature_stats", {}).get(a_k, {})
+            for f_key, st in f_stats.items():
+                acts = st.get("activations", 0)
+                if acts >= 20:
+                    wins = st.get("wins", 0)
+                    wr = (wins / acts) * 100.0
+                    if wr < 40.0 and f_key in weights:
+                        weights[f_key] = max(0.20, round(weights[f_key] - 0.10, 4))
+
+        # Phase 6.4: Strategy rotation (promote WR > 55%, demote WR < 40% over 20+ trades)
+        disc_strats = self.memory.get("discovered_strategies", [])
+        for ds in disc_strats:
+            sc = ds.get("code", "").upper()
+            if sc in strat_stats:
+                ss = strat_stats[sc]
+                if ss.get("total_trades", 0) >= 20:
+                    wr = ss.get("win_rate_pct", 50.0)
+                    if wr < 40.0:
+                        ds["active"] = False
+                    elif wr > 55.0:
+                        ds["active"] = True
+
         # Evolve strategies, refine semantic rules & mine negative memory
         self.synthesize_and_evolve_strategies()
         self.refine_semantic_knowledge_graph()
@@ -637,7 +662,7 @@ class SelfLearningEngine:
 
         self.memory["negative_memory_bank"] = negative_bank
 
-    def check_negative_memory_veto(self, asset: str, action: str, market_vector: dict, threshold: float = 0.85) -> Tuple[bool, str]:
+    def check_negative_memory_veto(self, asset: str, action: str, market_vector: dict, threshold: float = 0.80) -> Tuple[bool, str]:
         """
         Pre-Trade Gatekeeper: Scans proposed trade against the Negative Memory Bank.
         Returns (True, veto_reason) if the setup matches a known toxic failure pattern.
@@ -694,6 +719,37 @@ class SelfLearningEngine:
                     return True, f"Negative Memory Match ({similarity*100:.0f}% similarity to #{t_id} failure: {cause})"
 
         return False, ""
+
+    def check_strategy_asset_cooldown(self, strategy: str, asset: str) -> Tuple[bool, str]:
+        """Phase 6.2: Check if strategy+asset has lost 3x consecutively and is in 24h cooldown."""
+        strat = (strategy or "SCALP").upper()
+        a_norm = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
+        key = f"{strat}_{a_norm}"
+        cd_dict = self.memory.get("strategy_asset_cooldowns", {})
+        cd_info = cd_dict.get(key, {"consecutive_losses": 0, "cooldown_until": 0.0})
+        now_ts = time.time()
+        if cd_info.get("cooldown_until", 0.0) > now_ts:
+            rem_hrs = (cd_info["cooldown_until"] - now_ts) / 3600.0
+            return True, f"Same-Mistake Cooldown: {strat} on {a_norm} disabled for {rem_hrs:.1f}h (3 consecutive losses)"
+        return False, ""
+
+    def record_strategy_asset_outcome(self, strategy: str, asset: str, outcome: str):
+        """Phase 6.2: Track consecutive losses per strategy+asset and apply 24h cooldown on 3 losses."""
+        strat = (strategy or "SCALP").upper()
+        a_norm = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
+        key = f"{strat}_{a_norm}"
+        if "strategy_asset_cooldowns" not in self.memory:
+            self.memory["strategy_asset_cooldowns"] = {}
+        cd_info = self.memory["strategy_asset_cooldowns"].setdefault(key, {"consecutive_losses": 0, "cooldown_until": 0.0})
+        if outcome == "LOSS":
+            cd_info["consecutive_losses"] = cd_info.get("consecutive_losses", 0) + 1
+            if cd_info["consecutive_losses"] >= 3:
+                cd_info["cooldown_until"] = time.time() + 86400  # 24-hour cooldown
+                logger.warning(f"Same-Mistake Cooldown: {strat} on {a_norm} disabled for 24h after 3 consecutive losses.")
+        else:
+            cd_info["consecutive_losses"] = 0
+            cd_info["cooldown_until"] = 0.0
+        self.save_memory()
 
     # ──────────────────────────────────────────────────────────────────────────
     # SEMANTIC KNOWLEDGE GRAPH (RULE SYNTHESIS)
@@ -773,6 +829,18 @@ class SelfLearningEngine:
         target_trade["r_multiple"] = r_multiple
         if regime:
             target_trade["regime"] = regime
+
+        # Phase 2.3: Populate win_reason and loss_reason
+        if outcome == "WIN":
+            target_trade["win_reason"] = "TP1_HIT" if r_multiple >= 1.5 else ("BREAKEVEN_SCRATCH" if r_multiple <= 0.35 else "TRAIL_OUT_POSITIVE_R")
+            target_trade["loss_reason"] = ""
+        else:
+            target_trade["loss_reason"] = "STOP_LOSS_HIT" if r_multiple <= -0.8 else "EARLY_EXIT_UNFAVORABLE"
+            target_trade["win_reason"] = ""
+
+        # Phase 6.2: Same-Mistake Cooldown tracking
+        strat_used = target_trade.get("strategy", "SCALP")
+        self.record_strategy_asset_outcome(strat_used, asset, outcome)
 
         # Post-Mortem Forensic trigger on stopped-out trades
         if outcome == "LOSS":

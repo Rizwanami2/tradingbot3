@@ -232,6 +232,14 @@ class Orchestrator:
                 except Exception as me:
                     logger.warning(f"Position management error: {me}")
 
+                # Phase 2.2 & 7.3: Sync closed MT5 & paper trades to learning journal
+                try:
+                    from self_learning import self_learning_engine
+                    from risk_engine import safety_manager
+                    self_learning_engine.sync_all_closed_trades(live_broker=self.broker, safety_manager=safety_manager)
+                except Exception as se:
+                    logger.warning(f"Self-learning closed trade sync error: {se}")
+
                 # Step 1: Pull fresh state
                 bot_state.refresh_from_mt5(self.broker)
                 bot_state.refresh_from_safety_manager()
@@ -329,6 +337,14 @@ class Orchestrator:
             mgmt_events = await asyncio.to_thread(self.manage_positions)
             mgmt_events = mgmt_events or []
             cycle_record["position_management"] = mgmt_events
+
+            # Phase 2.2 & 7.3: Sync closed MT5 & paper trades to learning journal
+            try:
+                from self_learning import self_learning_engine
+                from risk_engine import safety_manager
+                await asyncio.to_thread(self_learning_engine.sync_all_closed_trades, self.broker, safety_manager)
+            except Exception as se:
+                logger.warning(f"Self-learning closed trade sync error: {se}")
 
             # Step 1: Pull fresh state + run safety gates concurrently
             async def _refresh_and_gates():
@@ -477,6 +493,35 @@ class Orchestrator:
         news_msg = candidate.get("news_block_msg", "")
         pass_n, reason_n = gates.check_news_window(asset, is_news_blocked, news_msg)
         results.append({"gate": "news_window", "pass": pass_n, "reason": reason_n})
+
+        # Gate: Spread-to-Risk (Phase 4.2)
+        sl_dist = abs(entry - sl)
+        spread_val = float(candidate.get("spread", 0.20 if asset == "GOLD" else 15.0))
+        pass_s2r, reason_s2r = gates.check_spread_to_risk(spread_val, sl_dist, asset)
+        results.append({"gate": "spread_to_risk", "pass": pass_s2r, "reason": reason_s2r})
+
+        # Gate: Falling knife / Parabolic surge (Phase 3.3)
+        adx_val = float(market_vector.get("adx", 25.0))
+        consec_extremes = int(candidate.get("consecutive_extremes", 0))
+        pass_ta, reason_ta = gates.check_trend_alignment(asset, side, adx_val, consec_extremes)
+        results.append({"gate": "trend_alignment", "pass": pass_ta, "reason": reason_ta})
+
+        # Gate: HTF Bias Alignment (Phase 3.1)
+        pass_htf, reason_htf = gates.check_htf_bias_alignment(asset, side, score=confidence, strategy=strategy)
+        results.append({"gate": "htf_bias_alignment", "pass": pass_htf, "reason": reason_htf})
+
+        # Gate: Multi-Timeframe Decision Hierarchy (Phase 3.4)
+        pass_mtf, reason_mtf = gates.check_mtf_alignment(asset, side, mtf_bars=candidate.get("mtf_bars"))
+        results.append({"gate": "mtf_hierarchy", "pass": pass_mtf, "reason": reason_mtf})
+
+        # Gate: Correlation Guard (Phase 4.5)
+        open_positions = snapshot.get("open_positions", []) if snapshot else []
+        pass_cg, reason_cg = gates.check_correlation_guard(asset, side, open_positions, score=confidence)
+        results.append({"gate": "correlation_guard", "pass": pass_cg, "reason": reason_cg})
+
+        # Gate: Universal 1:2 RR Rule (Phase 8.5)
+        pass_rr, reason_rr = gates.check_min_rr_rule(entry, sl, tp1, min_rr=2.0)
+        results.append({"gate": "min_rr_rule", "pass": pass_rr, "reason": reason_rr})
 
         return results
 
@@ -698,14 +743,48 @@ class Orchestrator:
             logger.error(f"Execution error for {asset} {side}: {exc}")
             return {"success": False, "error": str(exc)}
 
-    def manage_positions(self) -> List[Dict[str, Any]]:
-        """Manage existing positions: trailing stops, breakeven, partial TP."""
-        if self.broker is None:
-            return []
+    def _get_current_prices(self) -> Dict[str, float]:
+        """Fetch current live prices for GOLD and BTC with fallback (Phase 1.4)."""
+        prices = {}
+        if MARKET_DATA_AVAILABLE and market_data_feed:
+            try:
+                p = market_data_feed.get_latest_prices()
+                if p:
+                    if "GOLD" in p: prices["GOLD"] = float(p["GOLD"])
+                    if "BTC" in p: prices["BTC"] = float(p["BTC"])
+            except Exception:
+                pass
+        if "GOLD" not in prices or "BTC" not in prices:
+            try:
+                import yfinance as yf
+                if "GOLD" not in prices:
+                    g = yf.Ticker("GC=F").history(period="1d", interval="1m")
+                    if not g.empty:
+                        prices["GOLD"] = float(g["Close"].iloc[-1])
+                if "BTC" not in prices:
+                    b = yf.Ticker("BTC-USD").history(period="1d", interval="1m")
+                    if not b.empty:
+                        prices["BTC"] = float(b["Close"].iloc[-1])
+            except Exception:
+                pass
+        return prices
 
+    def manage_positions(self) -> List[Dict[str, Any]]:
+        """Manage existing positions: trailing stops, breakeven, partial TP (Phase 1.4)."""
         self.state = self.MANAGING
         try:
-            events = self.broker.trail_positions(default_strategy="SCALP")
+            events = []
+            if self.broker is not None and getattr(self.broker, "is_connected", False):
+                events = self.broker.trail_positions(default_strategy="SCALP") or []
+            else:
+                # Run paper position trailing, breakeven, and partial TP when MT5 is not connected
+                current_prices = self._get_current_prices()
+                try:
+                    from risk_engine import safety_manager
+                    events = safety_manager.trail_paper_positions(current_prices, default_strategy="SCALP") or []
+                except Exception as p_err:
+                    logger.warning(f"Paper trailing error: {p_err}")
+                    events = []
             self.state = self.IDLE
             return events
         except Exception as exc:

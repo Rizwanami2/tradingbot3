@@ -93,7 +93,7 @@ class MT5LiveBroker:
         self.pending_orders = {}
         # Exponential backoff parameters (2s up to 60s)
         self.reconnect_delay = 2.0
-        self.max_reconnect_delay = 60.0
+        self.max_reconnect_delay = 300.0
         self.last_reconnect_attempt = 0.0
         # ── Trading Cost Configuration ──
         # $0.25 per 0.01 lot round trip (commission + spread)
@@ -837,25 +837,25 @@ class MT5LiveBroker:
         "SCALP": {
             "name": "SCALP",
             "breakeven_r": 0.30,
-            "trail_start_r": 0.65,
+            "trail_start_r": 0.50,
             "trail_step_r": 0.20,
         },
         "SWING": {
             "name": "SWING",
-            "breakeven_r": 0.45,
+            "breakeven_r": 0.50,
             "trail_start_r": 0.90,
             "trail_step_r": 0.40,
         },
         "BALANCE": {
             "name": "BALANCE",
-            "breakeven_r": 0.50,
-            "trail_start_r": 0.85,
+            "breakeven_r": 0.40,
+            "trail_start_r": 0.80,
             "trail_step_r": 0.30,
         },
         "SWAP": {
             "name": "SWAP",
-            "breakeven_r": 0.50,
-            "trail_start_r": 1.00,
+            "breakeven_r": 0.60,
+            "trail_start_r": 1.20,
             "trail_step_r": 0.45,
         }
     }
@@ -973,11 +973,11 @@ class MT5LiveBroker:
             is_gold = ("XAU" in symbol.upper() or "GOLD" in symbol.upper())
             stops_level = getattr(sym_info, "stops_level", 0) or 0
             min_stop_gap = max(stops_level * point, sym_info.spread * point, 2 * point)
-            # Break-Even Plus (BE+): Realistic buffer covering spread + comms, safely clamped
+            # Break-Even Plus (BE+): Realistic buffer covering spread + comms ($0.25/0.01 lot)
             if is_gold:
-                be_offset = max(0.15, min(0.35, round(spread_buffer + 0.10, digits)))
+                be_offset = max(0.20, min(0.40, round(spread_buffer + 0.15, digits)))
             else:
-                be_offset = max(5.0, min(15.0, round(spread_buffer + 3.0, digits)))
+                be_offset = max(10.0, min(25.0, round(spread_buffer + 5.0, digits)))
 
             is_buy = p.type == mt5.ORDER_TYPE_BUY
             curr_price = tick.bid if is_buy else tick.ask
@@ -985,6 +985,30 @@ class MT5LiveBroker:
             curr_sl = p.sl
             curr_tp = p.tp
             ticket = p.ticket
+
+            # Phase 5.3: Partial TP Auto-Execution at TP1
+            if not hasattr(self, "partial_tp_executed"):
+                self.partial_tp_executed = set()
+            is_tp1_hit = (is_buy and curr_price >= curr_tp and curr_tp > 0) or (not is_buy and curr_price <= curr_tp and curr_tp > 0)
+            if is_tp1_hit and ticket not in self.partial_tp_executed:
+                part_res = self.close_position_partial(ticket, fraction=0.50, exit_price=curr_price, reason="PARTIAL_TP")
+                if part_res.get("success"):
+                    self.partial_tp_executed.add(ticket)
+                    # Move remaining SL to Breakeven + buffer
+                    target_be = entry + be_offset if is_buy else entry - be_offset
+                    self.modify_position_sltp(ticket, target_be, curr_tp)
+                    events.append({
+                        "ticket": ticket,
+                        "symbol": symbol,
+                        "asset": "GOLD" if is_gold else "BTC",
+                        "type": "BUY" if is_buy else "SELL",
+                        "strategy": "SCALP",
+                        "action": "PARTIAL_TP_HIT",
+                        "price": curr_price,
+                        "pnl": part_res.get("pnl", 0.0),
+                        "msg": f"🎯 *PARTIAL TP1 HIT:* #{ticket} `{symbol}` 50% Closed @ ${curr_price:,.2f} (PnL: ${part_res.get('pnl', 0.0):+,.2f}). Remaining SL locked to BE+ ${target_be:,.2f}."
+                    })
+                    continue
 
             # Recover or calculate un-collapsing initial risk distance
             if ticket in self.position_initial_risks:
@@ -1075,8 +1099,9 @@ class MT5LiveBroker:
                     })
                     continue
 
-            # ── 3. Profile-Aware Dynamic Trailing Engine (Ratio Baseline + Swing Auto-Ratcheting) ──
-            if peak_r >= active_trail_start_r:
+            # ── 3. Profile-Aware Dynamic Trailing Engine (Phase 5.4: Trail Only After BE Locked) ──
+            is_be_locked = (is_buy and curr_sl >= entry) or (not is_buy and curr_sl <= entry and curr_sl > 0)
+            if is_be_locked and peak_r >= active_trail_start_r:
                 # 3a. Baseline dynamic ratio trailing stop
                 if is_buy:
                     ratio_sl = round(peak_price - (risk_dist * active_trail_step_r), digits)
