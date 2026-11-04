@@ -1047,12 +1047,13 @@ def heartbeat_monitor_worker(token: str, get_chat_id_func):
     Sends institutional heartbeat every 2-3 hours with:
     Equity, Balance, Margin, Free Margin, Open Positions count.
     """
+    global safety_manager
     interval = int(os.environ.get("HEARTBEAT_INTERVAL_SECONDS", "7200"))
     logger.info(f"Heartbeat monitor worker armed (interval: {interval}s / {interval/3600:.1f}h).")
     
     # 60s settle time on startup before first heartbeat
     time.sleep(60)
-
+    
     while True:
         try:
             cid = get_chat_id_func()
@@ -3047,7 +3048,7 @@ def auto_scanner_worker(token: str, chat_id_getter):
       6. Auto-resolves when Target (TP) is reached or setup invalidates.
     """
     print("⏰ Automated 1-Minute Live Candle Scanner: ACTIVE (Monitoring Gold & BTC every 60s)")
-    global AUTO_TRADE_MODE, AUTO_TRADE_LIVE
+    global AUTO_TRADE_MODE, AUTO_TRADE_LIVE, safety_manager
 
     first_run = True
     while True:
