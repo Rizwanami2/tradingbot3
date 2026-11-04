@@ -15,7 +15,7 @@ Environment (.env):
     LIVE_CONFIRM=CONFIRM                # REQUIRED if TRADING_MODE=live (double-confirm guard)
     MT5_LOGIN / MT5_PASSWORD / MT5_SERVER  # MT5 broker credentials (if not already logged in terminal)
     MAX_DAILY_LOSS_PCT=1.5              # Daily drawdown kill-switch
-    MAX_TOTAL_OPEN_RISK_PCT=2.5         # Portfolio risk cap
+    MAX_TOTAL_OPEN_RISK_PCT=6.0         # Portfolio risk cap
     ... see .env.example for all options
 """
 
