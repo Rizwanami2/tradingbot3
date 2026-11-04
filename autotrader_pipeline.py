@@ -55,7 +55,7 @@ import numpy as np
 
 # Import shared indicators
 try:
-    from utils.indicators import compute_rsi, fetch_fear_greed
+    from utils.indicators import compute_rsi, fetch_fear_greed, compute_heiken_ashi, detect_standard_patterns
 except Exception:
     # Fallback if utils.indicators not available
     def compute_rsi(series, period: int = 14) -> float:
@@ -69,7 +69,7 @@ except Exception:
         rs = avg_gain / avg_loss
         rsi = 100 - (100 / (1 + rs))
         return float(rsi.iloc[-1])
-
+    
     def fetch_fear_greed():
         try:
             req = urllib.request.Request("https://api.alternative.me/fng/?limit=1", headers={"User-Agent": "Mozilla/5.0"})
@@ -78,6 +78,12 @@ except Exception:
                 return int(data["data"][0]["value"]), data["data"][0]["value_classification"]
         except Exception:
             return 50, "Neutral"
+    
+    def compute_heiken_ashi(df):
+        return pd.DataFrame()
+    
+    def detect_standard_patterns(df, lookback=3):
+        return {"patterns": [], "signal": "NEUTRAL", "strength": 0.0}
 
 # ── Indicator Cache (TTL) to avoid redundant data fetches ──
 _indicator_cache: Dict[str, Tuple[float, Any]] = {}
@@ -101,6 +107,13 @@ try:
 except Exception:
     market_data_feed = None
     MARKET_DATA_AVAILABLE = False
+
+# Import session and kill zone functions
+try:
+    from market_data import market_data_feed
+    SESSION_KILL_ZONE_AVAILABLE = True
+except Exception:
+    SESSION_KILL_ZONE_AVAILABLE = False
 
 # Import Institutional & Smart Money Engine (HTF Bias)
 try:
@@ -584,7 +597,85 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
             score_sell += 1
             factors_sell.append(f"MTF Alignment: Multi-timeframe bearish ({mtf_result.get('market_movement', 'aligned')})")
 
-    # Select Dominant Direction (With Microstructure & Reversal Tie-Breaking)
+    # Multi-Timeframe Alignment Sell Factor (GOLD)
+        feat_mtf_sell = False
+        if mtf_result and mtf_result.get("dominant_direction") == "SELL":
+            feat_mtf_sell = True
+        if feat_mtf_sell:
+            score_sell += 1
+            factors_sell.append(f"MTF Alignment: Multi-timeframe bearish ({mtf_result.get('market_movement', 'aligned')})")
+
+    # ================================================================
+    # NEW FEATURES: Candle Patterns, Session/Kill Zones, Heiken Ashi
+    # ================================================================
+    
+    # 1. Standard Candle Pattern Detection (from Institutional Engine)
+    if INSTITUTIONAL_AVAILABLE and institutional_engine:
+        try:
+            pattern_result = institutional_engine.detect_standard_patterns(hist)
+            if pattern_result["signal"] == "BUY":
+                score_buy += int(pattern_result["strength"] * 2)
+                factors_buy.append(f"Pattern: {pattern_result['patterns'][0]['name']} (+{int(pattern_result['strength']*2)})")
+            elif pattern_result["signal"] == "SELL":
+                score_sell += int(pattern_result["strength"] * 2)
+                factors_sell.append(f"Pattern: {pattern_result['patterns'][0]['name']} (+{int(pattern_result['strength']*2)})")
+        except Exception as e:
+            logger.debug(f"Pattern detection failed: {e}")
+    
+    # 2. Heiken Ashi Trend Filter
+    try:
+        ha_df = compute_heiken_ashi(hist)
+        ha_trend = compute_heiken_ashi_trend(ha_df)
+        ha_direction = ha_trend["direction"]
+        ha_strength = ha_trend["strength"]
+        
+        if ha_direction == "BULLISH" and not is_short:
+            score_buy += int(ha_strength * 2)
+            factors_buy.append(f"Heiken Ashi: Bullish trend ({ha_trend['consecutive']} bars)")
+        elif ha_direction == "BEARISH" and is_short:
+            score_sell += int(ha_strength * 2)
+            factors_sell.append(f"Heiken Ashi: Bearish trend ({ha_trend['consecutive']} bars)")
+        elif ha_direction == "BEARISH" and not is_short:
+            score_buy = max(score_buy - 1, 0)
+            factors_buy.append("⚠️ Heiken Ashi: Bearish trend divergence")
+        elif ha_direction == "BULLISH" and is_short:
+            score_sell = max(score_sell - 1, 0)
+            factors_sell.append("⚠️ Heiken Ashi: Bullish trend divergence")
+    except Exception as e:
+        logger.debug(f"Heiken Ashi analysis failed: {e}")
+    
+    # 3. Session & Kill Zone Awareness
+    if SESSION_KILL_ZONE_AVAILABLE and market_data_feed:
+        try:
+            current_session = market_data_feed.get_current_session()
+            is_kill_zone, kill_zone_name = market_data_feed.is_kill_zone()
+            
+            # Session-based scoring
+            session_bonus = 0
+            if current_session in ["LONDON", "NY", "OVERLAP"]:
+                session_bonus = 2
+                factors_buy.append(f"Session: {current_session} (high liquidity)")
+                factors_sell.append(f"Session: {current_session} (high liquidity)")
+            elif current_session == "ASIA":
+                session_bonus = -1
+                factors_buy.append(f"Session: {current_session} (low liquidity)")
+                factors_sell.append(f"Session: {current_session} (low liquidity)")
+            
+            # Kill zone bonus
+            if is_kill_zone:
+                if not is_short:
+                    score_buy += 2
+                    factors_buy.append(f"Kill Zone: {kill_zone_name} (high momentum)")
+                else:
+                    score_sell += 2
+                    factors_sell.append(f"Kill Zone: {kill_zone_name} (high momentum)")
+            
+            # Apply session bonus
+            score_buy += session_bonus
+            score_sell += session_bonus
+            
+        except Exception as e:
+            logger.debug(f"Session/Kill zone analysis failed: {e}")
     if score_sell > score_buy:
         is_short = True
     elif score_buy > score_sell:
