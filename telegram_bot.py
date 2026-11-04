@@ -71,6 +71,46 @@ def load_env():
 
 load_env()
 
+# Import shared indicators
+try:
+    from utils.indicators import compute_rsi, fetch_fear_greed, compute_atr
+except Exception:
+    # Fallback implementations if utils.indicators not available
+    def compute_rsi(series, period: int = 14) -> float:
+        if len(series) < period + 1:
+            return 50.0
+        delta = series.diff()
+        gain = delta.where(delta > 0, 0.0)
+        loss = -delta.where(delta < 0, 0.0)
+        avg_gain = gain.rolling(window=period, min_periods=period).mean()
+        avg_loss = loss.rolling(window=period, min_periods=period).mean()
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+        return float(rsi.iloc[-1])
+    
+    def fetch_fear_greed():
+        try:
+            req = urllib.request.Request("https://api.alternative.me/fng/?limit=1", headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=5) as r:
+                data = json.loads(r.read())
+                return int(data["data"][0]["value"]), data["data"][0]["value_classification"]
+        except Exception:
+            return 50, "Neutral"
+    
+    def compute_atr(df, period: int = 14) -> float:
+        if len(df) < period + 1:
+            return 0.0
+        high = df["High"]
+        low = df["Low"]
+        close = df["Close"]
+        prev_close = close.shift(1)
+        tr1 = high - low
+        tr2 = (high - prev_close).abs()
+        tr3 = (low - prev_close).abs()
+        true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = true_range.rolling(window=period, min_periods=period).mean()
+        return float(atr.iloc[-1])
+
 try:
     from config_validator import ensure_valid_config, validate_config
 except Exception:
@@ -1205,30 +1245,7 @@ def answer_callback_query(token: str, callback_query_id: str, text: str = None, 
 # ==============================================================================
 # SKILL 1: TECHNICAL INDICATORS & VOLATILITY (ADX, ATR, RSI, VOL)
 # ==============================================================================
-
-def compute_rsi(series, period: int = 14) -> float:
-    if len(series) < period + 1:
-        return 50.0
-    delta = series.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.rolling(window=period, min_periods=period).mean()
-    avg_loss = loss.rolling(window=period, min_periods=period).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return float(rsi.iloc[-1])
-
-
-def compute_atr(df, period: int = 14) -> float:
-    if len(df) < period + 1:
-        return 0.0
-    h_l = df["High"] - df["Low"]
-    h_pc = (df["High"] - df["Close"].shift(1)).abs()
-    l_pc = (df["Low"] - df["Close"].shift(1)).abs()
-    tr = np.maximum(h_l, np.maximum(h_pc, l_pc))
-    atr = tr.rolling(period).mean().iloc[-1]
-    return float(atr)
-
+# Imported from utils.indicators: compute_rsi, compute_atr
 
 def compute_adx(df, period: int = 14) -> tuple:
     """Computes ADX and determines regime (Trending > 25 vs Chop < 20), plus Directional Indicators (+DI, -DI)."""
@@ -1363,16 +1380,7 @@ def detect_traps(hist, levels):
 # ==============================================================================
 # SKILL 5 & 6: MACRO & ON-CHAIN QUANTITATIVE VALUATION
 # ==============================================================================
-
-def fetch_fear_greed():
-    try:
-        req = urllib.request.Request("https://api.alternative.me/fng/?limit=1", headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=5) as r:
-            data = json.loads(r.read())
-            return int(data["data"][0]["value"]), data["data"][0]["value_classification"]
-    except Exception:
-        return 50, "Neutral"
-
+# Imported from utils.indicators: fetch_fear_greed
 
 def fetch_macro_context():
     if MARKET_DATA_AVAILABLE and market_data_feed:

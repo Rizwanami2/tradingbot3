@@ -21,6 +21,8 @@ os.environ["PYTHONWARNINGS"] = "ignore"
 import logging
 logging.captureWarnings(True)
 import numpy as np
+import urllib.request
+import json
 
 try:
     import yfinance as yf
@@ -39,8 +41,9 @@ try:
 except Exception:
     def validate_config(*args, **kwargs): return True, []
 
+# Import shared indicators
 try:
-    from autotrader_pipeline import compute_rsi, fetch_fear_greed
+    from utils.indicators import compute_rsi, fetch_fear_greed
 except Exception:
     def compute_rsi(series, period: int = 14) -> float:
         if len(series) < period + 1:

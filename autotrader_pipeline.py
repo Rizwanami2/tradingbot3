@@ -53,25 +53,46 @@ else:
 from datetime import datetime
 import numpy as np
 
+# Import shared indicators
 try:
-    import yfinance as yf
-except ImportError:
-    print("❌ yfinance required. Run: py -3.11 -m pip install yfinance")
-    sys.exit(1)
+    from utils.indicators import compute_rsi, fetch_fear_greed
+except Exception:
+    # Fallback if utils.indicators not available
+    def compute_rsi(series, period: int = 14) -> float:
+        if len(series) < 14 + 1:
+            return 50.0
+        delta = series.diff()
+        gain = delta.where(delta > 0, 0.0)
+        loss = -delta.where(delta < 0, 0.0)
+        avg_gain = gain.rolling(window=14, min_periods=14).mean()
+        avg_loss = loss.rolling(window=14, min_periods=14).mean()
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+        return float(rsi.iloc[-1])
+
+    def fetch_fear_greed():
+        try:
+            req = urllib.request.Request("https://api.alternative.me/fng/?limit=1", headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=5) as r:
+                data = json.loads(r.read())
+                return int(data["data"][0]["value"]), data["data"][0]["value_classification"]
+        except Exception:
+            return 50, "Neutral"
+
+# ── Indicator Cache (TTL) to avoid redundant data fetches ──
+_indicator_cache: Dict[str, Tuple[float, Any]] = {}
+_CACHE_TTL_SECONDS = int(os.environ.get("INDICATOR_CACHE_TTL_SECONDS", "30"))
 
 # Import MT5 for live broker data (recommended for live trading)
 try:
     import MetaTrader5 as mt5
+    MT5_BROKER_AVAILABLE = True
 except ImportError:
     mt5 = None
+    MT5_BROKER_AVAILABLE = False
 
-# Import Self-Learning Engine
-try:
-    from self_learning import SelfLearningEngine
-    LEARNING_AVAILABLE = True
-    learning_engine = SelfLearningEngine()
-except Exception:
-    LEARNING_AVAILABLE = False
+# Env flag: prefer MT5 live data over yfinance (recommended for live trading)
+USE_MT5_LIVE_DATA = os.environ.get("USE_MT5_LIVE_DATA", "true").lower() in ("true", "1", "yes")
 
 # Import Multi-Source Market Data Engine
 try:
@@ -88,6 +109,22 @@ try:
 except Exception:
     institutional_engine = None
     INSTITUTIONAL_AVAILABLE = False
+
+# Import Multi-Strategy Risk Engine for Practical TP/SL
+try:
+    import risk_engine
+    RISK_ENGINE_AVAILABLE = True
+except Exception:
+    RISK_ENGINE_AVAILABLE = False
+
+# Import Self-Learning Engine
+try:
+    from self_learning import SelfLearningEngine
+    LEARNING_AVAILABLE = True
+    learning_engine = SelfLearningEngine()
+except Exception:
+    LEARNING_AVAILABLE = False
+
 # Import Multi-Strategy Risk Engine for Practical TP/SL
 try:
     import risk_engine
@@ -106,54 +143,6 @@ except Exception:
 
 # Env flag: prefer MT5 live data over yfinance (recommended for live trading)
 USE_MT5_LIVE_DATA = os.environ.get("USE_MT5_LIVE_DATA", "true").lower() in ("true", "1", "yes")
-
-
-def send_pipeline_crash_alert(exc: Exception, context: str = "Autotrader Pipeline"):
-    try:
-        import traceback
-        tb = traceback.format_exc()
-        tb_lines = tb.strip().split("\n")
-        short_tb = "\n".join(tb_lines[-4:]) if len(tb_lines) >= 4 else tb
-        import telegram_bot
-        tok, cid = telegram_bot.get_credentials()
-        if tok and cid:
-            msg = (
-                f"🚨 *PIPELINE CRASH ALERT*\n"
-                f"• Context: `{context}`\n"
-                f"• Error: `{type(exc).__name__}: {exc}`\n"
-                f"• Traceback:\n```\n{short_tb}\n```"
-            )
-            telegram_bot.send_message(tok, cid, msg)
-    except Exception:
-        pass
-
-
-def compute_rsi(series, period: int = 14) -> float:
-    if len(series) < period + 1:
-        return 50.0
-    delta = series.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.rolling(window=period, min_periods=period).mean()
-    avg_loss = loss.rolling(window=period, min_periods=period).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return float(rsi.iloc[-1])
-
-
-def fetch_fear_greed():
-    try:
-        req = urllib.request.Request("https://api.alternative.me/fng/?limit=1", headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=5) as r:
-            data = json.loads(r.read())
-            return int(data["data"][0]["value"]), data["data"][0]["value_classification"]
-    except Exception:
-        return 50, "Neutral"
-
-
-# ── Indicator Cache (TTL) to avoid redundant data fetches ──
-_indicator_cache: Dict[str, Tuple[float, Any]] = {}
-_CACHE_TTL_SECONDS = int(os.environ.get("INDICATOR_CACHE_TTL_SECONDS", "30"))
 
 # MT5 symbol mapping (yfinance -> MT5)
 _MT5_SYMBOL_MAP = {
