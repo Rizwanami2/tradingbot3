@@ -1014,11 +1014,30 @@ class SelfLearningEngine:
             if already_closed: continue
 
             matched_pending = None
-            ext_close_time = ext.get("close_time") or time.time()
+            ext_close_time = ext.get("close_time")
+            if isinstance(ext_close_time, str):
+                try:
+                    ext_close_time = float(ext_close_time)
+                except (ValueError, TypeError):
+                    ext_close_time = time.time()
+            elif ext_close_time is None:
+                ext_close_time = time.time()
+            else:
+                ext_close_time = float(ext_close_time)
+            
             for t in self.memory["trade_journal"]:
                 if t.get("status") == "PENDING":
                     is_exact_ticket = (str(t.get("ticket")) == t_id) if (t.get("ticket") and t_id) else False
-                    sig_time = t.get("timestamp") or 0.0
+                    sig_time = t.get("timestamp")
+                    if isinstance(sig_time, str):
+                        try:
+                            sig_time = float(sig_time)
+                        except (ValueError, TypeError):
+                            sig_time = 0.0
+                    elif sig_time is None:
+                        sig_time = 0.0
+                    else:
+                        sig_time = float(sig_time)
                     time_diff = abs(ext_close_time - sig_time)
                     # Safe match: exact ticket OR matching asset+action within 4-hour window
                     is_safe_window = (t.get("asset") == ext.get("asset") and t.get("action") == ext.get("action") and time_diff <= 14400)

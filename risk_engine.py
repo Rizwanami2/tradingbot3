@@ -1590,7 +1590,11 @@ def calculate_lot_size(asset: str, entry_price: float, stop_loss_price: float,
                        account_balance: float = DEFAULT_ACCOUNT_BALANCE,
                        risk_pct: float = DEFAULT_MAX_RISK_PCT,
                        broker_leverage: float = None,
-                       margin_free: float = None) -> dict:
+                       margin_free: float = None,
+                       win_rate: float = None,
+                       avg_win: float = None,
+                       avg_loss: float = None,
+                       open_positions: list = None) -> dict:
     """
     Computes exact institutional lot size so that dollar loss at SL equals risk_pct.
     Formula:
@@ -1645,8 +1649,40 @@ def calculate_lot_size(asset: str, entry_price: float, stop_loss_price: float,
             "reason": "Entry price equals Stop-Loss (zero distance)"
         }
 
-    risk_budget_usd = account_balance * (max(0.01, risk_pct) / 100.0)
     dollar_risk_per_lot = price_dist * spec["contract_size"]
+
+    # Correlation filter: Check for opposing positions in correlated assets
+    correlation_risk_mult = 1.0
+    if open_positions:
+        correlated_risk = 0.0
+        for pos in open_positions:
+            pos_asset = pos.get("asset", "").upper()
+            if pos_asset != asset_key:
+                # Check correlation between GOLD and BTC
+                if (asset_key == "GOLD" and pos_asset == "BTC") or (asset_key == "BTC" and pos_asset == "GOLD"):
+                    correlated_risk += pos.get("risk_pct", 0.5)
+        
+        # Apply correlation risk reduction (max 50% reduction)
+        if correlated_risk > 0:
+            correlation_risk_mult = max(0.5, 1.0 - (correlated_risk / 5.0))
+
+    # Kelly Criterion sizing
+    kelly_fraction = 1.0
+    if win_rate is not None and avg_win is not None and avg_loss is not None and avg_loss > 0:
+        b = avg_win / avg_loss if avg_loss > 0 else 1.0
+        p = win_rate / 100.0 if win_rate > 1 else win_rate
+        q = 1.0 - p
+        kelly_f = (b * p - q) / b if b > 0 else 0.0
+        kelly_fraction = max(0.0, min(0.5, kelly_f))  # Half-Kelly for safety
+
+    # Base risk budget
+    risk_budget_usd = account_balance * (max(0.01, risk_pct) / 100.0)
+    
+    # Apply Kelly Criterion
+    risk_budget_usd *= kelly_fraction
+
+    # Apply correlation risk multiplier
+    risk_budget_usd *= correlation_risk_mult
 
     raw_lots = risk_budget_usd / dollar_risk_per_lot if dollar_risk_per_lot > 0 else spec["min_lot"]
     # Step round to lot step (0.01)
@@ -1679,7 +1715,9 @@ def calculate_lot_size(asset: str, entry_price: float, stop_loss_price: float,
         "dollar_risk_per_lot": round(dollar_risk_per_lot, 2),
         "contract_multiplier": spec["contract_size"],
         "valid": True,
-        "reason": "OK"
+        "reason": "OK",
+        "correlation_risk_mult": round(correlation_risk_mult, 2),
+        "kelly_fraction": round(kelly_fraction, 2)
     }
 
 

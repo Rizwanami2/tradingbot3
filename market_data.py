@@ -956,6 +956,205 @@ class MarketDataFeed:
         return upcoming
 
 
+    # ==========================================================================
+    # 7. SESSION CANDLES & KILL ZONES (ICT CONCEPTS)
+    # ==========================================================================
+
+    # Session definitions (UTC)
+    SESSIONS = {
+        "ASIA": {"start": 0, "end": 8, "name": "ASIA"},
+        "LONDON": {"start": 8, "end": 16, "name": "LONDON"},
+        "NY": {"start": 13, "end": 21, "name": "NY"},
+        "OVERLAP": {"start": 13, "end": 16, "name": "OVERLAP"},
+    }
+
+    KILL_ZONES = {
+        "LONDON_OPEN": {"start": 7, "end": 9, "name": "LONDON_OPEN"},
+        "NY_OPEN": {"start": 12, "end": 14, "name": "NY_OPEN"},
+        "LONDON_CLOSE": {"start": 16, "end": 17, "name": "LONDON_CLOSE"},
+        "ASIAN_RANGE": {"start": 0, "end": 8, "name": "ASIAN_RANGE"},
+    }
+
+    def get_current_session(self, current_dt_utc: datetime = None) -> str:
+        """
+        Returns the current trading session based on UTC time.
+        Returns: 'ASIA', 'LONDON', 'NY', 'OVERLAP', or 'OFF_HOURS'
+        """
+        if current_dt_utc is None:
+            current_dt_utc = datetime.now(timezone.utc)
+        
+        hour = current_dt_utc.hour
+        
+        # Check kill zones first (highest priority)
+        for zone_name, zone_info in self.KILL_ZONES.items():
+            if zone_info["start"] <= hour < zone_info["end"]:
+                return zone_info["name"]
+        
+        # Check regular sessions
+        for session_name, session_info in self.SESSIONS.items():
+            if session_info["start"] <= hour < session_info["end"]:
+                return session_info["name"]
+        
+        return "OFF_HOURS"
+
+    def is_kill_zone(self, current_dt_utc: datetime = None) -> tuple:
+        """
+        Checks if current time is in a kill zone.
+        Returns: (is_kill_zone: bool, zone_name: str)
+        """
+        if current_dt_utc is None:
+            current_dt_utc = datetime.now(timezone.utc)
+        
+        hour = current_dt_utc.hour
+        
+        for zone_name, zone_info in self.KILL_ZONES.items():
+            if zone_info["start"] <= hour < zone_info["end"]:
+                return True, zone_info["name"]
+        
+        return False, "NONE"
+
+    def get_session_candles(self, asset: str, session: str = None, lookback_days: int = 5) -> pd.DataFrame:
+        """
+        Returns OHLCV candles filtered for a specific trading session.
+        
+        Args:
+            asset: 'GOLD' or 'BTC'
+            session: 'ASIA', 'LONDON', 'NY', 'OVERLAP', or None for current session
+            lookback_days: How many days of history to fetch
+            
+        Returns:
+            DataFrame with OHLCV candles filtered to session hours
+        """
+        asset_norm = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
+        
+        if session is None:
+            session = self.get_current_session()
+        
+        # Get full historical data
+        symbol = "GC=F" if asset_norm == "GOLD" else "BTC-USD"
+        period = f"{lookback_days}d"
+        
+        try:
+            t = yf.Ticker(symbol)
+            df = t.history(period=period, interval="1h")
+            if df.empty:
+                return pd.DataFrame()
+        except Exception as e:
+            logger.warning(f"Failed to fetch session candles for {asset_norm}: {e}")
+            return pd.DataFrame()
+        
+        # Sanitize
+        df = self._sanitize_dataframe(df)
+        
+        # Ensure timezone-aware index
+        if df.index.tz is None:
+            df.index = df.index.tz_localize('UTC')
+        elif df.index.tz != timezone.utc:
+            df.index = df.index.tz_convert('UTC')
+        
+        # Filter by session hours
+        session_hours = self.SESSIONS.get(session.upper())
+        if not session_hours:
+            return df  # Return all if session not found
+        
+        start_hour = session_hours["start"]
+        end_hour = session_hours["end"]
+        
+        # Filter by hour
+        mask = (df.index.hour >= start_hour) & (df.index.hour < end_hour)
+        session_df = df[mask].copy()
+        
+        return session_df
+
+    def get_kill_zone_candles(self, asset: str, zone: str = None, lookback_days: int = 5) -> pd.DataFrame:
+        """
+        Returns OHLCV candles filtered for a specific kill zone.
+        
+        Args:
+            asset: 'GOLD' or 'BTC'
+            zone: 'LONDON_OPEN', 'NY_OPEN', 'LONDON_CLOSE', 'ASIAN_RANGE', or None for any kill zone
+            lookback_days: How many days of history to fetch
+            
+        Returns:
+            DataFrame with OHLCV candles filtered to kill zone hours
+        """
+        asset_norm = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
+        
+        if zone is None:
+            # Return all kill zone candles combined
+            all_parts = []
+            for zone_name in self.KILL_ZONES.keys():
+                df = self.get_kill_zone_candles(asset, zone_name)
+                if not df.empty:
+                    df = df.copy()
+                    df["kill_zone"] = zone_name
+                    all_parts.append(df)
+            if all_parts:
+                return pd.concat(all_parts).sort_index()
+            return pd.DataFrame()
+        
+        return self.get_session_candles(asset, zone, lookback_days)
+
+    def get_session_stats(self, asset: str, session: str = None, lookback_days: int = 20) -> dict:
+        """
+        Returns statistical summary for a trading session.
+        
+        Returns:
+            dict with: volatility, avg_range, direction_bias, volume_profile
+        """
+        df = self.get_session_candles(asset, session, lookback_days)
+        
+        if df.empty:
+            return {"volatility": 0, "avg_range": 0, "direction": "NEUTRAL", "total_bars": 0}
+        
+        # Calculate session statistics
+        df = df.copy()
+        df["range"] = df["High"] - df["Low"]
+        df["body"] = abs(df["Close"] - df["Open"])
+        df["body_ratio"] = df["body"] / (df["High"] - df["Low"])
+        df["direction"] = df.apply(lambda x: "BULLISH" if x["Close"] > x["Open"] else "BEARISH", axis=1)
+        
+        avg_range = df["range"].mean()
+        avg_body = df["body"].mean()
+        avg_body_ratio = df["body_ratio"].mean()
+        
+        bullish_count = (df["direction"] == "BULLISH").sum()
+        bearish_count = (df["direction"] == "BEARISH").sum()
+        total = len(df)
+        
+        if bullish_count > bearish_count:
+            direction = "BULLISH"
+        elif bearish_count > bearish_count:
+            direction = "BEARISH"
+        else:
+            direction = "NEUTRAL"
+        
+        return {
+            "session": session,
+            "volatility": round(float(df["Close"].pct_change().std() * 100), 2),
+            "avg_range": round(float(avg_range), 2),
+            "avg_body": round(float(avg_body), 2),
+            "body_ratio": round(float(avg_body_ratio), 3),
+            "direction": direction,
+            "bullish_pct": round(bullish_count / total * 100, 1),
+            "bearish_pct": round(bearish_count / total * 100, 1),
+            "total_bars": int(total),
+            "avg_volume": round(float(df["Volume"].mean()), 0) if "Volume" in df.columns else 0
+        }
+
+    def get_kill_zone_stats(self, asset: str, zone: str = None, lookback_days: int = 20) -> dict:
+        """Returns statistical summary for kill zones."""
+        if zone is None:
+            # Return stats for all kill zones
+            stats = {}
+            for zone_name in self.KILL_ZONES.keys():
+                stats[zone_name] = self.get_session_stats(asset, zone_name, lookback_days)
+            return stats
+        
+        return self.get_session_stats(asset, zone, lookback_days)
+
+# Global Singleton Feed Instance
+
 market_data_feed = MarketDataFeed()
 
 def is_news_blocked(asset: str, current_dt_utc: datetime = None) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
