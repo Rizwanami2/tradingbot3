@@ -737,18 +737,20 @@ def analyze_asset_pipeline(symbol: str, asset_type: str, dxy_chg: float, tnx_chg
             tp2 = round(curr + (sl_dist * 1.85), 2)
 
     # SL/TP Side Validation Gate: Enforce BUY -> SL < entry < TP and SELL -> TP < entry < SL
+    # Validate against execution_entry (actual order price), not curr (market price)
+    entry_for_validation = execution_entry
     if side_action == "SELL":
-        if not (tp1 < curr < stop_loss):
-            logger.warning(f"Inverted SL/TP detected for SELL on {asset_type} (TP={tp1}, Entry={curr}, SL={stop_loss}). Auto-correcting.")
-            stop_loss = round(curr + sl_dist, 2)
-            tp1 = round(curr - (sl_dist * 1.25), 2)
-            tp2 = round(curr - (sl_dist * 1.85), 2)
+        if not (tp1 < entry_for_validation < stop_loss):
+            logger.warning(f"Inverted SL/TP detected for SELL on {asset_type} (TP={tp1}, Entry={entry_for_validation}, SL={stop_loss}). Auto-correcting.")
+            stop_loss = round(entry_for_validation + sl_dist, 2)
+            tp1 = round(entry_for_validation - (sl_dist * 1.25), 2)
+            tp2 = round(entry_for_validation - (sl_dist * 1.85), 2)
     else:
-        if not (stop_loss < curr < tp1):
-            logger.warning(f"Inverted SL/TP detected for BUY on {asset_type} (SL={stop_loss}, Entry={curr}, TP={tp1}). Auto-correcting.")
-            stop_loss = round(curr - sl_dist, 2)
-            tp1 = round(curr + (sl_dist * 1.25), 2)
-            tp2 = round(curr + (sl_dist * 1.85), 2)
+        if not (stop_loss < entry_for_validation < tp1):
+            logger.warning(f"Inverted SL/TP detected for BUY on {asset_type} (SL={stop_loss}, Entry={entry_for_validation}, TP={tp1}). Auto-correcting.")
+            stop_loss = round(entry_for_validation - sl_dist, 2)
+            tp1 = round(entry_for_validation + (sl_dist * 1.25), 2)
+            tp2 = round(entry_for_validation + (sl_dist * 1.85), 2)
 
     # Log signal to self-learning journal if actionable
     trade_id = None

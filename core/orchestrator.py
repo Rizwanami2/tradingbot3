@@ -126,7 +126,7 @@ class Orchestrator:
         self.trading_mode = os.environ.get("TRADING_MODE", "PAPER").upper()
         self.max_daily_loss_pct = float(os.environ.get("MAX_DAILY_LOSS_PCT", "1.5"))
         self.max_total_open_risk_pct = float(os.environ.get("MAX_TOTAL_OPEN_RISK_PCT", "2.5"))
-        self.min_confluence_score = float(os.environ.get("MIN_CONFLUENCE_SCORE", "8.0"))
+        self.min_confluence_score = float(os.environ.get("MIN_CONFLUENCE_SCORE", "7.0"))
         self.limit_orders_enabled = os.environ.get("LIMIT_ORDERS_ENABLED", "true").lower() in ("true", "1", "yes")
         self.limit_order_offset_pips = float(os.environ.get("LIMIT_ORDER_OFFSET_PIPS", "2"))
         self.limit_order_expiry_min = int(os.environ.get("LIMIT_ORDER_EXPIRY_MIN", "35"))
@@ -604,6 +604,14 @@ class Orchestrator:
                                 c["_skip_reason"] = f"Correlation guard: BTC {direction} has higher score ({b_score:.1f} vs {g_score:.1f})"
 
         return filtered
+
+    def _get_candidates(self) -> List[Dict[str, Any]]:
+        """Get candidate setups from autotrader_pipeline service."""
+        candidates = []
+
+        if analyze_asset_pipeline is None:
+            logger.warning("autotrader_pipeline.analyze_asset_pipeline not available")
+            return candidates
 
         # Get macro data
         dxy_chg = 0.0
