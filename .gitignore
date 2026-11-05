@@ -33,10 +33,6 @@ trade_audit.jsonl
 *.jsonl
 *.bak
 
-# Permanent Project Constraint: Never create or track README files
-README*
-readme*
-
 # Single-instance lock (runtime only)
 tradingbot.lock
 *.lock
