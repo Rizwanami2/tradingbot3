@@ -4,6 +4,8 @@ config_validator.py
 Startup Configuration Validator for tradingbot3.
 Validates environment variables, trading mode rules, safety thresholds, and credentials.
 Fails fast with clear, actionable error messages before execution begins.
+
+FIXED: Now properly supports PAPER, DEMO and LIVE modes.
 """
 
 import os
@@ -75,12 +77,17 @@ def validate_config(fail_fast: bool = False) -> Tuple[bool, List[str]]:
     load_env_file()
     errors: List[str] = []
 
-    # 1. Trading Mode - LIVE ONLY
-    trading_mode = os.environ.get("TRADING_MODE", "live").strip().lower()
-    if trading_mode != "live":
-        errors.append(f"TRADING_MODE='{trading_mode}' is invalid. Only 'live' mode is supported.")
-        trading_mode = "live"
+    # 1. Trading Mode - PAPER / DEMO / LIVE supported
+    trading_mode = os.environ.get("TRADING_MODE", "paper").strip().lower()
+    allowed_modes = ("paper", "demo", "live")
 
+    if trading_mode not in allowed_modes:
+        errors.append(
+            f"TRADING_MODE='{trading_mode}' is invalid. "
+            f"Allowed values: paper, demo, live. Defaulting recommendation: paper"
+        )
+
+    # Only require LIVE_CONFIRM when actually in live mode
     if trading_mode == "live":
         live_confirm = os.environ.get("LIVE_CONFIRM", "").strip().upper()
         if live_confirm != "CONFIRM":
@@ -163,7 +170,8 @@ def validate_config(fail_fast: bool = False) -> Tuple[bool, List[str]]:
         if fail_fast:
             raise ValueError(error_msg)
     else:
-        logger.info(f"Startup Config Validation Passed. Trading Mode: LIVE ✅")
+        mode_display = trading_mode.upper()
+        logger.info(f"Startup Config Validation Passed. Trading Mode: {mode_display} ✅")
 
     return is_valid, errors
 
