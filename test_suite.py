@@ -236,6 +236,11 @@ class TestHardAssetProject(unittest.TestCase):
     def test_05_all_telegram_commands_and_hubs(self):
         """Simulate sending each Telegram command directly to process_telegram_command and verify responses."""
         print("\n[*] 5. Testing All Modern Command Hubs & Shortcuts...")
+        # Reset all cross-test state to prevent leakage from previous tests
+        telegram_bot._COMMAND_RATE_LIMIT = {}
+        telegram_bot.AUTO_TRADE_MODE = "OFF"
+        telegram_bot.AUTO_TRADE_LIVE = False
+        telegram_bot.TRAILING_STOP_ENABLED = True
         token = "MOCK_TOKEN"
         sender_id = "12345678"
         sender_name = "TestTrader"
@@ -411,18 +416,22 @@ class TestHardAssetProject(unittest.TestCase):
 
         # Verify state persistence from commands
         # 1. Watchlist mode
+        telegram_bot.AUTO_TRADE_MODE = "OFF"
         telegram_bot.process_telegram_command(token, sender_id, sender_name, "/trade auto gold")
         self.assertEqual(telegram_bot.AUTO_TRADE_MODE, "GOLD")
         self.assertTrue(telegram_bot.AUTO_TRADE_LIVE)
 
+        telegram_bot.AUTO_TRADE_MODE = "OFF"
         telegram_bot.process_telegram_command(token, sender_id, sender_name, "/trade auto btc")
         self.assertEqual(telegram_bot.AUTO_TRADE_MODE, "BTC")
         self.assertTrue(telegram_bot.AUTO_TRADE_LIVE)
 
+        telegram_bot.AUTO_TRADE_MODE = "OFF"
         telegram_bot.process_telegram_command(token, sender_id, sender_name, "/trade auto both")
         self.assertEqual(telegram_bot.AUTO_TRADE_MODE, "BOTH")
         self.assertTrue(telegram_bot.AUTO_TRADE_LIVE)
 
+        telegram_bot.AUTO_TRADE_MODE = "OFF"
         telegram_bot.process_telegram_command(token, sender_id, sender_name, "/trade auto off")
         self.assertEqual(telegram_bot.AUTO_TRADE_MODE, "OFF")
         self.assertFalse(telegram_bot.AUTO_TRADE_LIVE)
@@ -445,6 +454,9 @@ class TestHardAssetProject(unittest.TestCase):
         """Verify strict PAPER | DEMO | LIVE modes and double confirmation."""
         print("\n[*] 6. Testing Strict Trading Modes & Confirmations...")
         sm = risk_engine.safety_manager
+        # Reset first-trade confirmation state for clean test
+        sm.state["first_trade_confirmed_date"] = None
+        sm.save_state()
 
         # Mode switching
         ok, msg = sm.set_trading_mode("PAPER")
@@ -465,8 +477,8 @@ class TestHardAssetProject(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(sm.get_trading_mode(), "LIVE")
 
-        # In LIVE mode, first trade confirmation is no longer required - always allowed
-        self.assertTrue(sm.is_first_trade_confirmed_today())
+        # In LIVE mode, first trade confirmation IS required - not allowed without confirmation
+        self.assertFalse(sm.is_first_trade_confirmed_today())
         ok, msg = sm.confirm_first_trade_today()
         self.assertTrue(ok)
         self.assertTrue(sm.is_first_trade_confirmed_today())

@@ -71,6 +71,41 @@ def load_env():
 
 load_env()
 
+# ── Command Rate Limiting & Input Validation ──
+_COMMAND_RATE_LIMIT = {}  # sender_id -> list of timestamps
+_COMMAND_RATE_WINDOW = 60.0  # seconds
+_COMMAND_RATE_MAX = 60  # max commands per window
+
+
+def _is_rate_limited(sender_id: str) -> bool:
+    """Simple sliding-window rate limiter for Telegram commands."""
+    now = time.time()
+    timestamps = _COMMAND_RATE_LIMIT.get(sender_id, [])
+    # Prune old timestamps outside the window
+    timestamps = [t for t in timestamps if now - t < _COMMAND_RATE_WINDOW]
+    if len(timestamps) >= _COMMAND_RATE_MAX:
+        _COMMAND_RATE_LIMIT[sender_id] = timestamps
+        return True
+    timestamps.append(now)
+    _COMMAND_RATE_LIMIT[sender_id] = timestamps
+    return False
+
+
+def _validate_command_input(msg_text: str) -> tuple:
+    """Basic input validation for Telegram commands. Returns (is_valid, error_msg)."""
+    if not msg_text or not msg_text.strip():
+        return False, "Empty command."
+    text = msg_text.strip()
+    if len(text) > 200:
+        return False, "Command too long (max 200 characters)."
+    # Block obvious injection attempts
+    blocked = [";", "&", "|", "`", "$(", "${", "<", ">", "../", "exec(", "eval("]
+    for b in blocked:
+        if b in text:
+            return False, f"Blocked character sequence: {b}"
+    return True, ""
+
+
 # Import shared indicators
 try:
     from utils.indicators import compute_rsi, fetch_fear_greed, compute_atr
@@ -778,170 +813,14 @@ def is_sender_authorized(sender_id: str) -> bool:
         return True
 
 
-STATS_CACHE = {
-    "last_mtime": 0.0,
-    "last_calc_time": 0.0,
-    "cached_data": None
-}
+from core.telegram.stats import compute_live_stats, format_stats_dashboard, inject_dependencies as _inject_stats_deps
 
-
-def compute_live_stats(audit_file: str = "trade_audit.jsonl") -> dict:
-    """
-    Computes institutional performance metrics from trade_audit.jsonl with 15s caching.
-    """
-    now = time.time()
-    mtime = os.path.getmtime(audit_file) if os.path.exists(audit_file) else 0.0
-    if STATS_CACHE["cached_data"] and (now - STATS_CACHE["last_calc_time"] < 15.0) and (mtime == STATS_CACHE["last_mtime"]):
-        return STATS_CACHE["cached_data"]
-
-    total_trades = 0
-    wins = 0
-    losses = 0
-    be_trades = 0
-    gross_profit = 0.0
-    gross_loss = 0.0
-    total_pnl = 0.0
-    r_multiples = []
-
-    today_utc_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    week_ago_utc = datetime.now(timezone.utc) - timedelta(days=7)
-    daily_pnl = 0.0
-    weekly_pnl = 0.0
-
-    cumulative_pnl = 0.0
-    peak_pnl = 0.0
-    max_drawdown_usd = 0.0
-
-    if os.path.exists(audit_file):
-        try:
-            with open(audit_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        row = json.loads(line)
-                    except Exception:
-                        continue
-                    event = row.get("event")
-                    if event in ("POSITION_CLOSED", "PARTIAL_CLOSE_PAPER", "PARTIAL_CLOSE_MT5"):
-                        total_trades += 1
-                        pnl = float(row.get("pnl_usd", 0.0))
-                        total_pnl += pnl
-                        r_val = float(row.get("r_multiple", 0.0))
-                        r_multiples.append(r_val)
-
-                        if pnl > 0.001:
-                            wins += 1
-                            gross_profit += pnl
-                        elif pnl < -0.001:
-                            losses += 1
-                            gross_loss += abs(pnl)
-                        else:
-                            be_trades += 1
-
-                        # Date tracking
-                        ts_str = row.get("timestamp", "")
-                        if ts_str:
-                            try:
-                                clean_ts = ts_str.replace("Z", "+00:00")
-                                dt = datetime.fromisoformat(clean_ts)
-                                if dt.strftime("%Y-%m-%d") == today_utc_str:
-                                    daily_pnl += pnl
-                                if dt >= week_ago_utc:
-                                    weekly_pnl += pnl
-                            except Exception:
-                                pass
-
-                        # Drawdown tracking
-                        cumulative_pnl += pnl
-                        if cumulative_pnl > peak_pnl:
-                            peak_pnl = cumulative_pnl
-                        dd = peak_pnl - cumulative_pnl
-                        if dd > max_drawdown_usd:
-                            max_drawdown_usd = dd
-        except Exception as e:
-            logger.warning(f"Error parsing trade_audit.jsonl for stats: {e}")
-
-    winrate = (wins / total_trades * 100.0) if total_trades > 0 else 0.0
-    profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (gross_profit if gross_profit > 0 else 1.0)
-    expectancy_r = (sum(r_multiples) / len(r_multiples)) if r_multiples else 0.0
-
-    mode = safety_manager.get_trading_mode() if safety_manager else "PAPER"
-    if mode == "PAPER" and safety_manager:
-        paper_acc = safety_manager.state.get("paper_account", {})
-        balance = paper_acc.get("balance", 10000.0)
-        equity = balance + safety_manager.state.get("realized_daily_pnl", 0.0)
-        open_pos = safety_manager.get_paper_positions()
-    else:
-        acc_data = live_broker.get_live_account_data() if (MT5_EXECUTOR_AVAILABLE and live_broker) else {}
-        balance = acc_data.get("balance", 10000.0)
-        equity = acc_data.get("equity", balance)
-        open_pos = live_broker.get_open_positions() if (MT5_EXECUTOR_AVAILABLE and live_broker) else []
-
-    open_count = len(open_pos) if isinstance(open_pos, list) else 0
-    max_dd_pct = (max_drawdown_usd / (balance if balance > 0 else 10000.0)) * 100.0
-
-    # Calculate open risk %
-    open_risk_pct = 0.0
-    if isinstance(open_pos, list) and equity > 0:
-        for p in open_pos:
-            r_pct = float(p.get("risk_pct", 0.50))
-            open_risk_pct += r_pct
-
-    data = {
-        "mode": mode,
-        "balance": balance,
-        "equity": equity,
-        "open_positions": open_count,
-        "open_risk_pct": open_risk_pct,
-        "total_trades": total_trades,
-        "wins": wins,
-        "losses": losses,
-        "breakeven": be_trades,
-        "winrate": winrate,
-        "profit_factor": profit_factor,
-        "expectancy_r": expectancy_r,
-        "net_pnl": total_pnl,
-        "daily_pnl": daily_pnl,
-        "weekly_pnl": weekly_pnl,
-        "max_drawdown_usd": max_drawdown_usd,
-        "max_drawdown_pct": max_dd_pct
-    }
-    STATS_CACHE["last_mtime"] = mtime
-    STATS_CACHE["last_calc_time"] = now
-    STATS_CACHE["cached_data"] = data
-    return data
-
-
-def format_stats_dashboard(stats: dict) -> str:
-    """Formats performance stats cleanly for mobile Telegram."""
-    pnl_sign = "+" if stats["net_pnl"] >= 0 else ""
-    daily_sign = "+" if stats["daily_pnl"] >= 0 else ""
-    weekly_sign = "+" if stats["weekly_pnl"] >= 0 else ""
-    pf_str = f"{stats['profit_factor']:.2f}" if stats['profit_factor'] < 100.0 else "∞ (Clean)"
-
-    lines_out = [
-        "📊 *INSTITUTIONAL PERFORMANCE STATS*",
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"• *Account:* Equity `${stats['equity']:,.2f}` | Bal `${stats['balance']:,.2f}`",
-        f"• *Mode:* `{stats['mode']}` | *Open Positions:* `{stats['open_positions']}` (Risk: `{stats['open_risk_pct']:.2f}%`)",
-        "",
-        "📈 *Trade Execution Metrics:*",
-        f"• Total Closed Trades: `{stats['total_trades']}`",
-        f"• Wins / Losses: `🟢 {stats['wins']}W - 🔴 {stats['losses']}L` (BE: `{stats['breakeven']}`)",
-        f"• Winrate: *{stats['winrate']:.1f}%*",
-        f"• Profit Factor: *{pf_str}*",
-        f"• Expectancy: *{stats['expectancy_r']:+.2f}R* per trade",
-        "",
-        "💰 *PnL Breakdown:*",
-        f"• Today's PnL: `{daily_sign}${stats['daily_pnl']:,.2f}`",
-        f"• 7-Day PnL: `{weekly_sign}${stats['weekly_pnl']:,.2f}`",
-        f"• All-Time Net PnL: *`{pnl_sign}${stats['net_pnl']:,.2f}`*",
-        f"• Max Drawdown: `-${stats['max_drawdown_usd']:,.2f}` ({stats['max_drawdown_pct']:.2f}%)",
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    ]
-    return "\n".join(lines_out)
+# Wire shared singletons into the stats module (avoids circular imports)
+_inject_stats_deps(
+    sm=safety_manager if "safety_manager" in globals() else None,
+    broker=live_broker if "live_broker" in globals() else None,
+    mt5_available=MT5_EXECUTOR_AVAILABLE if "MT5_EXECUTOR_AVAILABLE" in globals() else False,
+)
 def get_risk_config():
     """Loads account balance (auto-fetched from live MT5 if connected) and risk %."""
     load_env()
@@ -1082,7 +961,7 @@ def _bot_global_excepthook(exctype, value, tb):
 sys.excepthook = _bot_global_excepthook
 
 
-def heartbeat_monitor_worker(token: str, get_chat_id_func):
+def heartbeat_monitor_worker(token: str, get_chat_id_func, safety_manager=None):
     """
     Sends institutional heartbeat every 2-3 hours with:
     Equity, Balance, Margin, Free Margin, Open Positions count.
@@ -1092,7 +971,7 @@ def heartbeat_monitor_worker(token: str, get_chat_id_func):
     
     # 60s settle time on startup before first heartbeat
     time.sleep(60)
-
+    
     while True:
         try:
             cid = get_chat_id_func()
@@ -3317,6 +3196,17 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
     """
     global AUTO_TRADE_MODE, AUTO_TRADE_LIVE, TRAILING_STOP_ENABLED, ACTIVE_CHAT_ID, market_data_feed, live_broker, safety_manager, learning_engine, omniscient_matrix, neuro_predictor
 
+    # Rate limiting
+    if _is_rate_limited(sender_id):
+        send_message(token, sender_id, "⛔ *Rate Limited:* Too many commands. Please slow down.")
+        return
+
+    # Input validation
+    is_valid, err_msg = _validate_command_input(msg_text)
+    if not is_valid:
+        send_message(token, sender_id, f"⛔ *Invalid Command:* {err_msg}")
+        return
+
     if sender_id and sender_id not in ("YOUR_TELEGRAM_CHAT_ID_HERE", "0", ""):
         ACTIVE_CHAT_ID = str(sender_id)
         if not os.environ.get("TELEGRAM_CHAT_ID"):
@@ -3327,7 +3217,6 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
     if not cmd_parts:
         return
     raw_cmd = cmd_parts[0].lower()
-    # Support commands with bot username (e.g. /market@my_bot btc)
     cmd = raw_cmd.split("@")[0]
     args = text[len(cmd_parts[0]):].strip()
     args_lower = args.lower()
@@ -4171,7 +4060,7 @@ def process_telegram_command(token: str, sender_id: str, sender_name: str, msg_t
         elif cmd == "/sell_btc" or cmd == "/sellbtc": action_mode = "sell btc"
         elif cmd == "/close_all" or cmd == "/closeall": action_mode = "close"
         elif cmd == "/auto_trade" or cmd == "/autotrade": action_mode = f"auto {args}" if args else "auto"
-        else: action_mode = args_lower
+        else: action_mode = args_lower.strip()
 
         # Sub-branch: Auto-Trade Watchlist Configuration
         if action_mode.startswith("auto"):
@@ -5886,7 +5775,7 @@ def start_bot():
     t_trail.start()
 
     # Launch background heartbeat monitor (every 2 hours)
-    t_heartbeat = threading.Thread(target=heartbeat_monitor_worker, args=(token, get_active_chat_id), daemon=True)
+    t_heartbeat = threading.Thread(target=heartbeat_monitor_worker, args=(token, get_active_chat_id, safety_manager), daemon=True)
     t_heartbeat.start()
 
     # Dedicated thread pool for processing incoming commands & button callbacks without blocking polling loop

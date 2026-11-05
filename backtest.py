@@ -831,3 +831,106 @@ if __name__ == "__main__":
                 matrix_results.append(r)
 
         print("\n" + format_backtest_cli_table(matrix_results))
+
+
+def run_walk_forward_backtest(asset: str = "GOLD",
+                              strategy_code: str = "SCALP",
+                              total_days: int = 730,
+                              train_days: int = 365,
+                              test_days: int = 90,
+                              step_days: int = 90,
+                              initial_capital: float = 10000.0,
+                              interval: str = "1d") -> dict:
+    """
+    Walk-forward (out-of-sample) backtesting.
+
+    Splits the full history into rolling train/test windows:
+      - Train on window [t, t + train_days]
+      - Test on window [t + train_days, t + train_days + test_days]
+      - Roll forward by step_days and repeat.
+
+    This prevents overfitting by ensuring parameters are always validated
+    on data they were not trained on.
+
+    Returns a dict with per-window results and aggregated walk-forward metrics.
+    """
+    from datetime import datetime, timedelta
+
+    end_date = datetime.utcnow()
+    start_date = end_date - timedelta(days=total_days)
+
+    windows = []
+    current = start_date
+    window_results = []
+
+    while current + timedelta(days=train_days + test_days) <= end_date:
+        train_start = current
+        train_end = current + timedelta(days=train_days)
+        test_start = train_end
+        test_end = test_start + timedelta(days=test_days)
+
+        # ── Train phase: run backtest on in-sample data ──
+        train_res = run_historical_backtest(
+            asset=asset,
+            strategy_code=strategy_code,
+            lookback_days=train_days,
+            initial_capital=initial_capital,
+            interval=interval,
+        )
+
+        # ── Test phase: run backtest on out-of-sample data ──
+        test_res = run_historical_backtest(
+            asset=asset,
+            strategy_code=strategy_code,
+            lookback_days=test_days,
+            initial_capital=initial_capital,
+            interval=interval,
+        )
+
+        window = {
+            "train_start": train_start.strftime("%Y-%m-%d"),
+            "train_end": train_end.strftime("%Y-%m-%d"),
+            "test_start": test_start.strftime("%Y-%m-%d"),
+            "test_end": test_end.strftime("%Y-%m-%d"),
+            "train_net_return_pct": train_res.get("net_return_pct", 0.0),
+            "test_net_return_pct": test_res.get("net_return_pct", 0.0),
+            "train_win_rate_pct": train_res.get("win_rate_pct", 0.0),
+            "test_win_rate_pct": test_res.get("win_rate_pct", 0.0),
+            "train_profit_factor": train_res.get("profit_factor", 0.0),
+            "test_profit_factor": test_res.get("profit_factor", 0.0),
+            "train_max_dd_pct": train_res.get("max_drawdown_pct", 0.0),
+            "test_max_dd_pct": test_res.get("max_drawdown_pct", 0.0),
+            "train_total_trades": train_res.get("total_trades", 0),
+            "test_total_trades": test_res.get("total_trades", 0),
+        }
+        window_results.append(window)
+        current += timedelta(days=step_days)
+
+    if not window_results:
+        return {"error": "Insufficient data for walk-forward windows"}
+
+    # ── Aggregate walk-forward metrics ──
+    test_returns = [w["test_net_return_pct"] for w in window_results]
+    test_win_rates = [w["test_win_rate_pct"] for w in window_results]
+    test_pfs = [w["test_profit_factor"] for w in window_results if w["test_profit_factor"] > 0]
+
+    avg_test_return = sum(test_returns) / len(test_returns) if test_returns else 0.0
+    avg_test_win_rate = sum(test_win_rates) / len(test_win_rates) if test_win_rates else 0.0
+    avg_test_pf = sum(test_pfs) / len(test_pfs) if test_pfs else 0.0
+
+    # Consistency: % of windows that were profitable
+    profitable_windows = sum(1 for r in test_returns if r > 0)
+    consistency_pct = (profitable_windows / len(test_returns) * 100.0) if test_returns else 0.0
+
+    return {
+        "asset": asset,
+        "strategy_code": strategy_code,
+        "total_windows": len(window_results),
+        "windows": window_results,
+        "walk_forward_metrics": {
+            "avg_test_return_pct": round(avg_test_return, 2),
+            "avg_test_win_rate_pct": round(avg_test_win_rate, 2),
+            "avg_test_profit_factor": round(avg_test_pf, 2),
+            "profitable_windows_pct": round(consistency_pct, 2),
+        }
+    }

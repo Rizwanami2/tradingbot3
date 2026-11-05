@@ -112,15 +112,9 @@ class MarketDataFeed:
         asset_norm = "GOLD" if asset.upper() in ("GOLD", "XAU", "XAUUSD", "GC=F") else "BTC"
         now = time.time()
 
-        # Check memory cache TTL
-        cached = self._memory_cache.get(f"tick_{asset_norm}")
-        if cached and (now - cached["timestamp"] < TICK_CACHE_TTL_SECONDS):
-            self._stats["cache_hits"] += 1
-            return dict(cached)
+        last_good_price = self._get_disk_price(asset_norm)
 
-        last_good_price = cached.get("price") if cached else self._get_disk_price(asset_norm)
-
-        # ── PRIORITY 1: MT5 Live Tick (Broker Exact Feed) ──
+        # ── PRIORITY 1: MT5 Live Tick (Broker Exact Feed) — Always preferred when available ──
         if self.broker and getattr(self.broker, "is_connected", False):
             try:
                 mt5_res = self._fetch_mt5_tick(asset_norm)
@@ -130,6 +124,12 @@ class MarketDataFeed:
                     return mt5_res
             except Exception as e:
                 logger.debug(f"MT5 tick retrieval skipped: {e}")
+
+        # Check memory cache TTL (only after MT5 attempt)
+        cached = self._memory_cache.get(f"tick_{asset_norm}")
+        if cached and (now - cached["timestamp"] < TICK_CACHE_TTL_SECONDS):
+            self._stats["cache_hits"] += 1
+            return dict(cached)
 
         # ── PRIORITY 2: Yahoo Finance ──
         try:

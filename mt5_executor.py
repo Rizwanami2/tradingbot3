@@ -95,6 +95,8 @@ class MT5LiveBroker:
         self.reconnect_delay = 2.0
         self.max_reconnect_delay = 60.0
         self.last_reconnect_attempt = 0.0
+        self.reconnect_attempts = 0
+        self.max_reconnect_attempts = 10
         # ── Trading Cost Configuration ──
         # $0.25 per 0.01 lot round trip (commission + spread)
         self.trade_cost_per_01_lot = 0.25
@@ -288,12 +290,18 @@ class MT5LiveBroker:
         if (now - self.last_reconnect_attempt) < self.reconnect_delay:
             return False
 
+        if self.reconnect_attempts >= self.max_reconnect_attempts:
+            logger.error(f"MT5 max reconnect attempts ({self.max_reconnect_attempts}) reached. Giving up.")
+            return False
+
         self.last_reconnect_attempt = now
-        logger.info(f"Attempting MT5 auto-reconnect (backoff interval: {self.reconnect_delay:.1f}s)...")
+        self.reconnect_attempts += 1
+        logger.info(f"Attempting MT5 auto-reconnect ({self.reconnect_attempts}/{self.max_reconnect_attempts}, backoff: {self.reconnect_delay:.1f}s)...")
         ok, msg = self.connect(self.last_login, self.last_password, self.last_server, self.last_path)
         if ok:
             logger.info("MT5 auto-reconnect succeeded! Alerting channel.")
             self.reconnect_delay = 2.0
+            self.reconnect_attempts = 0
             self._notify_telegram_alert("🟢 *MT5 AUTO-RECONNECTED*\nMetaTrader 5 broker terminal connection restored successfully.")
             return True
         else:
@@ -483,6 +491,16 @@ class MT5LiveBroker:
             )
 
         # ── 2. LIVE / DEMO BROKER EXECUTION ──
+        # First Live Trade of the Day Confirmation Gate
+        if current_mode == "LIVE" and safety_manager:
+            if not safety_manager.is_first_trade_confirmed_today():
+                return {
+                    "success": False,
+                    "error": "First live trade of the day requires confirmation. Use /confirm_trade YES to authorize real capital execution.",
+                    "mode": "LIVE",
+                    "requires_confirmation": True
+                }
+
         if not self.ensure_connected():
             return {"success": False, "error": "MT5 is disconnected. Please ensure MT5 terminal is running on your VPS."}
 
@@ -1279,6 +1297,16 @@ class MT5LiveBroker:
                 lots=lot_size, zone=zone, expiry_minutes=expiry_minutes,
                 comment=comment
             )
+
+        # First Live Trade of the Day Confirmation Gate
+        if current_mode == "LIVE" and safety_manager:
+            if not safety_manager.is_first_trade_confirmed_today():
+                return {
+                    "success": False,
+                    "error": "First live trade of the day requires confirmation. Use /confirm_trade YES to authorize real capital execution.",
+                    "mode": "LIVE",
+                    "requires_confirmation": True
+                }
 
         if not self.ensure_connected():
             return {"success": False, "error": "MT5 is disconnected."}

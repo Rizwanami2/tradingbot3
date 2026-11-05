@@ -35,6 +35,12 @@ import signal
 from datetime import datetime, timezone
 
 try:
+    import fcntl
+    _HAS_FCNTL = True
+except ImportError:
+    _HAS_FCNTL = False
+
+try:
     from utils.logger import get_logger
     logger = get_logger("risk_engine")
 except Exception:
@@ -43,6 +49,79 @@ except Exception:
 import numpy as np
 import pandas as pd
 import yfinance as yf
+
+# ── File Locking for State Safety ──
+class _FileLock:
+    """Cross-platform advisory file lock using fcntl (Unix) with fallback to a lock file (Windows)."""
+    def __init__(self, path: str, timeout: float = 5.0):
+        self.path = path
+        self.timeout = timeout
+        self._fh = None
+
+    def __enter__(self):
+        start = time.time()
+        while True:
+            try:
+                self._fh = open(self.path, "w")
+                if _HAS_FCNTL:
+                    fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self._fh
+            except (OSError, BlockingIOError):
+                if self._fh:
+                    self._fh.close()
+                    self._fh = None
+                if time.time() - start > self.timeout:
+                    logger.warning(f"Could not acquire file lock on {self.path} within {self.timeout}s; proceeding without lock.")
+                    return None
+                time.sleep(0.1)
+        return self._fh
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self._fh:
+            try:
+                if _HAS_FCNTL:
+                    fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+            except Exception:
+                pass
+            self._fh.close()
+            self._fh = None
+
+# ── Centralized Bot Configuration (config_bot.json with env var overrides) ──
+CONFIG_BOT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config_bot.json")
+
+
+def _load_bot_config() -> dict:
+    """Loads config_bot.json; env vars take precedence over file values."""
+    cfg = {}
+    try:
+        with open(CONFIG_BOT_PATH, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception:
+        cfg = {}
+
+    risk_cfg = cfg.get("risk", {})
+    automation_cfg = cfg.get("automation", {})
+
+    return {
+        "account_balance": float(os.getenv("ACCOUNT_BALANCE", str(risk_cfg.get("account_balance", 10000.0)))),
+        "risk_pct_per_trade": float(os.getenv("RISK_PCT_PER_TRADE", str(risk_cfg.get("risk_pct_per_trade", 1.0)))),
+        "max_daily_loss_pct": float(os.getenv("MAX_DAILY_LOSS_PCT", str(risk_cfg.get("max_daily_loss_pct", 1.5)))),
+        "max_total_open_risk_pct": float(os.getenv("MAX_TOTAL_OPEN_RISK_PCT", str(risk_cfg.get("max_total_open_risk_pct", 2.5)))),
+        "max_spread_pips": float(os.getenv("MAX_SPREAD_PIPS", str(risk_cfg.get("max_spread_pips", 30.0)))),
+        "max_spread_btc_pips": float(os.getenv("MAX_SPREAD_BTC_PIPS", str(risk_cfg.get("max_spread_btc_pips", 40.0)))),
+        "max_slippage_pips": float(os.getenv("MAX_SLIPPAGE_PIPS", str(risk_cfg.get("max_slippage_pips", 3.0)))),
+        "max_slippage_gold_pips": float(os.getenv("MAX_SLIPPAGE_GOLD_PIPS", str(risk_cfg.get("max_slippage_gold_pips", 0.8)))),
+        "max_slippage_btc_pips": float(os.getenv("MAX_SLIPPAGE_BTC_PIPS", str(risk_cfg.get("max_slippage_btc_pips", 50.0)))),
+        "max_total_drawdown_pct": float(os.getenv("MAX_TOTAL_DRAWDOWN_PCT", str(risk_cfg.get("max_total_drawdown_pct", 6.0)))),
+        "min_confluence_score": int(os.getenv("MIN_CONFLUENCE_SCORE", str(risk_cfg.get("min_confluence_score", 8)))),
+        "partial_tp_pct": float(os.getenv("PARTIAL_TP_PCT", str(automation_cfg.get("partial_tp_pct", 50.0)))),
+        "be_trigger_r": float(os.getenv("BE_TRIGGER_R", str(automation_cfg.get("be_trigger_r", 0.6)))),
+        "trail_trigger_r": float(os.getenv("TRAIL_TRIGGER_R", str(automation_cfg.get("trail_trigger_r", 1.0)))),
+        "atr_trail_mult": float(os.getenv("ATR_TRAIL_MULT", str(automation_cfg.get("atr_trail_mult", 1.0)))),
+    }
+
+
+_BOT_CFG = _load_bot_config()
 
 # ── Standard Contract Specifications ──────────────────────────────────────────
 CONTRACT_SPECS = {
@@ -68,21 +147,21 @@ CONTRACT_SPECS = {
     }
 }
 
-DEFAULT_ACCOUNT_BALANCE = 10_000.0   # Standard default balance in USD
-DEFAULT_MAX_RISK_PCT = 1.0          # Max 1.0% risk per trade
-DAILY_DRAWDOWN_HALT_PCT = 2.0       # Halt new trades if daily loss reaches 2.0%
-MAX_TOTAL_DRAWDOWN_PCT = 6.0        # Portfolio halt at 6.0% drawdown
+DEFAULT_ACCOUNT_BALANCE = _BOT_CFG["account_balance"]   # Standard default balance in USD
+DEFAULT_MAX_RISK_PCT = _BOT_CFG["risk_pct_per_trade"]   # Max 1.0% risk per trade
+DAILY_DRAWDOWN_HALT_PCT = _BOT_CFG["max_daily_loss_pct"]    # Halt new trades if daily loss reaches limit
+MAX_TOTAL_DRAWDOWN_PCT = _BOT_CFG["max_total_drawdown_pct"] # Portfolio halt at drawdown limit
 
 # ── Priority 1: Safety & Multi-Layer Circuit Breaker Parameters ──
 TRADING_MODES = ("PAPER", "DEMO", "LIVE")
-DEFAULT_TRADING_MODE = "LIVE"
+DEFAULT_TRADING_MODE = "PAPER"
 MAX_CONCURRENT_POSITIONS = 2         # Max 2 concurrent open positions across Gold & BTC
-MAX_TOTAL_OPEN_RISK_PCT = 2.5        # Max 2.5% combined open risk across all positions
-DAILY_LOSS_LIMIT_PCT = 2.0           # 2% hard daily loss circuit breaker
+MAX_TOTAL_OPEN_RISK_PCT = _BOT_CFG["max_total_open_risk_pct"]  # Max combined open risk across all positions
+DAILY_LOSS_LIMIT_PCT = _BOT_CFG["max_daily_loss_pct"]          # Hard daily loss circuit breaker
 MAX_DATA_STALENESS_SECONDS = 900     # 15 minutes max quote staleness
 MAX_ALLOWED_SLIPPAGE = {
-    "GOLD": 0.80,                    # Max $0.80 fill slippage for Gold
-    "BTC": 50.00                     # Max $50.00 fill slippage for Bitcoin
+    "GOLD": _BOT_CFG["max_slippage_gold_pips"],   # Max $0.80 fill slippage for Gold
+    "BTC": _BOT_CFG["max_slippage_btc_pips"]      # Max $50.00 fill slippage for Bitcoin
 }
 MAX_ALLOWED_SPREAD = {
     "GOLD": float(os.getenv("MAX_ALLOWED_SPREAD_GOLD", str(float(os.getenv("MAX_SPREAD_GOLD_PIPS", "30.0")) * 0.10))),  # 30 pips ($3.00) max limit
@@ -95,9 +174,9 @@ AUDIT_LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trade
 class SafetyManager:
     """
     Priority 1 Institutional Risk & Safety Architecture:
-      1. Trading Modes: LIVE ONLY (real capital execution).
+      1. Trading Modes: PAPER / DEMO / LIVE (default PAPER for safety).
       2. Double Confirmation for Live Trading:
-         - LIVE_CONFIRM=CONFIRM required in .env.
+         - LIVE_CONFIRM=CONFIRM required in .env only when TRADING_MODE=live.
       3. Multi-Layer Circuit Breakers:
          - Daily loss limit (2.0% halt).
          - Max concurrent open positions (2 positions max).
@@ -120,8 +199,8 @@ class SafetyManager:
         try:
             signal.signal(signal.SIGINT, self._handle_exit_signal)
             signal.signal(signal.SIGTERM, self._handle_exit_signal)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Could not register exit signal handlers: {e}")
 
     def _handle_exit_signal(self, signum, frame):
         logger.info(f"Signal {signum} received. Persisting state to {self.state_file} on exit...")
@@ -134,14 +213,14 @@ class SafetyManager:
             tok, cid = telegram_bot.get_credentials()
             if tok and cid:
                 telegram_bot.send_message(tok, cid, text)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Telegram alert notification failed: {e}")
 
     def _load_state(self) -> dict:
         today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         default_state = {
             "trading_mode": DEFAULT_TRADING_MODE,
-            "live_mode_confirmed": True,
+            "live_mode_confirmed": False,
             "kill_switch_active": False,
             "kill_switch_reason": "",
             "daily_date": today_utc,
@@ -160,51 +239,57 @@ class SafetyManager:
             "strategy_daily_losses": {}
         }
 
+        lock_path = self.state_file + ".lock"
         # 1. Attempt loading original state file
         if os.path.exists(self.state_file):
             try:
-                with open(self.state_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if data.get("daily_date") != today_utc:
-                        data["daily_date"] = today_utc
-                        data["realized_daily_pnl"] = 0.0
-                        data["unrealized_daily_pnl"] = 0.0
-                        data["daily_circuit_breaker_tripped"] = False
-                    for k, v in default_state.items():
-                        if k not in data:
-                            data[k] = v
-                    return data
+                with _FileLock(lock_path):
+                    with open(self.state_file, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        if data.get("daily_date") != today_utc:
+                            data["daily_date"] = today_utc
+                            data["realized_daily_pnl"] = 0.0
+                            data["unrealized_daily_pnl"] = 0.0
+                            data["daily_circuit_breaker_tripped"] = False
+                        for k, v in default_state.items():
+                            if k not in data:
+                                data[k] = v
+                        return data
             except Exception as e:
                 logger.warning(f"Corrupt safety state detected in {self.state_file} ({e}). Attempting .bak recovery...")
                 if os.path.exists(self.bak_file):
                     try:
-                        with open(self.bak_file, "r", encoding="utf-8") as bf:
-                            data = json.load(bf)
-                            logger.info(f"Restored safety state from backup {self.bak_file} successfully.")
-                            # Re-save to repair original
-                            with open(self.state_file, "w", encoding="utf-8") as out_f:
-                                json.dump(data, out_f, indent=2)
-                            return data
+                        with _FileLock(lock_path):
+                            with open(self.bak_file, "r", encoding="utf-8") as bf:
+                                data = json.load(bf)
+                                logger.info(f"Restored safety state from backup {self.bak_file} successfully.")
+                                # Re-save to repair original
+                                with open(self.state_file, "w", encoding="utf-8") as out_f:
+                                    json.dump(data, out_f, indent=2)
+                                return data
                     except Exception as be:
                         logger.warning(f"Backup state also corrupted ({be}).")
                 
                 logger.warning("Initializing minimal valid safety state schema and creating backups.")
                 self._notify_telegram_alert("⚠️ *SAFETY STATE AUTO-RECOVERY*\nCorrupt safety_state.json was restored to minimal valid schema.")
                 try:
-                    with open(self.state_file, "w", encoding="utf-8") as sf:
-                        json.dump(default_state, sf, indent=2)
-                    with open(self.bak_file, "w", encoding="utf-8") as sbf:
-                        json.dump(default_state, sbf, indent=2)
-                except Exception:
-                    pass
+                    with _FileLock(lock_path):
+                        with open(self.state_file, "w", encoding="utf-8") as sf:
+                            json.dump(default_state, sf, indent=2)
+                        with open(self.bak_file, "w", encoding="utf-8") as sbf:
+                            json.dump(default_state, sbf, indent=2)
+                except Exception as e:
+                    logger.error(f"Failed to persist default safety state: {e}")
                 return default_state
 
         elif os.path.exists(self.bak_file):
             try:
-                with open(self.bak_file, "r", encoding="utf-8") as bf:
-                    data = json.load(bf)
-                    return data
-            except Exception:
+                with _FileLock(lock_path):
+                    with open(self.bak_file, "r", encoding="utf-8") as bf:
+                        data = json.load(bf)
+                        return data
+            except Exception as e:
+                logger.error(f"Failed to load safety state from backup: {e}")
                 pass
 
         return default_state
@@ -247,8 +332,9 @@ class SafetyManager:
         return True, "🔴 *LIVE TRADING MODE ACTIVE*\nReal capital execution is now active on your live MT5 account.\nFirst trade of the day will require a second one-time confirmation."
 
     def is_first_trade_confirmed_today(self) -> bool:
-        """First trade confirmation removed - auto-trade is always allowed."""
-        return True
+        """First trade of the day requires explicit confirmation before live execution."""
+        today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        return self.state.get("first_trade_confirmed_date") == today_utc
 
     def confirm_first_trade_today(self) -> tuple:
         today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -1774,6 +1860,16 @@ def calculate_lot_size(asset: str, entry_price: float, stop_loss_price: float,
     stepped_lots = math.floor(raw_lots / step) * step
     clamped_lots = max(spec["min_lot"], min(stepped_lots, spec["max_lot"]))
     clamped_lots = round(clamped_lots, 2)
+
+    # ── Margin Capping: Broker Leverage & Free Margin Guard ──
+    if broker_leverage and broker_leverage > 0 and margin_free and margin_free > 0:
+        # Required margin = (lots * price * contract_size) / leverage, with 25% safety buffer
+        margin_per_lot = (entry_price * spec["contract_size"]) / broker_leverage
+        max_lots_by_margin = (margin_free / 1.25) / margin_per_lot if margin_per_lot > 0 else spec["max_lot"]
+        max_lots_by_margin = max(spec["min_lot"], min(max_lots_by_margin, spec["max_lot"]))
+        if clamped_lots > max_lots_by_margin:
+            clamped_lots = round(max_lots_by_margin, 2)
+            clamped_lots = max(spec["min_lot"], clamped_lots)
 
     actual_risk_usd = clamped_lots * price_dist * spec["contract_size"]
     actual_risk_pct = (clamped_lots * price_dist * spec["contract_size"] / account_balance) * 100.0 if account_balance > 0 else 0.0

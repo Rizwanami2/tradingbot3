@@ -37,6 +37,22 @@ else:
 import os
 import json
 import time
+import hashlib
+import shutil
+
+try:
+    import fcntl
+    _HAS_FCNTL = True
+except ImportError:
+    _HAS_FCNTL = False
+
+try:
+    from utils.logger import get_logger
+    logger = get_logger("self_learning")
+except Exception:
+    import logging
+    logger = logging.getLogger("self_learning")
+import time
 import math
 import hashlib
 import shutil
@@ -59,6 +75,42 @@ except ImportError:
 
 MEMORY_FILE = os.path.join(os.path.dirname(__file__), "learning_memory.json")
 BACKUP_FILE = os.path.join(os.path.dirname(__file__), "learning_memory.bak")
+
+# ── File Locking for Memory Safety ──
+class _FileLock:
+    """Cross-platform advisory file lock using fcntl (Unix) with fallback to a lock file (Windows)."""
+    def __init__(self, path: str, timeout: float = 5.0):
+        self.path = path
+        self.timeout = timeout
+        self._fh = None
+
+    def __enter__(self):
+        start = time.time()
+        while True:
+            try:
+                self._fh = open(self.path, "w")
+                if _HAS_FCNTL:
+                    fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self._fh
+            except (OSError, BlockingIOError):
+                if self._fh:
+                    self._fh.close()
+                    self._fh = None
+                if time.time() - start > self.timeout:
+                    logger.warning(f"Could not acquire file lock on {self.path} within {self.timeout}s; proceeding without lock.")
+                    return None
+                time.sleep(0.1)
+        return self._fh
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self._fh:
+            try:
+                if _HAS_FCNTL:
+                    fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+            except Exception:
+                pass
+            self._fh.close()
+            self._fh = None
 
 # ==============================================================================
 # BASELINE HARD ASSET FACTOR WEIGHTS & REGIME BRAINS
@@ -139,8 +191,8 @@ DEFAULT_DISCOVERED_STRATEGIES = [
         "asset": "BOTH",
         "action": "DUAL",
         "description": "Fades retail breakout traps (Sells Bull Traps at resistance / Buys Springs at support)",
-        "empirical_win_rate": 81.2,
-        "total_trades": 32,
+        "empirical_win_rate": 0.0,
+        "total_trades": 0,
         "expected_r": 1.55,
         "sl_mult": 0.40,
         "rr_tp1": 1.40,
@@ -157,8 +209,8 @@ DEFAULT_DISCOVERED_STRATEGIES = [
         "asset": "BOTH",
         "action": "DUAL",
         "description": "Exploits high-probability 0.618-0.650 Fib equilibrium pullbacks in trending regimes",
-        "empirical_win_rate": 76.5,
-        "total_trades": 28,
+        "empirical_win_rate": 0.0,
+        "total_trades": 0,
         "expected_r": 1.80,
         "sl_mult": 0.65,
         "rr_tp1": 1.80,
@@ -175,8 +227,8 @@ DEFAULT_DISCOVERED_STRATEGIES = [
         "asset": "BOTH",
         "action": "DUAL",
         "description": "Rides high-velocity breakout candles with ADX > 25 and clean candle body expansion >=55%",
-        "empirical_win_rate": 71.8,
-        "total_trades": 22,
+        "empirical_win_rate": 0.0,
+        "total_trades": 0,
         "expected_r": 2.10,
         "sl_mult": 0.90,
         "rr_tp1": 2.20,
@@ -254,6 +306,7 @@ class HierarchicalMemoryManager:
 
     def atomic_save(self, data: Dict[str, Any]) -> bool:
         """Writes atomically via temporary file and creates auto-backup on success."""
+        lock_path = self.memory_path + ".lock"
         tmp_path = self.memory_path + ".tmp"
         try:
             data["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -373,8 +426,8 @@ class SelfLearningEngine:
                 },
                 "hyperparams": dict(DEFAULT_HYPERPARAMS),
                 "feature_stats": {
-                    "BTC": {k: {"activations": 0, "wins": 0, "losses": 0, "total_r": 0.0, "alpha": 12.0, "beta": 4.0} for k in DEFAULT_WEIGHTS},
-                    "GOLD": {k: {"activations": 0, "wins": 0, "losses": 0, "total_r": 0.0, "alpha": 12.0, "beta": 4.0} for k in DEFAULT_WEIGHTS}
+                    "BTC": {k: {"activations": 0, "wins": 0, "losses": 0, "total_r": 0.0, "alpha": 2.0, "beta": 2.0} for k in DEFAULT_WEIGHTS},
+                    "GOLD": {k: {"activations": 0, "wins": 0, "losses": 0, "total_r": 0.0, "alpha": 2.0, "beta": 2.0} for k in DEFAULT_WEIGHTS}
                 },
                 "performance": {
                     "total_trades": 0, "wins": 0, "losses": 0, "win_rate_pct": 0.0,
@@ -889,7 +942,7 @@ class SelfLearningEngine:
 
         for feat, is_active in active_features.items():
             if feat not in stats:
-                stats[feat] = {"activations": 0, "wins": 0, "losses": 0, "total_r": 0.0, "alpha": 12.0, "beta": 4.0}
+                stats[feat] = {"activations": 0, "wins": 0, "losses": 0, "total_r": 0.0, "alpha": 2.0, "beta": 2.0}
 
             if is_active:
                 stats[feat]["activations"] += 1
@@ -1268,7 +1321,7 @@ class SelfLearningEngine:
 
         for asset in ["BTC", "GOLD"]:
             self.memory["weights"][asset] = dict(DEFAULT_WEIGHTS)
-            self.memory["feature_stats"][asset] = {k: {"activations": 0, "wins": 0, "losses": 0, "total_r": 0.0, "alpha": 12.0, "beta": 4.0} for k in DEFAULT_WEIGHTS}
+            self.memory["feature_stats"][asset] = {k: {"activations": 0, "wins": 0, "losses": 0, "total_r": 0.0, "alpha": 2.0, "beta": 2.0} for k in DEFAULT_WEIGHTS}
 
         tickers = {"BTC": ("BTC-USD", "BTC"), "GOLD": ("GC=F", "GOLD")}
 

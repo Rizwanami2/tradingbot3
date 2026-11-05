@@ -184,8 +184,10 @@ class BotState:
     def reconcile_positions(self, mt5_positions: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
         Reconcile MT5 live positions with internal state.
-        Detects drift (missing/extra positions) and returns a report.
-        Does NOT modify state — returns reconciliation report for orchestrator to act on.
+        Detects drift (missing/extra positions) and auto-heals internal state:
+        - Adds MT5 positions missing from internal state
+        - Removes internal positions no longer present in MT5
+        Returns a reconciliation report.
         """
         internal = {str(p.get("ticket")): p for p in self.open_positions}
         external = {str(p.get("ticket")): p for p in mt5_positions}
@@ -197,6 +199,27 @@ class BotState:
         missing_in_mt5 = internal_tickets - external_tickets       # we have, MT5 doesn't
         matched = internal_tickets & external_tickets
 
+        # ── Auto-heal: add MT5 positions missing from internal state ──
+        for ticket in missing_in_internal:
+            pos = external[ticket]
+            self.open_positions.append({
+                "ticket": pos.get("ticket"),
+                "symbol": pos.get("symbol", ""),
+                "asset": pos.get("asset", "GOLD" if "XAU" in str(pos.get("symbol", "")) else "BTC"),
+                "action": pos.get("type", "BUY"),
+                "open_price": pos.get("price_open", 0.0),
+                "sl": pos.get("sl", 0.0),
+                "tp1": pos.get("tp", 0.0),
+                "lots": pos.get("volume", 0.0),
+                "strategy": pos.get("comment", "SCALP"),
+                "mode": "LIVE",
+                "opened_at": time.time()
+            })
+
+        # ── Auto-heal: remove internal positions no longer in MT5 ──
+        for ticket in missing_in_mt5:
+            self.open_positions = [p for p in self.open_positions if str(p.get("ticket")) != ticket]
+
         drift_detected = len(missing_in_internal) > 0 or len(missing_in_mt5) > 0
 
         report = {
@@ -207,13 +230,14 @@ class BotState:
             "missing_in_mt5": [internal[t] for t in missing_in_mt5],
             "matched_positions": [internal[t] for t in matched],
             "total_mt5": len(external),
-            "total_internal": len(internal),
+            "total_internal": len(self.open_positions),
         }
 
         if drift_detected:
             logger.warning(
-                f"Position drift detected: MT5={len(external)} vs Internal={len(internal)}, "
-                f"missing_in_internal={len(missing_in_internal)}, missing_in_mt5={len(missing_in_mt5)}"
+                f"Position drift auto-healed: MT5={len(external)} vs Internal(before)={len(internal)}, "
+                f"added={len(missing_in_internal)}, removed={len(missing_in_mt5)}, "
+                f"Internal(after)={len(self.open_positions)}"
             )
 
         return report

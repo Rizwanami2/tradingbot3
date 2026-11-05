@@ -196,6 +196,21 @@ class Orchestrator:
         bot_state.refresh_from_mt5(self.broker)
         bot_state.refresh_from_safety_manager()
 
+        # Force full position reconciliation on startup to prevent state drift
+        if self.broker and self.broker.is_connected:
+            try:
+                mt5_positions = self.broker.get_open_positions()
+                recon = bot_state.reconcile_positions(mt5_positions)
+                if recon.get("drift_detected"):
+                    logger.warning(
+                        f"Startup position drift detected: MT5={recon['total_mt5']} vs Internal={recon['total_internal']}, "
+                        f"missing_in_internal={len(recon['missing_in_internal'])}, missing_in_mt5={len(recon['missing_in_mt5'])}"
+                    )
+                else:
+                    logger.info(f"Startup position reconciliation complete: {recon['matched_count']} positions matched.")
+            except Exception as e:
+                logger.warning(f"Startup position reconciliation error: {e}")
+
         self.state = self.IDLE
         self.running = True
         logger.info("Orchestrator initialized successfully.")
