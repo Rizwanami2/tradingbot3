@@ -1,94 +1,65 @@
-# tradingbot3 - Complete Bug Fixes
+# tradingbot3 - Complete Bug Fixes & Improvements
 
 **Branch:** `fix/safety-and-bugs`  
-**Date:** 2026-11-05
+**Last Updated:** 2026-11-05
 
 ---
 
-## ✅ Fixed in this Branch
+## ✅ Completed Fixes in this Branch
 
-### 1. config_validator.py (COMPLETED)
-- **Before:** Only allowed `live` mode. Forced LIVE.
-- **After:** Properly supports `paper`, `demo`, and `live`.
-- Default is now safer (`paper`).
-- `LIVE_CONFIRM=CONFIRM` is only required when mode is actually `live`.
-- Logging now shows the real mode instead of always "LIVE".
+| File | Change |
+|------|--------|
+| `config_validator.py` | Now supports `paper` / `demo` / `live`. Safer defaults. |
+| `.gitignore` | Removed rule that blocked all README files |
+| `README.md` | Full architecture + safe setup guide added |
+| `SAFETY.md` | Mandatory pre-live checklist added |
+| `.env.example` | Stronger safety warnings + more conservative defaults |
+| `config_bot.json` | Safer risk defaults (`risk_pct=0.75`, `min_confluence=8.5`, `max_open_risk=3.0`) |
 
 ---
 
-## 🔴 Critical Fixes Still Required (Must Do Manually or Next PR)
+## 🔴 Critical Fixes Still Required
 
-### 2. risk_engine.py - Change Default Mode
-**File:** `risk_engine.py`  
-**Line ~78**
+These must be done before any live trading:
 
-**Change this:**
+### 1. risk_engine.py – Change Default Mode
+Find:
 ```python
 DEFAULT_TRADING_MODE = "LIVE"
 ```
-
-**To this:**
+Change to:
 ```python
 DEFAULT_TRADING_MODE = "PAPER"       # CRITICAL SAFETY: Never default to LIVE
 ```
 
-Also update the class docstring that currently says "Trading Modes: LIVE ONLY".
+### 2. risk_engine.py – Restore First Trade Confirmation
+The method `is_first_trade_confirmed_today()` currently always returns `True`.  
+Restore proper date-based confirmation logic for LIVE mode.
+
+### 3. self_learning.py – Remove Hardcoded Win Rates
+Delete all hardcoded optimistic performance stats (e.g. 71–81% win rates with tiny samples).  
+Start with empty stats and only learn from real closed trades.
 
 ---
 
-### 3. risk_engine.py - Restore First Trade Confirmation
-**Find this method:**
-```python
-def is_first_trade_confirmed_today(self) -> bool:
-    """First trade confirmation removed - auto-trade is always allowed."""
-    return True
+## Medium Priority Remaining Work
+
+- Split large monolithic files (`telegram_bot.py`, `mt5_executor.py`, `risk_engine.py`, `self_learning.py`)
+- Strengthen position reconciliation on startup
+- Improve error logging (reduce silent `try/except`)
+- Add unit tests for both BUY and SELL paths
+- Move remaining magic numbers into central config
+
+---
+
+## How to Use This Branch
+
+```bash
+git clone https://github.com/Rizwanami2/tradingbot3.git
+cd tradingbot3
+git checkout fix/safety-and-bugs
 ```
 
-**Replace with proper logic** that checks a date-based confirmation flag.
+Always start with `TRADING_MODE=paper`.
 
----
-
-### 4. self_learning.py - Remove Hardcoded Fake Win Rates
-Search for any lines containing:
-- `empirical_win_rate`
-- Hardcoded values like `0.812`, `0.71`, `81.2%`, `71%` etc. with small sample sizes.
-
-**Action:** Delete all hardcoded performance seeds. Initialize empty performance stats and only update from real closed trades.
-
----
-
-### 5. .gitignore
-Remove or comment this line:
-```
-README*
-```
-So documentation can exist in the repository.
-
----
-
-## Medium Priority Remaining Fixes
-
-| Priority | Issue | Recommended Action |
-|----------|-------|--------------------|
-| High | Monolithic files (telegram_bot, mt5_executor, risk_engine, self_learning) | Split into smaller modules |
-| High | Position reconciliation on restart | Strengthen `reconcile_positions()` |
-| Medium | Silent try/except | Log properly + escalate critical errors |
-| Medium | Magic numbers | Move all thresholds to central config |
-| Medium | Sell-side test coverage | Add unit tests for both BUY and SELL |
-| Low | Type hints | Add gradually |
-| Low | Global singletons | Move toward dependency injection |
-
----
-
-## Recommended Next Steps
-
-1. Apply the 3 critical code changes above (DEFAULT_TRADING_MODE, first-trade confirmation, remove hardcoded stats).
-2. Test thoroughly in **PAPER** mode.
-3. Only after stable paper performance, enable LIVE with double confirmation.
-4. Create a proper `README.md`.
-5. Gradually split the largest files.
-
----
-
-**Safety First Principle:**  
-Never run this bot in LIVE mode until the default mode is PAPER and first-trade confirmation is restored.
+See **SAFETY.md** before considering live trading.
