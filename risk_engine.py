@@ -79,6 +79,26 @@ DEFAULT_TRADING_MODE = "LIVE"
 MAX_CONCURRENT_POSITIONS = 2         # Max 2 concurrent open positions across Gold & BTC
 MAX_TOTAL_OPEN_RISK_PCT = 6.0        # Max 6.0% combined open risk across all positions
 DAILY_LOSS_LIMIT_PCT = 2.0           # 2% hard daily loss circuit breaker
+MAX_TOTAL_OPEN_RISK_PCT = 6.0        # Max 6.0% combined open risk across all positions
+
+# ── Dynamic Position Sizing: Capital-Based Max Lot Scaling ──
+# Max lots per $1000 capital (0.02 lots per $1000 = 1 lot per $50,000)
+MAX_LOTS_PER_1K_CAPITAL = 0.02
+MIN_DYNAMIC_MAX_LOT = 0.01  # Absolute minimum max lot
+
+def _calc_dynamic_max_lot(account_balance: float) -> float:
+    """
+    Calculate dynamic max lot based on account balance.
+    - At $1,000 capital: max 0.02 lots
+    - At $10,000 capital: max 0.2 lots  
+    - At $100,000 capital: max 2.0 lots
+    Formula: max_lot = max(MIN_DYNAMIC_MAX_LOT, account_balance * MAX_LOTS_PER_1K_CAPITAL / 1000)
+    Capped at CONTRACT_SPECS[asset]["max_lot"] for safety.
+    """
+    dynamic_max = max(MIN_DYNAMIC_MAX_LOT, account_balance * MAX_LOTS_PER_1K_CAPITAL / 1000.0)
+    return dynamic_max
+
+
 MAX_DATA_STALENESS_SECONDS = 900     # 15 minutes max quote staleness
 MAX_ALLOWED_SLIPPAGE = {
     "GOLD": 0.80,                    # Max $0.80 fill slippage for Gold
@@ -1688,7 +1708,12 @@ def calculate_lot_size(asset: str, entry_price: float, stop_loss_price: float,
     # Step round to lot step (0.01)
     step = spec["lot_step"]
     stepped_lots = math.floor(raw_lots / step) * step
-    clamped_lots = max(spec["min_lot"], min(stepped_lots, spec["max_lot"]))
+    
+    # Apply dynamic max lot based on account balance (prevents oversized positions on small accounts)
+    dynamic_max_lot = _calc_dynamic_max_lot(account_balance)
+    effective_max_lot = min(spec["max_lot"], dynamic_max_lot)
+    
+    clamped_lots = max(spec["min_lot"], min(stepped_lots, effective_max_lot))
     clamped_lots = round(clamped_lots, 2)
 
     # Automatically check broker leverage and free margin
